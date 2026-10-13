@@ -811,7 +811,7 @@ class TgtoDriveSync(_PluginBase):
         if not self._enabled:
             return {"success": False, "message": "插件未启用"}
         with self._lock:
-            self._pending_info = {"title": "API 手动触发"}
+            self._manual_pending = True
         self._dispatch()
         return {"success": True, "message": "已提交 STRM 同步任务"}
 
