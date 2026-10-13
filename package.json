@@ -7,6 +7,7 @@
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/refresh2.png",
     "author": "靖哥哥",
     "level": 1,
+    "v2": true,
     "history": {
       "v1.0.0": "首个版本：TransferComplete 事件触发 TgtoDrive STRM 同步，等待后刷新 Emby，支持防抖、通知、手动 API 与远程命令。"
     }
