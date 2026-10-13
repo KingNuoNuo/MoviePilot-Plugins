@@ -92,6 +92,15 @@ curl -X POST "http://10.0.0.4:12366/api/strm-sync/run" \
 # 期望响应： {"success": true, "message": "..."}
 ```
 
+## 打包产物
+
+`dist/` 目录下提供可直接使用的压缩包：
+
+| 文件 | 说明 |
+| --- | --- |
+| `MoviePilot-Plugins.zip` | 完整插件仓库结构（`package.json` + `plugins/tgtodrivesync/`），解压即可推 Git 或当市场源 |
+| `tgtodrivesync.zip` | 仅插件目录，解压后把 `tgtodrivesync/` 放进 MoviePilot 插件目录 |
+
 ## 已知边界
 
 - TgtoDrive 无 STRM 完成回调，刷新的时机靠「等待秒数」估算；若同步较慢可调大该值。
