@@ -11,19 +11,21 @@ Navidrome / Vyo / 极影视以及自定义等所有类型，宿主后续新增�
 MoviePilot 整理入库
       │  (EventType.TransferComplete)
       ▼
-[防抖合并 N 秒]
+进入待刷新队列（多次入库累积，不覆盖）
       ▼
-POST {TgtoDrive}/api/strm-sync/run   { "source": "123云盘" }
+[防抖合并 N 秒：窗口内再来就重置计时]
+      ▼
+取走整个队列 → POST {TgtoDrive}/api/strm-sync/run   { "source": "123云盘" }
       │  (Bearer OpenAPI Token)
       ▼
 等待 X 秒（TgtoDrive 的 STRM 同步为后台异步任务）
       ▼
-刷新媒体库（遍历 MoviePilot 中已配置并启用的全部媒体服务器）
+刷新媒体库（用队列里的全部条目，遍历已配置的媒体服务器）
   ├─ Emby / Jellyfin / Plex / 飞牛影视 / 绿联影视 / Navidrome / Vyo / 极影视 / 自定义 …
   ├─ 能定位到具体库的 → 单库刷新（refresh_library_by_items）
   └─ 不支持的 → 整库刷新（refresh_root_library）
       ▼
-发送通知 + 记录执行历史
+发送通知（含本次文件清单）+ 记录执行历史
 ```
 
 > ⚠️ TgtoDrive 的 `/api/strm-sync/run` 只返回「任务已开始」，官方 OpenAPI 中**没有提供
@@ -86,6 +88,17 @@ MoviePilot-Plugins/
 | 防抖秒数 | 合并短时间内的多次入库 | 30 |
 | 只刷新指定媒体服务器 | 可选。填 MoviePilot 里的服务器名称，多个用英文逗号分隔，留空=全部 | 空 |
 
+## 待刷新队列与文件显示
+
+- **队列合并**：防抖窗口（「防抖秒数」）内收到的多次入库会**累积成队列**，而不是互相覆盖；
+  到点后一次性触发 STRM 同步，并用队列里的**全部条目**去刷新媒体库（多条目会按库去重）。
+  队列上限 200 条，超出丢弃最旧的。
+- **插件页显示**：详情页顶部会显示「**【等待刷新】待刷新文件 N 个**」并逐条列出文件名；
+  若上一轮还在执行，会标注「正在刷新中」。
+- **执行历史 / 通知**：每条记录都会列出本次刷新涉及的文件清单（标题 + 年份），
+  通知里最多列 10 个，超出显示「… 其余 N 个」。
+- 上一轮还在跑时不会丢文件：新事件继续进队列，定时器到点后自动重试。
+
 ## 手动触发
 
 - **插件 API**（需带 MoviePilot 的 `API_TOKEN`）：
@@ -128,8 +141,6 @@ curl -X POST "http://10.0.0.4:12366/api/strm-sync/run" \
 - **刷新策略自动择优，无需配置**：实例有 `refresh_library_by_items()` 且能从本次入库事件定位到
   条目时，只刷新受影响的库；否则（Jellyfin / Navidrome 等不支持单库刷新的）整库刷新。
   手动触发（命令 / API）时没有具体入库条目，会全部走整库刷新。
-- **单库刷新的前提是能定位到库**：条目来自 `TransferComplete` 事件的媒体信息（标题/路径）。
-  若某实例匹配不到对应媒体库，其模块内部通常会退化为整库刷新，属正常行为。
 - **取实例的路径分代**：`MediaServerHelper` 在 v2 位于 `app.helper.mediaserver`、
   v3 位于 `app.application.mediaserver`，插件已做双路径兼容；若宿主未提供该类，
   会返回明确的错误提示，不影响 TgtoDrive 触发这一步。

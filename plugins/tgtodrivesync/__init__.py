@@ -16,7 +16,13 @@ TgtoDrive 侧依赖：
     极影视以及自定义等所有类型，宿主后续新增类型也无需改插件。
     - 自动择优：能定位到具体媒体库的（有 refresh_library_by_items）只刷新受影响的库；
       不支持单库刷新的（Jellyfin / Navidrome 等）自动整库刷新（refresh_root_library）。
+
+合并刷新：
+    防抖窗口内收到的多次入库会**累积成队列**（而不是互相覆盖），到点后一次性触发 STRM
+    同步，并用队列里的**全部条目**去刷新媒体库；待刷新队列与每次刷新的文件清单会在插件
+    详情页和执行/通知中列出。
 """
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -44,6 +50,9 @@ STRM_SOURCES = [
 # TgtoDrive 在「同一来源已有同步任务」时会拒绝新请求，这类响应不是错误。
 # 命中这些关键词时按「同步进行中」处理，而非失败。
 TRIGGER_RUNNING_HINTS = ("正在执行", "执行中", "稍后再试", "处理中", "任务已存在")
+
+# 合并队列最大长度（超出时丢弃最旧的，避免极端情况下无限增长）
+QUEUE_MAX = 200
 
 
 def _load_mediaserver_helper():
@@ -78,7 +87,7 @@ class TgtoDriveSync(_PluginBase):
     # 插件图标（使用官方图标库中的通用刷新图标）
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/refresh2.png"
     # 插件版本
-    plugin_version = "1.5.1"
+    plugin_version = "1.6.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -107,11 +116,19 @@ class TgtoDriveSync(_PluginBase):
     _lock = threading.Lock()
     _timer: Optional[threading.Timer] = None
     _running: bool = False
-    _pending_info: dict = {}
+    # 待刷新队列：防抖窗口内的多次入库合并到这里，一次性刷新
+    _pending_items: List[dict] = []
+    # 是否有手动触发请求（远程命令 / 插件 API）
+    _manual_pending: bool = False
 
     def init_plugin(self, config: dict = None):
         """加载配置并初始化运行状态。"""
         self.stop_service()
+
+        with self._lock:
+            self._pending_items = []
+            self._manual_pending = False
+            self._running = False
 
         self._enabled = False
         self._tgtodrive_url = ""
@@ -364,16 +381,47 @@ class TgtoDriveSync(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        """展示最近的执行历史。"""
+        """展示当前待刷新队列与最近的执行历史。"""
+        rows: List[dict] = []
+
+        # 顶部：当前待刷新队列（防抖窗口内已收下、还没刷新出去的文件）
+        with self._lock:
+            pending = list(self._pending_items)
+            running = self._running
+        if pending or running:
+            pending_lines = "\n".join(
+                f"{idx}. {self._item_label(i)}" for idx, i in enumerate(pending, 1)
+            )
+            header = "正在刷新中" if running and not pending else "等待刷新"
+            text = (
+                f"【{header}】待刷新文件 {len(pending)} 个"
+                + ("（另有任务正在执行）" if running else "")
+                + (f"\n{pending_lines}" if pending_lines else "")
+            )
+            rows.append({
+                "component": "VRow",
+                "content": [
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12},
+                        "content": [
+                            {
+                                "component": "VAlert",
+                                "props": {"type": "info", "variant": "tonal", "text": text},
+                            }
+                        ],
+                    }
+                ],
+            })
+
         history: List[dict] = self.get_data("history") or []
         if not history:
-            return [
-                {
-                    "component": "VAlert",
-                    "props": {"type": "info", "text": "暂无执行记录。"},
-                }
-            ]
-        rows = []
+            rows.append({
+                "component": "VAlert",
+                "props": {"type": "info", "text": "暂无执行记录。"},
+            })
+            return rows
+
         for item in history[-20:][::-1]:
             targets = item.get("targets")
             if targets:
@@ -389,6 +437,13 @@ class TgtoDriveSync(_PluginBase):
                 f"[{item.get('time')}] 来源={item.get('source')} "
                 f"触发={self._trigger_state_label(item)} {stat}"
             )
+            files = item.get("files") or []
+            if files:
+                line += f"\n本次刷新文件 {len(files)} 个："
+                for f in files[:10]:
+                    line += f"\n  · {f.get('label')}"
+                if len(files) > 10:
+                    line += f"\n  … 其余 {len(files) - 10} 个"
             line += f"\n{item.get('message', '')}"
             rows.append({
                 "component": "VRow",
@@ -422,21 +477,24 @@ class TgtoDriveSync(_PluginBase):
         event_data = event.event_data or {}
         transferinfo = event_data.get("transferinfo")
         mediainfo = event_data.get("mediainfo")
+        item = {
+            "title": getattr(mediainfo, "title", "") if mediainfo else "",
+            "year": getattr(mediainfo, "year", "") if mediainfo else "",
+            "target_path": getattr(transferinfo, "target_path", "") if transferinfo else "",
+            "tmdbid": getattr(mediainfo, "tmdb_id", "") if mediainfo else "",
+            "type": getattr(mediainfo, "type", "") if mediainfo else "",
+        }
         with self._lock:
-            self._pending_info = {
-                "title": getattr(mediainfo, "title", "") if mediainfo else "",
-                "year": getattr(mediainfo, "year", "") if mediainfo else "",
-                "target_path": getattr(transferinfo, "target_path", "") if transferinfo else "",
-                "tmdbid": getattr(mediainfo, "tmdb_id", "") if mediainfo else "",
-                "type": getattr(mediainfo, "type", "") if mediainfo else "",
-            }
-            if self._timer:
-                self._timer.cancel()
-            delay = max(self._debounce_seconds, 1)
-            self._timer = threading.Timer(delay, self._dispatch)
-            self._timer.daemon = True
-            self._timer.start()
-        logger.info(f"收到整理完成事件，{max(self._debounce_seconds, 1)} 秒后触发 STRM 同步（防抖合并）")
+            # 累积到队列而不是覆盖：防抖窗口内的多次入库会被合并成一次刷新
+            self._pending_items.append(item)
+            if len(self._pending_items) > QUEUE_MAX:
+                self._pending_items = self._pending_items[-QUEUE_MAX:]
+            queued = len(self._pending_items)
+            self._arm_timer(self._debounce_seconds)
+        logger.info(
+            f"收到整理完成事件：{self._item_label(item)}，"
+            f"待刷新队列共 {queued} 项，{max(self._debounce_seconds, 1)} 秒后合并刷新"
+        )
 
     @eventmanager.register(EventType.PluginAction)
     def on_plugin_action(self, event: Event):
@@ -454,23 +512,50 @@ class TgtoDriveSync(_PluginBase):
             )
             return
         with self._lock:
-            self._pending_info = {"title": "手动触发"}
+            self._manual_pending = True
         self._dispatch()
 
+    def _arm_timer(self, delay: int):
+        """重置防抖定时器（调用方需自行持有 self._lock 或确保无并发）。"""
+        if self._timer:
+            self._timer.cancel()
+        self._timer = threading.Timer(max(delay, 1), self._dispatch)
+        self._timer.daemon = True
+        self._timer.start()
+
     def _dispatch(self):
-        """把同步流程投递到后台线程执行，避免阻塞事件总线。"""
+        """把队列里的待刷新文件投递到后台线程执行，避免阻塞事件总线。"""
+        with self._lock:
+            if self._running:
+                # 上一轮还在跑：保留队列，稍后重试（不丢文件）
+                logger.info("已有刷新任务在执行，待刷新文件保留在队列，稍后重试")
+                self._arm_timer(self._debounce_seconds)
+                return
+            if not self._pending_items and not self._manual_pending:
+                return
+            items = list(self._pending_items)
+            self._pending_items = []
+            manual = self._manual_pending
+            self._manual_pending = False
+            self._running = True
         if self._executor is None:
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tgtodrive_sync")
-        self._executor.submit(self._run_pipeline)
+        self._executor.submit(self._run_pipeline, items, manual)
 
-    def _run_pipeline(self):
+    @staticmethod
+    def _item_label(item: dict) -> str:
+        """把一条入库信息格式化成可读标签。"""
+        title = item.get("title") or ""
+        year = item.get("year") or ""
+        path = item.get("target_path") or ""
+        if title:
+            return f"{title}{f' ({year})' if year else ''}"
+        if path:
+            return os.path.basename(str(path).rstrip("/\\"))
+        return "未知条目"
+
+    def _run_pipeline(self, items: List[dict], manual: bool = False):
         """执行完整流程：触发 STRM 同步 → 等待 → 刷新媒体服务器 → 通知。"""
-        with self._lock:
-            info = getattr(self, "_pending_info", {}) or {}
-            if self._running:
-                logger.info("已有 STRM 同步任务在执行，本次触发跳过")
-                return
-            self._running = True
         try:
             record = {
                 "time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -478,7 +563,16 @@ class TgtoDriveSync(_PluginBase):
                 "trigger_ok": False,
                 "refresh_ok": False,
                 "message": "",
+                "manual": manual,
+                "files": [
+                    {"label": self._item_label(i), "path": i.get("target_path") or ""}
+                    for i in items
+                ],
             }
+            if items:
+                logger.info(f"本次合并刷新共 {len(items)} 个文件："
+                            f"{ '、'.join(self._item_label(i) for i in items[:5]) }"
+                            f"{' 等' if len(items) > 5 else ''}")
 
             # 1. 触发 TgtoDrive 生成 STRM
             state, trigger_msg = self._trigger_strm_sync()
@@ -502,8 +596,8 @@ class TgtoDriveSync(_PluginBase):
                     elif retry_state == "running":
                         record["message"] += "\n（仍被占用，按最佳努力刷新）"
 
-                # 3. 刷新全部已配置的媒体服务器
-                targets = self._refresh_media_servers(info)
+                # 3. 刷新全部已配置的媒体服务器（用队列里的全部条目）
+                targets = self._refresh_media_servers(items)
                 record["targets"] = [{"name": n, "ok": o, "msg": m} for n, o, m in targets]
                 record["refresh_ok"] = any(o for _, o, _ in targets)
                 for name, ok, msg in targets:
@@ -512,7 +606,7 @@ class TgtoDriveSync(_PluginBase):
 
             # 4. 发送通知
             if self._notify:
-                self._send_notice(record, info)
+                self._send_notice(record)
 
             self._save_history(record)
         except Exception as err:  # noqa: BLE001
@@ -571,7 +665,7 @@ class TgtoDriveSync(_PluginBase):
         except requests.RequestException as err:
             return "failed", f"请求异常：{err}"
 
-    def _refresh_media_servers(self, info: dict) -> List[Tuple[str, bool, str]]:
+    def _refresh_media_servers(self, items: List[dict]) -> List[Tuple[str, bool, str]]:
         """刷新 MoviePilot 中已配置并启用的全部媒体服务器，返回 [(名称, 是否成功, 说明)]。"""
         helper_cls = _load_mediaserver_helper()
         if helper_cls is None:
@@ -597,7 +691,7 @@ class TgtoDriveSync(_PluginBase):
                 targets.append((label, False, "实例不可用"))
                 continue
             try:
-                ok, msg = self._refresh_one(instance, info)
+                ok, msg = self._refresh_one(instance, items)
                 targets.append((label, ok, msg))
             except Exception as err:  # noqa: BLE001
                 targets.append((label, False, f"刷新异常：{err}"))
@@ -606,11 +700,12 @@ class TgtoDriveSync(_PluginBase):
             return [("媒体服务器", False, f"没有匹配的媒体服务器（已指定：{self._server_names}）")]
         return targets
 
-    def _refresh_one(self, instance: Any, info: dict) -> Tuple[bool, str]:
+    def _refresh_one(self, instance: Any, items: List[dict]) -> Tuple[bool, str]:
         """刷新单个媒体服务器实例。
 
         策略自动择优：实例支持单库刷新（refresh_library_by_items）且能定位到本次入库条目时，
-        只刷新受影响的媒体库；不支持或无法定位条目时整库刷新。
+        只刷新受影响的媒体库（队列里的多个条目会一并传入，由模块内部按库去重）；
+        不支持或无法定位条目时整库刷新。
         """
         if hasattr(instance, "is_configured"):
             try:
@@ -621,13 +716,14 @@ class TgtoDriveSync(_PluginBase):
 
         # 1. 单库刷新（按入库条目定位所在媒体库）
         if hasattr(instance, "refresh_library_by_items"):
-            items = self._build_refresh_items(info)
-            if items:
+            refresh_items = self._build_refresh_items(items)
+            if refresh_items:
                 try:
-                    result = instance.refresh_library_by_items(items)
+                    result = instance.refresh_library_by_items(refresh_items)
                     if result is not None:
-                        title = info.get("title") or "-"
-                        return bool(result), f"已单库刷新（条目：{title}）"
+                        names = "、".join(i["label"] for i in items[:3] if i.get("label"))
+                        more = f" 等 {len(items)} 项" if len(items) > 3 else ""
+                        return bool(result), f"已单库刷新（{names}{more}）"
                 except Exception as err:  # noqa: BLE001
                     logger.warning(f"单库刷新失败，回退整库刷新：{err}")
 
@@ -640,35 +736,51 @@ class TgtoDriveSync(_PluginBase):
         return bool(result), "已请求整库刷新"
 
     @staticmethod
-    def _build_refresh_items(info: dict) -> Optional[list]:
-        """按入库信息构造媒体库刷新条目；无法构造时返回 None（调用方回退整库）。"""
-        if not info.get("title"):
+    def _build_refresh_items(items: List[dict]) -> Optional[list]:
+        """把队列里的入库信息构造成媒体库刷新条目；无法构造时返回 None（调用方回退整库）。"""
+        usable = [i for i in (items or []) if i.get("title") or i.get("target_path")]
+        if not usable:
             return None
         try:
             from app.schemas import RefreshMediaItem
         except Exception:  # noqa: BLE001
             return None
-        try:
-            return [
-                RefreshMediaItem(
-                    title=info.get("title"),
-                    year=info.get("year") or None,
-                    type=info.get("type") or None,
-                    category=None,
-                    target_path=info.get("target_path") or None,
+        built = []
+        for item in usable:
+            try:
+                built.append(
+                    RefreshMediaItem(
+                        title=item.get("title") or None,
+                        year=item.get("year") or None,
+                        type=item.get("type") or None,
+                        category=None,
+                        target_path=item.get("target_path") or None,
+                    )
                 )
-            ]
-        except Exception:  # noqa: BLE001
-            return None
+            except Exception:  # noqa: BLE001
+                continue
+        return built or None
 
-    def _send_notice(self, record: dict, info: dict):
+    def _send_notice(self, record: dict):
         """发送结果通知。"""
-        title = info.get("title") or ""
-        title_part = f"（{title}）" if title else ""
+        files = record.get("files") or []
+        if files:
+            names = "、".join(f.get("label") or "" for f in files[:3] if f.get("label"))
+            title_part = f"（{names}{f' 等 {len(files)} 项' if len(files) > 3 else ''}）"
+        elif record.get("manual"):
+            title_part = "（手动触发）"
+        else:
+            title_part = ""
         text = (
             f"来源：{record.get('source')}\n"
             f"STRM 触发：{self._trigger_state_label(record)}\n"
         )
+        if files:
+            text += f"待刷新文件 {len(files)} 个：\n"
+            for f in files[:10]:
+                text += f"  · {f.get('label')}\n"
+            if len(files) > 10:
+                text += f"  … 其余 {len(files) - 10} 个\n"
         targets = record.get("targets") or []
         if targets:
             for target in targets:
