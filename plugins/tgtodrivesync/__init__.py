@@ -14,18 +14,15 @@ Emby 刷新侧：
     优先复用 MoviePilot 已配置的媒体服务器（settings.MEDIASERVER）；
     也可在插件中单独填写 Emby 地址与 API Key 以指向其它 Emby 实例。
 
-飞牛影视（fnOS trimemedia）刷新侧：
-    走飞牛影视网页接口，需要 authx 签名（依赖 secret 与 api_key）。
-    该接口非官方开放 API，为抓包所得，飞牛版本升级后可能失效。
+飞牛影视刷新侧：
+    直接依赖 MoviePilot 内置的飞牛影视模块（app.modules.trimemedia）。
+    需先在 MoviePilot「设定 → 媒体服务器」中添加飞牛影视，插件复用该配置，
+    通过 MediaServerHelper 拿到实例后调用其刷新能力。
 """
-import hashlib
-import json
-import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlencode
 
 import requests
 
@@ -47,135 +44,31 @@ STRM_SOURCES = [
     "115网盘分享",
 ]
 
+# 飞牛影视在 MoviePilot 媒体服务器中的类型标识
+TRIMEMEDIA_TYPE = "trimemedia"
 
-class FnvClient:
-    """飞牛影视（fnOS trimemedia）客户端。
 
-    使用飞牛影视网页接口，每个请求都需携带 authx 签名：
-        authx = nonce=<6位随机>&timestamp=<毫秒>&sign=<md5>
-        sign  = md5("_".join([secret, path, nonce, timestamp, body_hash, api_key]))
-        body_hash：GET 且有 params 时，对排序后的 params urlencode 再 md5；
-                   其余情况对请求体 JSON（键排序、紧凑分隔符）再 md5。
-    """
-
-    API_LOGIN = "/v/api/v1/login"
-    API_MDB_LIST = "/v/api/v1/mdb/list"
-    API_MDB_SCAN = "/v/api/v1/mdb/scan/{}"
-    API_MDB_SCAN_ALL = "/v/api/v1/mdb/scanall"
-    API_TASK_STOP = "/v/api/v1/task/stop"
-    APP_NAME = "trimemedia-web"
-
-    def __init__(
-        self,
-        base_url: str,
-        username: str = "",
-        password: str = "",
-        secret: str = "",
-        api_key: str = "",
-        token: str = "",
-    ):
-        self.base_url = (base_url or "").rstrip("/")
-        self.username = username
-        self.password = password
-        self.secret = secret
-        self.api_key = api_key
-        self.token = token or ""
-        self.session = requests.Session()
-
-    @staticmethod
-    def _md5(text: str) -> str:
-        """计算小写 MD5。"""
-        return hashlib.md5(text.encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _serialize(data: Any) -> str:
-        """把请求体序列化为紧凑 JSON 字符串（键排序）。"""
-        if isinstance(data, dict):
-            return json.dumps(data, sort_keys=True, separators=(",", ":"))
-        if isinstance(data, str):
-            return data
-        return ""
-
-    def _authx(self, method: str, path: str, params: Optional[dict] = None,
-               data: Any = None) -> str:
-        """生成 authx 签名字符串。"""
-        nonce = str(random.randint(100000, 999999))
-        timestamp = str(int(time.time() * 1000))
-        if method.lower() == "get" and params:
-            raw = urlencode(sorted(params.items()))
-        else:
-            raw = self._serialize(data)
-        body_hash = self._md5(raw)
-        sign = self._md5(
-            "_".join([self.secret, path, nonce, timestamp, body_hash, self.api_key])
-        )
-        return f"nonce={nonce}&timestamp={timestamp}&sign={sign}"
-
-    def _request(self, method: str, path: str, params: Optional[dict] = None,
-                 data: Any = None) -> dict:
-        """发送带签名的请求并返回 JSON。"""
-        url = f"{self.base_url}{path}"
-        headers = {
-            "Content-Type": "application/json",
-            "authx": self._authx(method, path, params, data),
-        }
-        if self.token:
-            headers["Authorization"] = self.token
-        resp = self.session.request(
-            method,
-            url,
-            headers=headers,
-            params=params,
-            json=data if data is not None else {},
-            timeout=(5, 30),
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def login(self) -> bool:
-        """登录飞牛影视并保存 token。"""
-        payload = {
-            "username": self.username,
-            "password": self.password,
-            "app_name": self.APP_NAME,
-        }
-        result = self._request("post", self.API_LOGIN, data=payload)
-        token = (result or {}).get("data", {}).get("token")
-        if token:
-            self.token = token
-            return True
-        return False
-
-    def list_libraries(self) -> List[dict]:
-        """获取媒体库列表。"""
-        result = self._request("get", self.API_MDB_LIST)
-        return (result or {}).get("data") or []
-
-    def find_library_id(self, name: str) -> Optional[str]:
-        """按名称查找媒体库 guid。"""
-        for library in self.list_libraries():
-            if library.get("name") == name:
-                return library.get("guid")
+def _load_mediaserver_helper():
+    """按 MoviePilot 版本加载 MediaServerHelper（v2 在 app.helper，v3 在 app.application）。"""
+    try:
+        from app.helper.mediaserver import MediaServerHelper  # MoviePilot v2
+        return MediaServerHelper
+    except ImportError:
+        pass
+    try:
+        from app.application.mediaserver import MediaServerHelper  # MoviePilot v3
+        return MediaServerHelper
+    except ImportError:
         return None
 
-    def scan_all(self) -> Optional[int]:
-        """触发扫描全部媒体库，返回业务 code。"""
-        result = self._request("post", self.API_MDB_SCAN_ALL, data={})
-        return (result or {}).get("code")
 
-    def scan_library(self, library_id: str) -> Optional[int]:
-        """触发扫描指定媒体库，返回业务 code。"""
-        result = self._request("post", self.API_MDB_SCAN.format(library_id), data={})
-        return (result or {}).get("code")
-
-    def stop_task(self, library_id: str) -> Optional[int]:
-        """停止指定媒体库的刮削任务。"""
-        result = self._request(
-            "post",
-            self.API_TASK_STOP,
-            data={"guid": library_id, "type": "TaskItemScrap"},
-        )
-        return (result or {}).get("code")
+def _is_trimemedia(service_info: Any) -> bool:
+    """判断一个媒体服务器实例是否为飞牛影视（兼容字符串与枚举两种 type）。"""
+    service_type = getattr(service_info, "type", None)
+    if service_type is None:
+        return False
+    value = getattr(service_type, "value", service_type)
+    return str(value).lower() == TRIMEMEDIA_TYPE
 
 
 class TgtoDriveSync(_PluginBase):
@@ -188,7 +81,7 @@ class TgtoDriveSync(_PluginBase):
     # 插件图标（使用官方图标库中的通用刷新图标）
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/refresh2.png"
     # 插件版本
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -214,16 +107,11 @@ class TgtoDriveSync(_PluginBase):
     _emby_url: str = ""
     _emby_api_key: str = ""
 
-    # ---- 飞牛影视 ----
+    # ---- 飞牛影视（复用 MoviePilot 内置模块）----
     _fn_enabled: bool = False
-    _fn_url: str = ""
-    _fn_username: str = ""
-    _fn_password: str = ""
-    _fn_secret: str = ""
-    _fn_api_key: str = ""
-    _fn_token: str = ""
     _fn_scan_mode: str = "all"
     _fn_library_name: str = ""
+    _fn_server_name: str = ""
 
     # ---- 运行时状态 ----
     _executor: Optional[ThreadPoolExecutor] = None
@@ -247,14 +135,9 @@ class TgtoDriveSync(_PluginBase):
         self._emby_url = ""
         self._emby_api_key = ""
         self._fn_enabled = False
-        self._fn_url = ""
-        self._fn_username = ""
-        self._fn_password = ""
-        self._fn_secret = ""
-        self._fn_api_key = ""
-        self._fn_token = ""
         self._fn_scan_mode = "all"
         self._fn_library_name = ""
+        self._fn_server_name = ""
 
         if config:
             self._enabled = bool(config.get("enabled"))
@@ -268,14 +151,9 @@ class TgtoDriveSync(_PluginBase):
             self._emby_url = str(config.get("emby_url") or "").strip().rstrip("/")
             self._emby_api_key = str(config.get("emby_api_key") or "").strip()
             self._fn_enabled = bool(config.get("fn_enabled"))
-            self._fn_url = str(config.get("fn_url") or "").strip().rstrip("/")
-            self._fn_username = str(config.get("fn_username") or "").strip()
-            self._fn_password = str(config.get("fn_password") or "").strip()
-            self._fn_secret = str(config.get("fn_secret") or "").strip()
-            self._fn_api_key = str(config.get("fn_api_key") or "").strip()
-            self._fn_token = str(config.get("fn_token") or "").strip()
             self._fn_scan_mode = str(config.get("fn_scan_mode") or "all").strip()
             self._fn_library_name = str(config.get("fn_library_name") or "").strip()
+            self._fn_server_name = str(config.get("fn_server_name") or "").strip()
 
         if self._source not in STRM_SOURCES:
             self._source = "123云盘"
@@ -502,8 +380,8 @@ class TgtoDriveSync(_PluginBase):
                                      "props": {"model": "fn_scan_mode",
                                                "label": "飞牛扫描范围",
                                                "items": [
-                                                   {"title": "扫描全部媒体库", "value": "all"},
-                                                   {"title": "仅扫描指定媒体库", "value": "library"},
+                                                   {"title": "刷新全部媒体库", "value": "all"},
+                                                   {"title": "仅刷新指定媒体库", "value": "library"},
                                                ]}}
                                 ],
                             },
@@ -517,85 +395,21 @@ class TgtoDriveSync(_PluginBase):
                                 "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {"component": "VTextField",
-                                     "props": {"model": "fn_url",
-                                               "label": "飞牛影视地址",
-                                               "placeholder": "http://10.0.0.4:5666"}}
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {"component": "VTextField",
                                      "props": {"model": "fn_library_name",
                                                "label": "指定媒体库名称（扫描范围选“仅指定”时填写）",
                                                "placeholder": "电影库"}}
                                 ],
                             },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {"component": "VTextField",
-                                     "props": {"model": "fn_username",
-                                               "label": "飞牛用户名"}}
+                                     "props": {"model": "fn_server_name",
+                                               "label": "指定飞牛媒体服务器名称（可选，多个飞牛时用）",
+                                               "placeholder": "留空则刷新所有飞牛服务器"}}
                                 ],
                             },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {"component": "VTextField",
-                                     "props": {"model": "fn_password",
-                                               "label": "飞牛密码",
-                                               "type": "password"}}
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {"component": "VTextField",
-                                     "props": {"model": "fn_secret",
-                                               "label": "飞牛 secret（authx 签名用）",
-                                               "type": "password"}}
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {"component": "VTextField",
-                                     "props": {"model": "fn_api_key",
-                                               "label": "飞牛 api_key（authx 签名用）",
-                                               "type": "password"}}
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {"component": "VTextField",
-                                     "props": {"model": "fn_token",
-                                               "label": "飞牛 token（可选，填了免登录；开了两步验证时用这个）",
-                                               "type": "password"}}
-                                ],
-                            }
                         ],
                     },
                     {
@@ -607,14 +421,12 @@ class TgtoDriveSync(_PluginBase):
                                 "content": [
                                     {"component": "VAlert",
                                      "props": {
-                                         "type": "warning",
+                                         "type": "info",
                                          "variant": "tonal",
                                          "text": (
-                                             "飞牛影视没有官方开放 API，插件走的是其网页接口（需 authx 签名，"
-                                             "依赖 secret 与 api_key），飞牛升级后可能失效。secret / api_key 获取："
-                                             "浏览器登录飞牛影视后台 → 查看网页源代码 → 打开其中的 .js 文件 → "
-                                             "搜索 ,s,l,c,o,e].join(\"_\") 左边引号内为 secret；"
-                                             "搜索 ${Ld}/sys/progressThumb 右边为 api_key。"
+                                             "飞牛刷新直接依赖 MoviePilot 内置的飞牛影视模块，"
+                                             "请先在「设定 → 媒体服务器」中添加飞牛影视（需管理员账号，"
+                                             "非管理员无法触发扫描）。插件复用该配置，无需单独填地址与密钥。"
                                          ),
                                      }}
                                 ],
@@ -657,13 +469,8 @@ class TgtoDriveSync(_PluginBase):
             "emby_api_key": "",
             "fn_enabled": False,
             "fn_scan_mode": "all",
-            "fn_url": "",
             "fn_library_name": "",
-            "fn_username": "",
-            "fn_password": "",
-            "fn_secret": "",
-            "fn_api_key": "",
-            "fn_token": "",
+            "fn_server_name": "",
         }
 
     def get_page(self) -> List[dict]:
@@ -884,49 +691,62 @@ class TgtoDriveSync(_PluginBase):
             return False, f"调用 MoviePilot Emby 模块异常：{err}"
 
     def _refresh_fnos(self) -> Tuple[bool, str]:
-        """刷新飞牛影视媒体库。"""
-        if not self._fn_url:
-            return False, "飞牛影视地址未配置"
-        if not self._fn_secret or not self._fn_api_key:
-            return False, "飞牛 secret / api_key 未配置（authx 签名必需）"
+        """刷新飞牛影视媒体库（复用 MoviePilot 内置的飞牛影视模块）。"""
+        helper_cls = _load_mediaserver_helper()
+        if helper_cls is None:
+            return False, "当前 MoviePilot 版本未提供 MediaServerHelper，无法刷新飞牛影视"
 
-        client = FnvClient(
-            base_url=self._fn_url,
-            username=self._fn_username,
-            password=self._fn_password,
-            secret=self._fn_secret,
-            api_key=self._fn_api_key,
-            token=self._fn_token,
-        )
         try:
-            # 没有现成 token 时用用户名密码登录
-            if not client.token:
-                if not (self._fn_username and self._fn_password):
-                    return False, "未填飞牛 token，也未填用户名/密码，无法认证"
-                if not client.login():
-                    return False, "飞牛登录失败，请检查用户名/密码"
-
-            if self._fn_scan_mode == "library":
-                if not self._fn_library_name:
-                    return False, "扫描范围选了「仅指定媒体库」但未填写媒体库名称"
-                library_id = client.find_library_id(self._fn_library_name)
-                if not library_id:
-                    return False, f"未找到媒体库「{self._fn_library_name}」"
-                code = client.scan_library(library_id)
-                label = f"媒体库「{self._fn_library_name}」"
-            else:
-                code = client.scan_all()
-                label = "全部媒体库"
-
-            if code == 0:
-                return True, f"已触发扫描{label}"
-            if code == -14:
-                return True, f"{label}已有扫描任务在执行"
-            return False, f"飞牛返回 code={code}"
-        except requests.RequestException as err:
-            return False, f"飞牛请求异常：{err}"
+            services = helper_cls().get_services() or {}
         except Exception as err:  # noqa: BLE001
-            return False, f"飞牛刷新异常：{err}"
+            return False, f"读取 MoviePilot 媒体服务器失败：{err}"
+
+        fnos = [(name, info) for name, info in services.items() if _is_trimemedia(info)]
+        if not fnos:
+            return False, "MoviePilot 未配置飞牛影视媒体服务器（设定 → 媒体服务器）"
+        if self._fn_server_name:
+            fnos = [(name, info) for name, info in fnos if name == self._fn_server_name]
+            if not fnos:
+                return False, f"未找到名为「{self._fn_server_name}」的飞牛媒体服务器"
+
+        results: List[str] = []
+        any_ok = False
+        for name, service_info in fnos:
+            instance = getattr(service_info, "instance", None)
+            if instance is None:
+                results.append(f"{name}: 实例不可用")
+                continue
+            try:
+                if hasattr(instance, "is_configured") and not instance.is_configured():
+                    results.append(f"{name}: 未配置或未启用")
+                    continue
+
+                if self._fn_scan_mode == "library":
+                    if not self._fn_library_name:
+                        results.append(f"{name}: 未填写媒体库名称")
+                        continue
+                    api = getattr(instance, "api", None)
+                    mdb_list = api.mdb_list() if api else None
+                    target = next(
+                        (m for m in (mdb_list or []) if getattr(m, "name", None) == self._fn_library_name),
+                        None,
+                    )
+                    if target is None:
+                        results.append(f"{name}: 未找到媒体库「{self._fn_library_name}」")
+                        continue
+                    # 先探测运行中任务，避免误报 -14 Task duplicate
+                    api.task_running()
+                    ok = bool(api.mdb_scan(target))
+                    results.append(f"{name}/{self._fn_library_name}: {'已触发' if ok else '触发失败'}")
+                    any_ok = any_ok or ok
+                else:
+                    ok = bool(instance.refresh_root_library())
+                    results.append(f"{name}: {'已触发全库刷新' if ok else '触发失败'}")
+                    any_ok = any_ok or ok
+            except Exception as err:  # noqa: BLE001
+                results.append(f"{name}: 异常 {err}")
+
+        return any_ok, "；".join(results) if results else "无可用飞牛服务器"
 
     def _send_notice(self, record: dict, info: dict):
         """发送结果通知。"""
