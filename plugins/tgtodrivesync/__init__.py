@@ -10,9 +10,10 @@ TgtoDrive 侧依赖：
     Header: Authorization: Bearer <OpenAPI Token>
     Body:   {"source": "123云盘"}
 
-Emby 刷新侧：
+Emby / Jellyfin 刷新侧：
     优先复用 MoviePilot 已配置的媒体服务器（settings.MEDIASERVER）；
-    也可在插件中单独填写 Emby 地址与 API Key 以指向其它 Emby 实例。
+    也可在插件中单独填写地址与 API Key 以指向其它实例。
+    Jellyfin 仅支持整库刷新（MoviePilot 的 Jellyfin 模块未提供按条目刷新）。
 
 飞牛影视刷新侧：
     直接依赖 MoviePilot 内置的飞牛影视模块（app.modules.trimemedia）。
@@ -77,11 +78,11 @@ class TgtoDriveSync(_PluginBase):
     # 插件名称
     plugin_name = "TgtoDrive STRM 同步"
     # 插件描述
-    plugin_desc = "整理入库后自动触发 TgtoDrive 生成网盘 STRM，完成后刷新 Emby / 飞牛影视媒体库。"
+    plugin_desc = "整理入库后自动触发 TgtoDrive 生成网盘 STRM，完成后刷新 Emby / Jellyfin / 飞牛影视媒体库。"
     # 插件图标（使用官方图标库中的通用刷新图标）
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/refresh2.png"
     # 插件版本
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -102,10 +103,12 @@ class TgtoDriveSync(_PluginBase):
     _debounce_seconds: int = 30
     _notify: bool = True
 
-    # ---- Emby ----
+    # ---- Emby / Jellyfin ----
     _refresh_mode: str = "all"
     _emby_url: str = ""
     _emby_api_key: str = ""
+    _jf_url: str = ""
+    _jf_api_key: str = ""
 
     # ---- 飞牛影视（复用 MoviePilot 内置模块）----
     _fn_enabled: bool = False
@@ -134,6 +137,8 @@ class TgtoDriveSync(_PluginBase):
         self._refresh_mode = "all"
         self._emby_url = ""
         self._emby_api_key = ""
+        self._jf_url = ""
+        self._jf_api_key = ""
         self._fn_enabled = False
         self._fn_scan_mode = "all"
         self._fn_library_name = ""
@@ -150,6 +155,8 @@ class TgtoDriveSync(_PluginBase):
             self._refresh_mode = str(config.get("refresh_mode") or "all").strip()
             self._emby_url = str(config.get("emby_url") or "").strip().rstrip("/")
             self._emby_api_key = str(config.get("emby_api_key") or "").strip()
+            self._jf_url = str(config.get("jf_url") or "").strip().rstrip("/")
+            self._jf_api_key = str(config.get("jf_api_key") or "").strip()
             self._fn_enabled = bool(config.get("fn_enabled"))
             self._fn_scan_mode = str(config.get("fn_scan_mode") or "all").strip()
             self._fn_library_name = str(config.get("fn_library_name") or "").strip()
@@ -356,6 +363,31 @@ class TgtoDriveSync(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {"component": "VTextField",
+                                     "props": {"model": "jf_url",
+                                               "label": "Jellyfin 地址（可选，留空用 MoviePilot 已配置的媒体服务器）",
+                                               "placeholder": "http://10.0.0.4:8096"}}
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {"component": "VTextField",
+                                     "props": {"model": "jf_api_key",
+                                               "label": "Jellyfin API Key（可选）",
+                                               "type": "password"}}
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [{"component": "VDivider", "props": {}}],
                             }
@@ -467,6 +499,8 @@ class TgtoDriveSync(_PluginBase):
             "debounce_seconds": 30,
             "emby_url": "",
             "emby_api_key": "",
+            "jf_url": "",
+            "jf_api_key": "",
             "fn_enabled": False,
             "fn_scan_mode": "all",
             "fn_library_name": "",
@@ -485,13 +519,20 @@ class TgtoDriveSync(_PluginBase):
             ]
         rows = []
         for item in history[-20:][::-1]:
+            targets = item.get("targets")
+            if targets:
+                stat = " ".join(
+                    f"{t.get('name')}={'成功' if t.get('ok') else '失败'}" for t in targets
+                )
+            else:
+                # 兼容 v1.1.x 及更早的记录结构
+                stat = f"Emby={'成功' if item.get('refresh_ok') else '未执行/失败'}"
+                if "fn_ok" in item:
+                    stat += f" 飞牛={'成功' if item.get('fn_ok') else '未执行/失败'}"
             line = (
                 f"[{item.get('time')}] 来源={item.get('source')} "
-                f"触发={'成功' if item.get('trigger_ok') else '失败'} "
-                f"Emby={'成功' if item.get('refresh_ok') else '未执行/失败'}"
+                f"触发={'成功' if item.get('trigger_ok') else '失败'} {stat}"
             )
-            if "fn_ok" in item:
-                line += f" 飞牛={'成功' if item.get('fn_ok') else '未执行/失败'}"
             line += f"\n{item.get('message', '')}"
             rows.append({
                 "component": "VRow",
@@ -595,18 +636,24 @@ class TgtoDriveSync(_PluginBase):
                     logger.info(f"等待 {self._wait_seconds} 秒以便 TgtoDrive 完成 STRM 生成...")
                     time.sleep(self._wait_seconds)
 
-                # 3. 刷新 Emby
-                refresh_ok, refresh_msg = self._refresh_emby(info)
-                record["refresh_ok"] = refresh_ok
-                record["message"] += f"\nEmby：{refresh_msg}"
-                logger.info(f"Emby 刷新结果：{refresh_ok} - {refresh_msg}")
+                # 3. 刷新已配置的媒体服务器（Emby / Jellyfin / 飞牛影视）
+                targets: List[Tuple[str, bool, str]] = []
+                mp_servers = settings.MEDIASERVER or []
 
-                # 4. 刷新飞牛影视
+                if (self._emby_url and self._emby_api_key) or "emby" in mp_servers:
+                    targets.append(("Emby", *self._refresh_emby(info)))
+
+                if (self._jf_url and self._jf_api_key) or "jellyfin" in mp_servers:
+                    targets.append(("Jellyfin", *self._refresh_jellyfin(info)))
+
                 if self._fn_enabled:
-                    fn_ok, fn_msg = self._refresh_fnos()
-                    record["fn_ok"] = fn_ok
-                    record["message"] += f"\n飞牛影视：{fn_msg}"
-                    logger.info(f"飞牛影视刷新结果：{fn_ok} - {fn_msg}")
+                    targets.append(("飞牛影视", *self._refresh_fnos()))
+
+                record["targets"] = [{"name": n, "ok": o, "msg": m} for n, o, m in targets]
+                record["refresh_ok"] = any(o for _, o, _ in targets)
+                for name, ok, msg in targets:
+                    record["message"] += f"\n{name}：{msg}"
+                    logger.info(f"{name} 刷新结果：{ok} - {msg}")
 
             # 5. 发送通知
             if self._notify:
@@ -690,6 +737,37 @@ class TgtoDriveSync(_PluginBase):
         except Exception as err:  # noqa: BLE001
             return False, f"调用 MoviePilot Emby 模块异常：{err}"
 
+    def _refresh_jellyfin(self, info: dict) -> Tuple[bool, str]:
+        """刷新 Jellyfin 媒体库：优先插件自定义配置，否则用 MoviePilot 已配置的媒体服务器。
+
+        MoviePilot 的 Jellyfin 模块未提供按条目刷新接口，故只能整库刷新。
+        """
+        # 方式一：插件中单独配置了 Jellyfin 地址与 API Key，直接调 Jellyfin REST
+        if self._jf_url and self._jf_api_key:
+            try:
+                url = f"{self._jf_url}/Library/Refresh"
+                resp = requests.post(
+                    url,
+                    params={"api_key": self._jf_api_key, "Recursive": "true"},
+                    timeout=(5, 60),
+                )
+                if resp.status_code in (200, 204):
+                    return True, f"已请求刷新 {self._jf_url}"
+                return False, f"Jellyfin 返回 HTTP {resp.status_code}"
+            except requests.RequestException as err:
+                return False, f"Jellyfin 请求异常：{err}"
+
+        # 方式二：复用 MoviePilot 已配置的媒体服务器
+        if "jellyfin" not in (settings.MEDIASERVER or []):
+            return False, "MoviePilot 未配置 Jellyfin，且插件未单独填写 Jellyfin 地址"
+        try:
+            from app.modules.jellyfin import Jellyfin
+
+            Jellyfin().refresh_root_library()
+            return True, "已请求刷新全部媒体库"
+        except Exception as err:  # noqa: BLE001
+            return False, f"调用 MoviePilot Jellyfin 模块异常：{err}"
+
     def _refresh_fnos(self) -> Tuple[bool, str]:
         """刷新飞牛影视媒体库（复用 MoviePilot 内置的飞牛影视模块）。"""
         helper_cls = _load_mediaserver_helper()
@@ -755,10 +833,13 @@ class TgtoDriveSync(_PluginBase):
         text = (
             f"来源：{record.get('source')}\n"
             f"STRM 触发：{'成功' if record.get('trigger_ok') else '失败'}\n"
-            f"Emby 刷新：{'成功' if record.get('refresh_ok') else '未执行/失败'}\n"
         )
-        if "fn_ok" in record:
-            text += f"飞牛影视刷新：{'成功' if record.get('fn_ok') else '未执行/失败'}\n"
+        targets = record.get("targets") or []
+        if targets:
+            for target in targets:
+                text += f"{target.get('name')}：{'成功' if target.get('ok') else '失败'}\n"
+        else:
+            text += "媒体库刷新：未配置任何目标\n"
         text += f"{record.get('message', '')}"
         try:
             self.post_message(

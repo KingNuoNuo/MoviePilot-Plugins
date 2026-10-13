@@ -1,7 +1,7 @@
 # TgtoDrive STRM 同步插件（MoviePilot）
 
 MoviePilot 整理入库（`TransferComplete` 事件）后，自动调用 **TgtoDrive 官方 OpenAPI**
-触发生成网盘 STRM，等待生成完成后刷新 **Emby** / **飞牛影视** 媒体库，并发送通知。
+触发生成网盘 STRM，等待生成完成后刷新 **Emby** / **Jellyfin** / **飞牛影视** 媒体库，并发送通知。
 
 ## 工作流程
 
@@ -16,9 +16,10 @@ POST {TgtoDrive}/api/strm-sync/run   { "source": "123云盘" }
       ▼
 等待 X 秒（TgtoDrive 的 STRM 同步为后台异步任务）
       ▼
-刷新媒体库
-  ├─ Emby（复用 MoviePilot 已配置的 Emby，或插件内单独配置的 Emby）
-  └─ 飞牛影视（启用时，全库扫描或指定媒体库扫描）
+刷新媒体库（按已配置的服务器逐个刷新）
+  ├─ Emby（复用 MoviePilot 已配置的 Emby，或插件内单独配置）
+  ├─ Jellyfin（同上，仅整库刷新）
+  └─ 飞牛影视（启用时，全库或指定媒体库）
       ▼
 发送通知 + 记录执行历史
 ```
@@ -82,6 +83,7 @@ MoviePilot-Plugins/
 | 触发后等待秒数 | 等待 STRM 生成的时间 | 60 |
 | 防抖秒数 | 合并短时间内的多次入库 | 30 |
 | Emby 地址 / API Key | 可选。留空则复用 MoviePilot 已配置的媒体服务器 | 空 |
+| Jellyfin 地址 / API Key | 可选。留空则复用 MoviePilot 已配置的媒体服务器 | 空 |
 | 启用飞牛影视刷新 | 是否在 STRM 生成后刷新飞牛影视 | 关 |
 | 飞牛扫描范围 | 刷新全部媒体库 / 仅刷新指定媒体库 | 全部媒体库 |
 | 指定媒体库名称 | 扫描范围选「仅指定」时填写，如 `电影库` | 空 |
@@ -122,7 +124,10 @@ curl -X POST "http://10.0.0.4:12366/api/strm-sync/run" \
   `__init__.py` 顶部的 `STRM_SOURCES` 中同步补充。
 - 「按入库条目刷新」依赖 MoviePilot 提供的 `RefreshMediaItem`；若匹配不到媒体库会退化为无操作，
   建议优先使用「刷新全部媒体库」。
+- **媒体的刷新只在「已配置」时执行**：Emby / Jellyfin 需在 MoviePilot 里配置或插件内填地址+Key，
+  飞牛需开启开关并配好媒体服务器，否则该目标不会出现在结果里。
+- **Jellyfin 只支持整库刷新**：MoviePilot 的 Jellyfin 模块未提供按条目刷新接口，「刷新方式」对它不生效。
 - **飞牛刷新依赖 MoviePilot 版本**：插件通过 `MediaServerHelper` 拿飞牛实例（v2 在 `app.helper`、
   v3 在 `app.application`，已做双路径兼容），并按 `ServiceInfo.type == trimemedia` 识别。
-  若你的 MoviePilot 未内置 `app.modules.trimemedia`，飞牛刷新会返回明确错误提示，Emby 刷新不受影响。
+  若你的 MoviePilot 未内置 `app.modules.trimemedia`，飞牛刷新会返回明确错误提示，其它目标不受影响。
 - 飞牛刷新需**管理员账号**，且需在 MoviePilot 中已配置并启用飞牛影视媒体服务器。
