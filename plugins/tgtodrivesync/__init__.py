@@ -14,8 +14,8 @@ TgtoDrive 侧依赖：
     「设定 → 媒体服务器」里已配置并启用的全部媒体服务器实例，逐个调用其刷新能力。
     因此自动覆盖 Emby / Jellyfin / Plex / 飞牛影视 / 绿联影视 / Navidrome / Vyo /
     极影视以及自定义等所有类型，宿主后续新增类型也无需改插件。
-    - 整库刷新：调用实例的 refresh_root_library()
-    - 按条目刷新：调用实例的 refresh_library_by_items()，不支持的自动回退整库
+    - 自动择优：能定位到具体媒体库的（有 refresh_library_by_items）只刷新受影响的库；
+      不支持单库刷新的（Jellyfin / Navidrome 等）自动整库刷新（refresh_root_library）。
 """
 import threading
 import time
@@ -74,7 +74,7 @@ class TgtoDriveSync(_PluginBase):
     # 插件图标（使用官方图标库中的通用刷新图标）
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/refresh2.png"
     # 插件版本
-    plugin_version = "1.4.0"
+    plugin_version = "1.5.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -96,7 +96,6 @@ class TgtoDriveSync(_PluginBase):
     _notify: bool = True
 
     # ---- 媒体库刷新 ----
-    _refresh_mode: str = "all"
     _server_names: str = ""
 
     # ---- 运行时状态 ----
@@ -117,7 +116,6 @@ class TgtoDriveSync(_PluginBase):
         self._wait_seconds = 60
         self._debounce_seconds = 30
         self._notify = True
-        self._refresh_mode = "all"
         self._server_names = ""
 
         if config:
@@ -128,13 +126,10 @@ class TgtoDriveSync(_PluginBase):
             self._wait_seconds = self._safe_int(config.get("wait_seconds"), 60)
             self._debounce_seconds = self._safe_int(config.get("debounce_seconds"), 30)
             self._notify = bool(config.get("notify", True))
-            self._refresh_mode = str(config.get("refresh_mode") or "all").strip()
             self._server_names = str(config.get("server_names") or "").strip()
 
         if self._source not in STRM_SOURCES:
             self._source = "123云盘"
-        if self._refresh_mode not in ("all", "item"):
-            self._refresh_mode = "all"
 
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tgtodrive_sync")
 
@@ -142,7 +137,6 @@ class TgtoDriveSync(_PluginBase):
             logger.info(
                 f"TgtoDrive STRM 同步插件已启用：地址={self._tgtodrive_url or '(未配置)'}，"
                 f"来源={self._source}，等待={self._wait_seconds}s，"
-                f"刷新方式={self._refresh_mode}，"
                 f"刷新范围={self._server_names or '全部媒体服务器'}"
             )
             if not self._tgtodrive_url or not self._openapi_token:
@@ -257,25 +251,12 @@ class TgtoDriveSync(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
+                                "props": {"cols": 12},
                                 "content": [
                                     {"component": "VSelect",
                                      "props": {"model": "source",
                                                "label": "STRM 同步来源",
                                                "items": source_items}}
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {"component": "VSelect",
-                                     "props": {"model": "refresh_mode",
-                                               "label": "媒体库刷新方式",
-                                               "items": [
-                                                   {"title": "刷新全部媒体库", "value": "all"},
-                                                   {"title": "按入库条目刷新", "value": "item"},
-                                               ]}}
                                 ],
                             },
                         ],
@@ -335,8 +316,9 @@ class TgtoDriveSync(_PluginBase):
                                              "刷新范围：MoviePilot「设定 → 媒体服务器」中已配置并启用的全部服务器，"
                                              "自动覆盖 Emby / Jellyfin / Plex / 飞牛影视 / 绿联影视 / Navidrome / "
                                              "Vyo / 极影视以及自定义等所有类型，无需逐个配置。"
-                                             "其中 Jellyfin、Navidrome 仅支持整库刷新，"
-                                             "「按入库条目刷新」模式下会自动回退为整库刷新。"
+                                             "刷新策略自动择优：能定位到具体媒体库的（Emby / Plex / 飞牛影视 / "
+                                             "绿联影视 / Vyo / 极影视等）只刷新受影响的库；"
+                                             "不支持单库刷新的（Jellyfin、Navidrome）自动整库刷新。"
                                          ),
                                      }}
                                 ],
@@ -372,7 +354,6 @@ class TgtoDriveSync(_PluginBase):
             "tgtodrive_url": "",
             "openapi_token": "",
             "source": "123云盘",
-            "refresh_mode": "all",
             "wait_seconds": 60,
             "debounce_seconds": 30,
             "server_names": "",
@@ -591,7 +572,11 @@ class TgtoDriveSync(_PluginBase):
         return targets
 
     def _refresh_one(self, instance: Any, info: dict) -> Tuple[bool, str]:
-        """刷新单个媒体服务器实例。"""
+        """刷新单个媒体服务器实例。
+
+        策略自动择优：实例支持单库刷新（refresh_library_by_items）且能定位到本次入库条目时，
+        只刷新受影响的媒体库；不支持或无法定位条目时整库刷新。
+        """
         if hasattr(instance, "is_configured"):
             try:
                 if not instance.is_configured():
@@ -599,24 +584,25 @@ class TgtoDriveSync(_PluginBase):
             except Exception:  # noqa: BLE001
                 pass
 
-        # 按条目刷新：仅在实例支持且能构造出条目时使用，否则回退整库
-        if self._refresh_mode == "item" and hasattr(instance, "refresh_library_by_items"):
+        # 1. 单库刷新（按入库条目定位所在媒体库）
+        if hasattr(instance, "refresh_library_by_items"):
             items = self._build_refresh_items(info)
             if items:
                 try:
                     result = instance.refresh_library_by_items(items)
                     if result is not None:
                         title = info.get("title") or "-"
-                        return bool(result), f"已按条目刷新：{title}"
+                        return bool(result), f"已单库刷新（条目：{title}）"
                 except Exception as err:  # noqa: BLE001
-                    logger.warning(f"按条目刷新失败，回退整库刷新：{err}")
+                    logger.warning(f"单库刷新失败，回退整库刷新：{err}")
 
+        # 2. 整库刷新（不支持单库，或无法定位条目）
         if not hasattr(instance, "refresh_root_library"):
             return False, "该媒体服务器模块不支持刷新"
         result = instance.refresh_root_library()
         if result is None:
             return False, "刷新返回空（可能未认证或服务不可用）"
-        return bool(result), "已请求刷新全部媒体库"
+        return bool(result), "已请求整库刷新"
 
     @staticmethod
     def _build_refresh_items(info: dict) -> Optional[list]:
