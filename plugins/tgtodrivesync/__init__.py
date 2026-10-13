@@ -18,9 +18,15 @@ TgtoDrive 侧依赖：
       不支持单库刷新的（Jellyfin / Navidrome 等）自动整库刷新（refresh_root_library）。
 
 合并刷新：
-    防抖窗口内收到的多次入库会**累积成队列**（而不是互相覆盖），到点后一次性触发 STRM
-    同步，并用队列里的**全部条目**去刷新媒体库；待刷新队列与每次刷新的文件清单会在插件
-    详情页和执行/通知中列出。
+    防抖窗口内收到的多次入库会**累积成队列**（按路径去重，不互相覆盖），到点后一次性
+    触发 STRM 同步，并用队列里的**全部条目**去刷新媒体库。「最大等待秒数」用于防止
+    批量整理时防抖被反复重置而长时间不触发；队列与每次刷新的文件、受影响媒体库会在
+    插件详情页、执行历史与通知中列出。
+
+刷新范围判定：
+    插件**自己**用实例的 get_librarys() + 路径前缀匹配来判定本次会命中哪些媒体库，
+    命中才走单库刷新；否则整库刷新并注明原因（未匹配到 / 无法获取列表 / 不支持单库），
+    避免复用模块内部的静默降级导致「报告成功但实际什么也没刷」。
 """
 import os
 import threading
@@ -87,7 +93,7 @@ class TgtoDriveSync(_PluginBase):
     # 插件图标（使用官方图标库中的通用刷新图标）
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/refresh2.png"
     # 插件版本
-    plugin_version = "1.6.0"
+    plugin_version = "1.7.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -110,6 +116,7 @@ class TgtoDriveSync(_PluginBase):
 
     # ---- 媒体库刷新 ----
     _server_names: str = ""
+    _max_wait_seconds: int = 300
 
     # ---- 运行时状态 ----
     _executor: Optional[ThreadPoolExecutor] = None
@@ -118,6 +125,8 @@ class TgtoDriveSync(_PluginBase):
     _running: bool = False
     # 待刷新队列：防抖窗口内的多次入库合并到这里，一次性刷新
     _pending_items: List[dict] = []
+    # 队列开始累积的时间戳（用于最大等待窗口计算）
+    _queue_since: Optional[float] = None
     # 是否有手动触发请求（远程命令 / 插件 API）
     _manual_pending: bool = False
 
@@ -129,6 +138,7 @@ class TgtoDriveSync(_PluginBase):
             self._pending_items = []
             self._manual_pending = False
             self._running = False
+            self._queue_since = None
 
         self._enabled = False
         self._tgtodrive_url = ""
@@ -138,6 +148,7 @@ class TgtoDriveSync(_PluginBase):
         self._debounce_seconds = 30
         self._notify = True
         self._server_names = ""
+        self._max_wait_seconds = 300
 
         if config:
             self._enabled = bool(config.get("enabled"))
@@ -148,6 +159,7 @@ class TgtoDriveSync(_PluginBase):
             self._debounce_seconds = self._safe_int(config.get("debounce_seconds"), 30)
             self._notify = bool(config.get("notify", True))
             self._server_names = str(config.get("server_names") or "").strip()
+            self._max_wait_seconds = self._safe_int(config.get("max_wait_seconds"), 300)
 
         if self._source not in STRM_SOURCES:
             self._source = "123云盘"
@@ -305,6 +317,16 @@ class TgtoDriveSync(_PluginBase):
                                                "placeholder": "30"}}
                                 ],
                             },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {"component": "VTextField",
+                                     "props": {"model": "max_wait_seconds",
+                                               "label": "最大等待秒数（批量入库时到此强制刷新，0=不限）",
+                                               "placeholder": "300"}}
+                                ],
+                            },
                         ],
                     },
                     {
@@ -377,6 +399,7 @@ class TgtoDriveSync(_PluginBase):
             "source": "123云盘",
             "wait_seconds": 60,
             "debounce_seconds": 30,
+            "max_wait_seconds": 300,
             "server_names": "",
         }
 
@@ -437,6 +460,11 @@ class TgtoDriveSync(_PluginBase):
                 f"[{item.get('time')}] 来源={item.get('source')} "
                 f"触发={self._trigger_state_label(item)} {stat}"
             )
+            libraries = item.get("libraries") or []
+            if libraries:
+                line += f"\n受影响媒体库：{'、'.join(libraries)}"
+            elif item.get("targets"):
+                line += "\n受影响媒体库：—（整库刷新）"
             files = item.get("files") or []
             if files:
                 line += f"\n本次刷新文件 {len(files)} 个："
@@ -486,14 +514,21 @@ class TgtoDriveSync(_PluginBase):
         }
         with self._lock:
             # 累积到队列而不是覆盖：防抖窗口内的多次入库会被合并成一次刷新
-            self._pending_items.append(item)
+            key = str(item.get("target_path") or "") or self._item_label(item)
+            if any(self._item_key(i) == key for i in self._pending_items):
+                logger.info(f"队列中已存在同一文件，跳过重复入队：{self._item_label(item)}")
+            else:
+                self._pending_items.append(item)
             if len(self._pending_items) > QUEUE_MAX:
                 self._pending_items = self._pending_items[-QUEUE_MAX:]
+            if self._queue_since is None:
+                self._queue_since = time.time()
             queued = len(self._pending_items)
-            self._arm_timer(self._debounce_seconds)
+            delay = self._next_delay()
+            self._arm_timer(delay)
         logger.info(
             f"收到整理完成事件：{self._item_label(item)}，"
-            f"待刷新队列共 {queued} 项，{max(self._debounce_seconds, 1)} 秒后合并刷新"
+            f"待刷新队列共 {queued} 项，{delay} 秒后合并刷新"
         )
 
     @eventmanager.register(EventType.PluginAction)
@@ -523,24 +558,44 @@ class TgtoDriveSync(_PluginBase):
         self._timer.daemon = True
         self._timer.start()
 
+    def _next_delay(self) -> int:
+        """按「防抖秒数」与「最大等待秒数」算出下次触发延迟（调用方需持锁）。
+
+        防止批量整理时事件持续到达、防抖被无限重置而长时间不触发：
+        一旦队列已等待超过「最大等待秒数」，就直接触发。
+        """
+        delay = max(self._debounce_seconds, 1)
+        if self._max_wait_seconds > 0 and self._queue_since:
+            remain = self._max_wait_seconds - (time.time() - self._queue_since)
+            if remain <= 1:
+                return 1
+            delay = min(delay, int(remain))
+        return delay
+
     def _dispatch(self):
         """把队列里的待刷新文件投递到后台线程执行，避免阻塞事件总线。"""
         with self._lock:
             if self._running:
                 # 上一轮还在跑：保留队列，稍后重试（不丢文件）
                 logger.info("已有刷新任务在执行，待刷新文件保留在队列，稍后重试")
-                self._arm_timer(self._debounce_seconds)
+                self._arm_timer(self._next_delay())
                 return
             if not self._pending_items and not self._manual_pending:
                 return
             items = list(self._pending_items)
             self._pending_items = []
+            self._queue_since = None
             manual = self._manual_pending
             self._manual_pending = False
             self._running = True
         if self._executor is None:
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tgtodrive_sync")
         self._executor.submit(self._run_pipeline, items, manual)
+
+    @staticmethod
+    def _item_key(item: dict) -> str:
+        """队列去重用的键：优先路径，其次标题。"""
+        return str(item.get("target_path") or "") or TgtoDriveSync._item_label(item)
 
     @staticmethod
     def _item_label(item: dict) -> str:
@@ -598,11 +653,16 @@ class TgtoDriveSync(_PluginBase):
 
                 # 3. 刷新全部已配置的媒体服务器（用队列里的全部条目）
                 targets = self._refresh_media_servers(items)
-                record["targets"] = [{"name": n, "ok": o, "msg": m} for n, o, m in targets]
-                record["refresh_ok"] = any(o for _, o, _ in targets)
-                for name, ok, msg in targets:
-                    record["message"] += f"\n{name}：{msg}"
-                    logger.info(f"{name} 刷新结果：{ok} - {msg}")
+                record["targets"] = targets
+                record["refresh_ok"] = any(t.get("ok") for t in targets)
+                libraries: List[str] = []
+                for t in targets:
+                    for lib in (t.get("libraries") or []):
+                        if lib not in libraries:
+                            libraries.append(lib)
+                    record["message"] += f"\n{t.get('name')}：{t.get('msg')}"
+                    logger.info(f"{t.get('name')} 刷新结果：{t.get('ok')} - {t.get('msg')}")
+                record["libraries"] = libraries
 
             # 4. 发送通知
             if self._notify:
@@ -665,75 +725,148 @@ class TgtoDriveSync(_PluginBase):
         except requests.RequestException as err:
             return "failed", f"请求异常：{err}"
 
-    def _refresh_media_servers(self, items: List[dict]) -> List[Tuple[str, bool, str]]:
-        """刷新 MoviePilot 中已配置并启用的全部媒体服务器，返回 [(名称, 是否成功, 说明)]。"""
+    def _refresh_media_servers(self, items: List[dict]) -> List[dict]:
+        """刷新 MoviePilot 中已配置并启用的全部媒体服务器。
+
+        :return: 每台一条 ``{"name", "ok", "msg", "libraries"}``，
+                 ``libraries`` 为预估会刷新的媒体库名列表（无法判定时为 None）。
+        """
         helper_cls = _load_mediaserver_helper()
         if helper_cls is None:
-            return [("媒体服务器", False, "当前 MoviePilot 未提供 MediaServerHelper")]
+            return [{"name": "媒体服务器", "ok": False,
+                     "msg": "当前 MoviePilot 未提供 MediaServerHelper", "libraries": None}]
 
         try:
             services = helper_cls().get_services() or {}
         except Exception as err:  # noqa: BLE001
-            return [("媒体服务器", False, f"读取媒体服务器失败：{err}")]
+            return [{"name": "媒体服务器", "ok": False,
+                     "msg": f"读取媒体服务器失败：{err}", "libraries": None}]
         if not services:
-            return [("媒体服务器", False, "MoviePilot 未配置任何媒体服务器")]
+            return [{"name": "媒体服务器", "ok": False,
+                     "msg": "MoviePilot 未配置任何媒体服务器", "libraries": None}]
 
         wanted = [s.strip() for s in self._server_names.split(",") if s.strip()] \
             if self._server_names else []
 
-        targets: List[Tuple[str, bool, str]] = []
+        targets: List[dict] = []
         for name, service_info in services.items():
             if wanted and name not in wanted:
                 continue
             label = f"{name}({_service_type_name(service_info)})"
             instance = getattr(service_info, "instance", None)
             if instance is None:
-                targets.append((label, False, "实例不可用"))
+                targets.append({"name": label, "ok": False, "msg": "实例不可用", "libraries": None})
                 continue
             try:
-                ok, msg = self._refresh_one(instance, items)
-                targets.append((label, ok, msg))
+                ok, msg, libraries = self._refresh_one(instance, items)
             except Exception as err:  # noqa: BLE001
-                targets.append((label, False, f"刷新异常：{err}"))
+                ok, msg, libraries = False, f"刷新异常：{err}", None
+            targets.append({"name": label, "ok": ok, "msg": msg, "libraries": libraries})
 
         if not targets:
-            return [("媒体服务器", False, f"没有匹配的媒体服务器（已指定：{self._server_names}）")]
+            return [{"name": "媒体服务器", "ok": False,
+                     "msg": f"没有匹配的媒体服务器（已指定：{self._server_names}）",
+                     "libraries": None}]
         return targets
 
-    def _refresh_one(self, instance: Any, items: List[dict]) -> Tuple[bool, str]:
+    def _refresh_one(self, instance: Any, items: List[dict]) -> Tuple[bool, str, Optional[List[str]]]:
         """刷新单个媒体服务器实例。
 
-        策略自动择优：实例支持单库刷新（refresh_library_by_items）且能定位到本次入库条目时，
-        只刷新受影响的媒体库（队列里的多个条目会一并传入，由模块内部按库去重）；
-        不支持或无法定位条目时整库刷新。
+        策略自动择优，且**由插件自己判定能否定位到媒体库**，避免复用模块内部的静默降级：
+          1. 用实例的 ``get_librarys()`` 按路径前缀预估本次命中的媒体库；
+          2. 命中了 → 走单库刷新（``refresh_library_by_items``）；
+          3. 没命中 / 无法判定 / 不支持单库 → 整库刷新，并如实说明原因。
+
+        :return: (是否成功, 说明, 受影响的媒体库名列表)。
+                 ``libraries`` 语义：走单库刷新时为命中的库名列表；整库刷新时为 ``[]``
+                 （不代表某个具体库）；未执行（未配置/失败）时为 ``None``。
         """
         if hasattr(instance, "is_configured"):
             try:
                 if not instance.is_configured():
-                    return False, "未配置或未启用"
+                    return False, "未配置或未启用", None
             except Exception:  # noqa: BLE001
                 pass
 
-        # 1. 单库刷新（按入库条目定位所在媒体库）
-        if hasattr(instance, "refresh_library_by_items"):
+        # 1. 预估本次命中的媒体库（路径前缀匹配）
+        matched = self._resolve_library_names(instance, items) if items else None
+
+        # 2. 命中具体媒体库 → 单库刷新
+        if items and matched and hasattr(instance, "refresh_library_by_items"):
             refresh_items = self._build_refresh_items(items)
             if refresh_items:
                 try:
                     result = instance.refresh_library_by_items(refresh_items)
                     if result is not None:
-                        names = "、".join(i["label"] for i in items[:3] if i.get("label"))
-                        more = f" 等 {len(items)} 项" if len(items) > 3 else ""
-                        return bool(result), f"已单库刷新（{names}{more}）"
+                        shown = "、".join(matched[:5])
+                        more = f" 等 {len(matched)} 个库" if len(matched) > 5 else ""
+                        return bool(result), f"已单库刷新：{shown}{more}", matched
                 except Exception as err:  # noqa: BLE001
                     logger.warning(f"单库刷新失败，回退整库刷新：{err}")
 
-        # 2. 整库刷新（不支持单库，或无法定位条目）
+        # 3. 整库刷新（做不到单库时），并说明原因
         if not hasattr(instance, "refresh_root_library"):
-            return False, "该媒体服务器模块不支持刷新"
+            return False, "该媒体服务器模块不支持刷新", None
         result = instance.refresh_root_library()
         if result is None:
-            return False, "刷新返回空（可能未认证或服务不可用）"
-        return bool(result), "已请求整库刷新"
+            return False, "刷新返回空（可能未认证或服务不可用）", None
+
+        reason = ""
+        if items:
+            if matched == []:
+                reason = "（未匹配到媒体库，请检查路径映射是否一致）"
+            elif matched is None:
+                reason = "（无法获取媒体库列表，按整库处理）"
+            elif not hasattr(instance, "refresh_library_by_items"):
+                reason = "（该模块不支持单库刷新）"
+        return bool(result), f"已请求整库刷新{reason}", []
+
+    @staticmethod
+    def _is_subpath(child: str, parent: str) -> bool:
+        """判断 child 是否位于 parent 目录之下（按 / 归一化，跨平台）。"""
+        if not child or not parent:
+            return False
+        c = str(child).replace("\\", "/").rstrip("/")
+        p = str(parent).replace("\\", "/").rstrip("/")
+        return c == p or c.startswith(p + "/")
+
+    def _resolve_library_names(self, instance: Any, items: List[dict]) -> Optional[List[str]]:
+        """用实例的媒体库列表预估本次入库会命中哪些媒体库。
+
+        :return: 命中的库名列表；无法判定（无 get_librarys 或调用失败）时返回 None。
+        """
+        getter = getattr(instance, "get_librarys", None)
+        if not callable(getter):
+            return None
+        try:
+            libraries = getter() or []
+        except Exception as err:  # noqa: BLE001
+            logger.warning(f"获取媒体库列表失败，无法预估影响范围：{err}")
+            return None
+        if not libraries:
+            return []
+
+        paths = [str(i.get("target_path")) for i in (items or []) if i.get("target_path")]
+        if not paths:
+            return []
+
+        names: List[str] = []
+        for library in libraries:
+            name = getattr(library, "name", None)
+            lib_paths = getattr(library, "path", None)
+            if isinstance(library, dict):
+                name = name or library.get("name")
+                lib_paths = lib_paths or library.get("path")
+            if not name or not lib_paths:
+                continue
+            if isinstance(lib_paths, (str, bytes)):
+                lib_paths = [lib_paths]
+            for target in paths:
+                if any(self._is_subpath(target, str(lib_path)) for lib_path in lib_paths if lib_path):
+                    if name not in names:
+                        names.append(name)
+                    break
+        return names
 
     @staticmethod
     def _build_refresh_items(items: List[dict]) -> Optional[list]:
@@ -781,6 +914,12 @@ class TgtoDriveSync(_PluginBase):
                 text += f"  · {f.get('label')}\n"
             if len(files) > 10:
                 text += f"  … 其余 {len(files) - 10} 个\n"
+        libraries = record.get("libraries") or []
+        if libraries:
+            text += f"受影响媒体库 {len(libraries)} 个：{'、'.join(libraries[:8])}"
+            text += f" 等 {len(libraries)} 个\n" if len(libraries) > 8 else "\n"
+        elif record.get("targets"):
+            text += "受影响媒体库：—（整库刷新）\n"
         targets = record.get("targets") or []
         if targets:
             for target in targets:
