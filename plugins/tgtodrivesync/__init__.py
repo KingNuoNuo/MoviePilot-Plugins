@@ -2,23 +2,20 @@
 TgtoDrive STRM 同步插件
 
 MoviePilot 整理入库（TransferComplete 事件）后，自动调用 TgtoDrive 的 OpenAPI
-触发指定网盘的 STRM 同步，等待同步完成后刷新媒体服务器（Emby / 飞牛影视），
-并发送通知。
+触发指定网盘的 STRM 同步，等待同步完成后刷新媒体服务器，并发送通知。
 
 TgtoDrive 侧依赖：
     POST {TGTO_URL}/api/strm-sync/run
     Header: Authorization: Bearer <OpenAPI Token>
     Body:   {"source": "123云盘"}
 
-Emby / Jellyfin 刷新侧：
-    优先复用 MoviePilot 已配置的媒体服务器（settings.MEDIASERVER）；
-    也可在插件中单独填写地址与 API Key 以指向其它实例。
-    Jellyfin 仅支持整库刷新（MoviePilot 的 Jellyfin 模块未提供按条目刷新）。
-
-飞牛影视刷新侧：
-    直接依赖 MoviePilot 内置的飞牛影视模块（app.modules.trimemedia）。
-    需先在 MoviePilot「设定 → 媒体服务器」中添加飞牛影视，插件复用该配置，
-    通过 MediaServerHelper 拿到实例后调用其刷新能力。
+媒体库刷新侧：
+    不针对具体类型硬编码，而是通过 MoviePilot 的 MediaServerHelper 取出
+    「设定 → 媒体服务器」里已配置并启用的全部媒体服务器实例，逐个调用其刷新能力。
+    因此自动覆盖 Emby / Jellyfin / Plex / 飞牛影视 / 绿联影视 / Navidrome / Vyo /
+    极影视以及自定义等所有类型，宿主后续新增类型也无需改插件。
+    - 整库刷新：调用实例的 refresh_root_library()
+    - 按条目刷新：调用实例的 refresh_library_by_items()，不支持的自动回退整库
 """
 import threading
 import time
@@ -29,7 +26,6 @@ import requests
 
 from app.core.config import settings
 from app.core.event import eventmanager, Event
-from app.modules.emby import Emby
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
 from app.log import logger
@@ -44,9 +40,6 @@ STRM_SOURCES = [
     "115网盘音乐",
     "115网盘分享",
 ]
-
-# 飞牛影视在 MoviePilot 媒体服务器中的类型标识
-TRIMEMEDIA_TYPE = "trimemedia"
 
 
 def _load_mediaserver_helper():
@@ -63,13 +56,12 @@ def _load_mediaserver_helper():
         return None
 
 
-def _is_trimemedia(service_info: Any) -> bool:
-    """判断一个媒体服务器实例是否为飞牛影视（兼容字符串与枚举两种 type）。"""
+def _service_type_name(service_info: Any) -> str:
+    """取媒体服务器的类型名（兼容字符串与枚举两种 type）。"""
     service_type = getattr(service_info, "type", None)
     if service_type is None:
-        return False
-    value = getattr(service_type, "value", service_type)
-    return str(value).lower() == TRIMEMEDIA_TYPE
+        return "未知类型"
+    return str(getattr(service_type, "value", service_type))
 
 
 class TgtoDriveSync(_PluginBase):
@@ -78,11 +70,11 @@ class TgtoDriveSync(_PluginBase):
     # 插件名称
     plugin_name = "TgtoDrive STRM 同步"
     # 插件描述
-    plugin_desc = "整理入库后自动触发 TgtoDrive 生成网盘 STRM，完成后刷新 Emby / Jellyfin / 飞牛影视媒体库。"
+    plugin_desc = "整理入库后自动触发 TgtoDrive 生成网盘 STRM，完成后刷新全部已配置的媒体服务器。"
     # 插件图标（使用官方图标库中的通用刷新图标）
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/refresh2.png"
     # 插件版本
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -103,18 +95,9 @@ class TgtoDriveSync(_PluginBase):
     _debounce_seconds: int = 30
     _notify: bool = True
 
-    # ---- Emby / Jellyfin ----
+    # ---- 媒体库刷新 ----
     _refresh_mode: str = "all"
-    _emby_url: str = ""
-    _emby_api_key: str = ""
-    _jf_url: str = ""
-    _jf_api_key: str = ""
-
-    # ---- 飞牛影视（复用 MoviePilot 内置模块）----
-    _fn_enabled: bool = False
-    _fn_scan_mode: str = "all"
-    _fn_library_name: str = ""
-    _fn_server_name: str = ""
+    _server_names: str = ""
 
     # ---- 运行时状态 ----
     _executor: Optional[ThreadPoolExecutor] = None
@@ -135,14 +118,7 @@ class TgtoDriveSync(_PluginBase):
         self._debounce_seconds = 30
         self._notify = True
         self._refresh_mode = "all"
-        self._emby_url = ""
-        self._emby_api_key = ""
-        self._jf_url = ""
-        self._jf_api_key = ""
-        self._fn_enabled = False
-        self._fn_scan_mode = "all"
-        self._fn_library_name = ""
-        self._fn_server_name = ""
+        self._server_names = ""
 
         if config:
             self._enabled = bool(config.get("enabled"))
@@ -153,17 +129,12 @@ class TgtoDriveSync(_PluginBase):
             self._debounce_seconds = self._safe_int(config.get("debounce_seconds"), 30)
             self._notify = bool(config.get("notify", True))
             self._refresh_mode = str(config.get("refresh_mode") or "all").strip()
-            self._emby_url = str(config.get("emby_url") or "").strip().rstrip("/")
-            self._emby_api_key = str(config.get("emby_api_key") or "").strip()
-            self._jf_url = str(config.get("jf_url") or "").strip().rstrip("/")
-            self._jf_api_key = str(config.get("jf_api_key") or "").strip()
-            self._fn_enabled = bool(config.get("fn_enabled"))
-            self._fn_scan_mode = str(config.get("fn_scan_mode") or "all").strip()
-            self._fn_library_name = str(config.get("fn_library_name") or "").strip()
-            self._fn_server_name = str(config.get("fn_server_name") or "").strip()
+            self._server_names = str(config.get("server_names") or "").strip()
 
         if self._source not in STRM_SOURCES:
             self._source = "123云盘"
+        if self._refresh_mode not in ("all", "item"):
+            self._refresh_mode = "all"
 
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tgtodrive_sync")
 
@@ -171,7 +142,8 @@ class TgtoDriveSync(_PluginBase):
             logger.info(
                 f"TgtoDrive STRM 同步插件已启用：地址={self._tgtodrive_url or '(未配置)'}，"
                 f"来源={self._source}，等待={self._wait_seconds}s，"
-                f"Emby刷新={self._refresh_mode}，飞牛刷新={'启用' if self._fn_enabled else '关闭'}"
+                f"刷新方式={self._refresh_mode}，"
+                f"刷新范围={self._server_names or '全部媒体服务器'}"
             )
             if not self._tgtodrive_url or not self._openapi_token:
                 logger.warning("TgtoDrive STRM 同步插件：TgtoDrive 地址或 OpenAPI Token 未配置，触发时将失败")
@@ -210,7 +182,7 @@ class TgtoDriveSync(_PluginBase):
                 "endpoint": self.api_trigger,
                 "methods": ["GET"],
                 "summary": "手动触发STRM同步并刷新媒体库",
-                "description": "立即调用 TgtoDrive 生成网盘 STRM，等待后刷新 Emby / 飞牛影视媒体库。",
+                "description": "立即调用 TgtoDrive 生成网盘 STRM，等待后刷新全部已配置的媒体服务器。",
             },
             {
                 "path": "/test",
@@ -299,7 +271,7 @@ class TgtoDriveSync(_PluginBase):
                                 "content": [
                                     {"component": "VSelect",
                                      "props": {"model": "refresh_mode",
-                                               "label": "Emby 刷新方式",
+                                               "label": "媒体库刷新方式",
                                                "items": [
                                                    {"title": "刷新全部媒体库", "value": "all"},
                                                    {"title": "按入库条目刷新", "value": "item"},
@@ -338,110 +310,14 @@ class TgtoDriveSync(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {"component": "VTextField",
-                                     "props": {"model": "emby_url",
-                                               "label": "Emby 地址（可选，留空用 MoviePilot 已配置的媒体服务器）",
-                                               "placeholder": "http://10.0.0.4:8096"}}
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {"component": "VTextField",
-                                     "props": {"model": "emby_api_key",
-                                               "label": "Emby API Key（可选）",
-                                               "type": "password"}}
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {"component": "VTextField",
-                                     "props": {"model": "jf_url",
-                                               "label": "Jellyfin 地址（可选，留空用 MoviePilot 已配置的媒体服务器）",
-                                               "placeholder": "http://10.0.0.4:8096"}}
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {"component": "VTextField",
-                                     "props": {"model": "jf_api_key",
-                                               "label": "Jellyfin API Key（可选）",
-                                               "type": "password"}}
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
                                 "props": {"cols": 12},
-                                "content": [{"component": "VDivider", "props": {}}],
+                                "content": [
+                                    {"component": "VTextField",
+                                     "props": {"model": "server_names",
+                                               "label": "只刷新指定媒体服务器（可选，多个用英文逗号分隔，留空=全部）",
+                                               "placeholder": "留空则刷新全部；例如：Emby,飞牛影视"}}
+                                ],
                             }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {"component": "VSwitch",
-                                     "props": {"model": "fn_enabled", "label": "启用飞牛影视刷新"}}
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {"component": "VSelect",
-                                     "props": {"model": "fn_scan_mode",
-                                               "label": "飞牛扫描范围",
-                                               "items": [
-                                                   {"title": "刷新全部媒体库", "value": "all"},
-                                                   {"title": "仅刷新指定媒体库", "value": "library"},
-                                               ]}}
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {"component": "VTextField",
-                                     "props": {"model": "fn_library_name",
-                                               "label": "指定媒体库名称（扫描范围选“仅指定”时填写）",
-                                               "placeholder": "电影库"}}
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {"component": "VTextField",
-                                     "props": {"model": "fn_server_name",
-                                               "label": "指定飞牛媒体服务器名称（可选，多个飞牛时用）",
-                                               "placeholder": "留空则刷新所有飞牛服务器"}}
-                                ],
-                            },
                         ],
                     },
                     {
@@ -456,9 +332,11 @@ class TgtoDriveSync(_PluginBase):
                                          "type": "info",
                                          "variant": "tonal",
                                          "text": (
-                                             "飞牛刷新直接依赖 MoviePilot 内置的飞牛影视模块，"
-                                             "请先在「设定 → 媒体服务器」中添加飞牛影视（需管理员账号，"
-                                             "非管理员无法触发扫描）。插件复用该配置，无需单独填地址与密钥。"
+                                             "刷新范围：MoviePilot「设定 → 媒体服务器」中已配置并启用的全部服务器，"
+                                             "自动覆盖 Emby / Jellyfin / Plex / 飞牛影视 / 绿联影视 / Navidrome / "
+                                             "Vyo / 极影视以及自定义等所有类型，无需逐个配置。"
+                                             "其中 Jellyfin、Navidrome 仅支持整库刷新，"
+                                             "「按入库条目刷新」模式下会自动回退为整库刷新。"
                                          ),
                                      }}
                                 ],
@@ -478,7 +356,7 @@ class TgtoDriveSync(_PluginBase):
                                          "variant": "tonal",
                                          "text": (
                                              "工作流程：MoviePilot 整理入库 → 触发 TgtoDrive 生成 STRM → "
-                                             "等待设定秒数后刷新 Emby / 飞牛影视。TgtoDrive 的 STRM 同步为异步任务，"
+                                             "等待设定秒数后刷新媒体服务器。TgtoDrive 的 STRM 同步为异步任务，"
                                              "当前无完成回调接口，故以「等待秒数」估算生成时间，请按网盘规模调整。"
                                          ),
                                      }}
@@ -497,14 +375,7 @@ class TgtoDriveSync(_PluginBase):
             "refresh_mode": "all",
             "wait_seconds": 60,
             "debounce_seconds": 30,
-            "emby_url": "",
-            "emby_api_key": "",
-            "jf_url": "",
-            "jf_api_key": "",
-            "fn_enabled": False,
-            "fn_scan_mode": "all",
-            "fn_library_name": "",
-            "fn_server_name": "",
+            "server_names": "",
         }
 
     def get_page(self) -> List[dict]:
@@ -525,7 +396,7 @@ class TgtoDriveSync(_PluginBase):
                     f"{t.get('name')}={'成功' if t.get('ok') else '失败'}" for t in targets
                 )
             else:
-                # 兼容 v1.1.x 及更早的记录结构
+                # 兼容 v1.3.x 及更早的记录结构
                 stat = f"Emby={'成功' if item.get('refresh_ok') else '未执行/失败'}"
                 if "fn_ok" in item:
                     stat += f" 飞牛={'成功' if item.get('fn_ok') else '未执行/失败'}"
@@ -636,26 +507,15 @@ class TgtoDriveSync(_PluginBase):
                     logger.info(f"等待 {self._wait_seconds} 秒以便 TgtoDrive 完成 STRM 生成...")
                     time.sleep(self._wait_seconds)
 
-                # 3. 刷新已配置的媒体服务器（Emby / Jellyfin / 飞牛影视）
-                targets: List[Tuple[str, bool, str]] = []
-                mp_servers = settings.MEDIASERVER or []
-
-                if (self._emby_url and self._emby_api_key) or "emby" in mp_servers:
-                    targets.append(("Emby", *self._refresh_emby(info)))
-
-                if (self._jf_url and self._jf_api_key) or "jellyfin" in mp_servers:
-                    targets.append(("Jellyfin", *self._refresh_jellyfin(info)))
-
-                if self._fn_enabled:
-                    targets.append(("飞牛影视", *self._refresh_fnos()))
-
+                # 3. 刷新全部已配置的媒体服务器
+                targets = self._refresh_media_servers(info)
                 record["targets"] = [{"name": n, "ok": o, "msg": m} for n, o, m in targets]
                 record["refresh_ok"] = any(o for _, o, _ in targets)
                 for name, ok, msg in targets:
                     record["message"] += f"\n{name}：{msg}"
                     logger.info(f"{name} 刷新结果：{ok} - {msg}")
 
-            # 5. 发送通知
+            # 4. 发送通知
             if self._notify:
                 self._send_notice(record, info)
 
@@ -695,136 +555,90 @@ class TgtoDriveSync(_PluginBase):
         except requests.RequestException as err:
             return False, f"请求异常：{err}"
 
-    def _refresh_emby(self, info: dict) -> Tuple[bool, str]:
-        """刷新 Emby 媒体库：优先插件自定义 Emby，否则用 MoviePilot 已配置的媒体服务器。"""
-        # 方式一：插件中单独配置了 Emby 地址与 API Key，直接调 Emby REST
-        if self._emby_url and self._emby_api_key:
-            try:
-                url = f"{self._emby_url}/emby/Library/Refresh"
-                resp = requests.post(
-                    url,
-                    params={"api_key": self._emby_api_key, "Recursive": "true"},
-                    timeout=(5, 60),
-                )
-                if resp.status_code in (200, 204):
-                    return True, f"已请求刷新 {self._emby_url}"
-                return False, f"Emby 返回 HTTP {resp.status_code}"
-            except requests.RequestException as err:
-                return False, f"Emby 请求异常：{err}"
-
-        # 方式二：复用 MoviePilot 已配置的媒体服务器
-        mediaserver = settings.MEDIASERVER or []
-        if "emby" not in mediaserver:
-            return False, "MoviePilot 未配置 Emby，且插件未单独填写 Emby 地址"
-        try:
-            emby = Emby()
-            if self._refresh_mode == "item" and info.get("title"):
-                from app.schemas import RefreshMediaItem
-
-                items = [
-                    RefreshMediaItem(
-                        title=info.get("title"),
-                        year=info.get("year"),
-                        type=info.get("type"),
-                        category=None,
-                        target_path=info.get("target_path"),
-                    )
-                ]
-                emby.refresh_library_by_items(items)
-                return True, f"已按条目刷新：{info.get('title')}"
-            emby.refresh_root_library()
-            return True, "已请求刷新全部媒体库"
-        except Exception as err:  # noqa: BLE001
-            return False, f"调用 MoviePilot Emby 模块异常：{err}"
-
-    def _refresh_jellyfin(self, info: dict) -> Tuple[bool, str]:
-        """刷新 Jellyfin 媒体库：优先插件自定义配置，否则用 MoviePilot 已配置的媒体服务器。
-
-        MoviePilot 的 Jellyfin 模块未提供按条目刷新接口，故只能整库刷新。
-        """
-        # 方式一：插件中单独配置了 Jellyfin 地址与 API Key，直接调 Jellyfin REST
-        if self._jf_url and self._jf_api_key:
-            try:
-                url = f"{self._jf_url}/Library/Refresh"
-                resp = requests.post(
-                    url,
-                    params={"api_key": self._jf_api_key, "Recursive": "true"},
-                    timeout=(5, 60),
-                )
-                if resp.status_code in (200, 204):
-                    return True, f"已请求刷新 {self._jf_url}"
-                return False, f"Jellyfin 返回 HTTP {resp.status_code}"
-            except requests.RequestException as err:
-                return False, f"Jellyfin 请求异常：{err}"
-
-        # 方式二：复用 MoviePilot 已配置的媒体服务器
-        if "jellyfin" not in (settings.MEDIASERVER or []):
-            return False, "MoviePilot 未配置 Jellyfin，且插件未单独填写 Jellyfin 地址"
-        try:
-            from app.modules.jellyfin import Jellyfin
-
-            Jellyfin().refresh_root_library()
-            return True, "已请求刷新全部媒体库"
-        except Exception as err:  # noqa: BLE001
-            return False, f"调用 MoviePilot Jellyfin 模块异常：{err}"
-
-    def _refresh_fnos(self) -> Tuple[bool, str]:
-        """刷新飞牛影视媒体库（复用 MoviePilot 内置的飞牛影视模块）。"""
+    def _refresh_media_servers(self, info: dict) -> List[Tuple[str, bool, str]]:
+        """刷新 MoviePilot 中已配置并启用的全部媒体服务器，返回 [(名称, 是否成功, 说明)]。"""
         helper_cls = _load_mediaserver_helper()
         if helper_cls is None:
-            return False, "当前 MoviePilot 版本未提供 MediaServerHelper，无法刷新飞牛影视"
+            return [("媒体服务器", False, "当前 MoviePilot 未提供 MediaServerHelper")]
 
         try:
             services = helper_cls().get_services() or {}
         except Exception as err:  # noqa: BLE001
-            return False, f"读取 MoviePilot 媒体服务器失败：{err}"
+            return [("媒体服务器", False, f"读取媒体服务器失败：{err}")]
+        if not services:
+            return [("媒体服务器", False, "MoviePilot 未配置任何媒体服务器")]
 
-        fnos = [(name, info) for name, info in services.items() if _is_trimemedia(info)]
-        if not fnos:
-            return False, "MoviePilot 未配置飞牛影视媒体服务器（设定 → 媒体服务器）"
-        if self._fn_server_name:
-            fnos = [(name, info) for name, info in fnos if name == self._fn_server_name]
-            if not fnos:
-                return False, f"未找到名为「{self._fn_server_name}」的飞牛媒体服务器"
+        wanted = [s.strip() for s in self._server_names.split(",") if s.strip()] \
+            if self._server_names else []
 
-        results: List[str] = []
-        any_ok = False
-        for name, service_info in fnos:
+        targets: List[Tuple[str, bool, str]] = []
+        for name, service_info in services.items():
+            if wanted and name not in wanted:
+                continue
+            label = f"{name}({_service_type_name(service_info)})"
             instance = getattr(service_info, "instance", None)
             if instance is None:
-                results.append(f"{name}: 实例不可用")
+                targets.append((label, False, "实例不可用"))
                 continue
             try:
-                if hasattr(instance, "is_configured") and not instance.is_configured():
-                    results.append(f"{name}: 未配置或未启用")
-                    continue
-
-                if self._fn_scan_mode == "library":
-                    if not self._fn_library_name:
-                        results.append(f"{name}: 未填写媒体库名称")
-                        continue
-                    api = getattr(instance, "api", None)
-                    mdb_list = api.mdb_list() if api else None
-                    target = next(
-                        (m for m in (mdb_list or []) if getattr(m, "name", None) == self._fn_library_name),
-                        None,
-                    )
-                    if target is None:
-                        results.append(f"{name}: 未找到媒体库「{self._fn_library_name}」")
-                        continue
-                    # 先探测运行中任务，避免误报 -14 Task duplicate
-                    api.task_running()
-                    ok = bool(api.mdb_scan(target))
-                    results.append(f"{name}/{self._fn_library_name}: {'已触发' if ok else '触发失败'}")
-                    any_ok = any_ok or ok
-                else:
-                    ok = bool(instance.refresh_root_library())
-                    results.append(f"{name}: {'已触发全库刷新' if ok else '触发失败'}")
-                    any_ok = any_ok or ok
+                ok, msg = self._refresh_one(instance, info)
+                targets.append((label, ok, msg))
             except Exception as err:  # noqa: BLE001
-                results.append(f"{name}: 异常 {err}")
+                targets.append((label, False, f"刷新异常：{err}"))
 
-        return any_ok, "；".join(results) if results else "无可用飞牛服务器"
+        if not targets:
+            return [("媒体服务器", False, f"没有匹配的媒体服务器（已指定：{self._server_names}）")]
+        return targets
+
+    def _refresh_one(self, instance: Any, info: dict) -> Tuple[bool, str]:
+        """刷新单个媒体服务器实例。"""
+        if hasattr(instance, "is_configured"):
+            try:
+                if not instance.is_configured():
+                    return False, "未配置或未启用"
+            except Exception:  # noqa: BLE001
+                pass
+
+        # 按条目刷新：仅在实例支持且能构造出条目时使用，否则回退整库
+        if self._refresh_mode == "item" and hasattr(instance, "refresh_library_by_items"):
+            items = self._build_refresh_items(info)
+            if items:
+                try:
+                    result = instance.refresh_library_by_items(items)
+                    if result is not None:
+                        title = info.get("title") or "-"
+                        return bool(result), f"已按条目刷新：{title}"
+                except Exception as err:  # noqa: BLE001
+                    logger.warning(f"按条目刷新失败，回退整库刷新：{err}")
+
+        if not hasattr(instance, "refresh_root_library"):
+            return False, "该媒体服务器模块不支持刷新"
+        result = instance.refresh_root_library()
+        if result is None:
+            return False, "刷新返回空（可能未认证或服务不可用）"
+        return bool(result), "已请求刷新全部媒体库"
+
+    @staticmethod
+    def _build_refresh_items(info: dict) -> Optional[list]:
+        """按入库信息构造媒体库刷新条目；无法构造时返回 None（调用方回退整库）。"""
+        if not info.get("title"):
+            return None
+        try:
+            from app.schemas import RefreshMediaItem
+        except Exception:  # noqa: BLE001
+            return None
+        try:
+            return [
+                RefreshMediaItem(
+                    title=info.get("title"),
+                    year=info.get("year") or None,
+                    type=info.get("type") or None,
+                    category=None,
+                    target_path=info.get("target_path") or None,
+                )
+            ]
+        except Exception:  # noqa: BLE001
+            return None
 
     def _send_notice(self, record: dict, info: dict):
         """发送结果通知。"""
@@ -839,7 +653,7 @@ class TgtoDriveSync(_PluginBase):
             for target in targets:
                 text += f"{target.get('name')}：{'成功' if target.get('ok') else '失败'}\n"
         else:
-            text += "媒体库刷新：未配置任何目标\n"
+            text += "媒体库刷新：未执行\n"
         text += f"{record.get('message', '')}"
         try:
             self.post_message(

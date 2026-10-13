@@ -1,7 +1,9 @@
 # TgtoDrive STRM 同步插件（MoviePilot）
 
 MoviePilot 整理入库（`TransferComplete` 事件）后，自动调用 **TgtoDrive 官方 OpenAPI**
-触发生成网盘 STRM，等待生成完成后刷新 **Emby** / **Jellyfin** / **飞牛影视** 媒体库，并发送通知。
+触发生成网盘 STRM，等待生成完成后**刷新全部已配置的媒体服务器**，并发送通知。
+媒体库刷新是**通用适配**的，自动覆盖 Emby / Jellyfin / Plex / 飞牛影视 / 绿联影视 /
+Navidrome / Vyo / 极影视以及自定义等所有类型，宿主后续新增类型也无需改插件。
 
 ## 工作流程
 
@@ -16,10 +18,10 @@ POST {TgtoDrive}/api/strm-sync/run   { "source": "123云盘" }
       ▼
 等待 X 秒（TgtoDrive 的 STRM 同步为后台异步任务）
       ▼
-刷新媒体库（按已配置的服务器逐个刷新）
-  ├─ Emby（复用 MoviePilot 已配置的 Emby，或插件内单独配置）
-  ├─ Jellyfin（同上，仅整库刷新）
-  └─ 飞牛影视（启用时，全库或指定媒体库）
+刷新媒体库（遍历 MoviePilot 中已配置并启用的全部媒体服务器）
+  ├─ Emby / Jellyfin / Plex / 飞牛影视 / 绿联影视 / Navidrome / Vyo / 极影视 / 自定义 …
+  ├─ 整库刷新：实例.refresh_root_library()
+  └─ 按条目刷新：实例.refresh_library_by_items()（不支持者自动回退整库）
       ▼
 发送通知 + 记录执行历史
 ```
@@ -35,13 +37,14 @@ POST {TgtoDrive}/api/strm-sync/run   { "source": "123云盘" }
 3. 点击创建访问令牌，**完整令牌只在创建时显示一次**，复制保存（服务端只存 SHA-256 摘要）。
 4. 令牌具有后台管理员权限，请只用于可信脚本；最多同时保存 20 个，撤销后立即失效。
 
-## 前置（可选）：在 MoviePilot 中配置飞牛影视
+## 前置（可选）：在 MoviePilot 中配置媒体服务器
 
-插件**直接依赖 MoviePilot 内置的飞牛影视模块**（`app.modules.trimemedia`），
-不再自己实现接口与签名。使用前请在 MoviePilot「**设定 → 媒体服务器**」中添加飞牛影视
-（填飞牛地址、管理员账号等），插件会自动复用这份配置，无需在插件里重复填写地址与密钥。
+插件通过 MoviePilot 的 `MediaServerHelper` 取出「**设定 → 媒体服务器**」中已配置并启用的
+全部服务器实例，逐个调用其刷新能力。因此**只需在 MoviePilot 里配好媒体服务器**，插件会自动适配，
+无需在插件内重复填写地址或密钥。
 
-> ⚠️ 必须使用**管理员账号**：飞牛只有管理员才能触发媒体库刷新，非管理员会直接失败。
+> ⚠️ 飞牛影视需使用**管理员账号**：飞牛只有管理员才能触发媒体库刷新，非管理员会直接失败。
+> Jellyfin、Navidrome 的模块只提供整库刷新，「按入库条目刷新」模式下会自动回退整库。
 
 ## 安装
 
@@ -79,15 +82,10 @@ MoviePilot-Plugins/
 | TgtoDrive 地址 | 例如 `http://10.0.0.4:12366` | 空 |
 | TgtoDrive OpenAPI Token | 上一步创建的令牌 | 空 |
 | STRM 同步来源 | `123云盘` / `115网盘` / `光鸭云盘` 及各自音乐/分享 | `123云盘` |
-| Emby 刷新方式 | 刷新全部媒体库 / 按入库条目刷新 | 全部媒体库 |
+| 媒体库刷新方式 | 刷新全部媒体库 / 按入库条目刷新 | 全部媒体库 |
 | 触发后等待秒数 | 等待 STRM 生成的时间 | 60 |
 | 防抖秒数 | 合并短时间内的多次入库 | 30 |
-| Emby 地址 / API Key | 可选。留空则复用 MoviePilot 已配置的媒体服务器 | 空 |
-| Jellyfin 地址 / API Key | 可选。留空则复用 MoviePilot 已配置的媒体服务器 | 空 |
-| 启用飞牛影视刷新 | 是否在 STRM 生成后刷新飞牛影视 | 关 |
-| 飞牛扫描范围 | 刷新全部媒体库 / 仅刷新指定媒体库 | 全部媒体库 |
-| 指定媒体库名称 | 扫描范围选「仅指定」时填写，如 `电影库` | 空 |
-| 指定飞牛媒体服务器名称 | 可选。配置了多个飞牛时指定刷新哪一个，留空刷新全部 | 空 |
+| 只刷新指定媒体服务器 | 可选。填 MoviePilot 里的服务器名称，多个用英文逗号分隔，留空=全部 | 空 |
 
 ## 手动触发
 
@@ -122,12 +120,12 @@ curl -X POST "http://10.0.0.4:12366/api/strm-sync/run" \
 - TgtoDrive 无 STRM 完成回调，刷新的时机靠「等待秒数」估算；若同步较慢可调大该值。
 - `source` 取值取自 TgtoDrive 前端枚举，若其版本升级后新增来源，请在
   `__init__.py` 顶部的 `STRM_SOURCES` 中同步补充。
-- 「按入库条目刷新」依赖 MoviePilot 提供的 `RefreshMediaItem`；若匹配不到媒体库会退化为无操作，
-  建议优先使用「刷新全部媒体库」。
-- **媒体的刷新只在「已配置」时执行**：Emby / Jellyfin 需在 MoviePilot 里配置或插件内填地址+Key，
-  飞牛需开启开关并配好媒体服务器，否则该目标不会出现在结果里。
-- **Jellyfin 只支持整库刷新**：MoviePilot 的 Jellyfin 模块未提供按条目刷新接口，「刷新方式」对它不生效。
-- **飞牛刷新依赖 MoviePilot 版本**：插件通过 `MediaServerHelper` 拿飞牛实例（v2 在 `app.helper`、
-  v3 在 `app.application`，已做双路径兼容），并按 `ServiceInfo.type == trimemedia` 识别。
-  若你的 MoviePilot 未内置 `app.modules.trimemedia`，飞牛刷新会返回明确错误提示，其它目标不受影响。
-- 飞牛刷新需**管理员账号**，且需在 MoviePilot 中已配置并启用飞牛影视媒体服务器。
+- **刷新哪个库，由 MoviePilot 决定**：插件只刷新「设定 → 媒体服务器」里已配置并启用的服务器；
+  未配置的不会出现在结果里。要跳过某些服务器，用「只刷新指定媒体服务器」按名称过滤。
+- **Jellyfin / Navidrome 只支持整库刷新**：它们的模块未提供按条目刷新接口，
+  「按入库条目刷新」模式下这两个会自动回退为整库刷新，其它服务器仍按条目刷新。
+- **取实例的路径分代**：`MediaServerHelper` 在 v2 位于 `app.helper.mediaserver`、
+  v3 位于 `app.application.mediaserver`，插件已做双路径兼容；若宿主未提供该类，
+  会返回明确的错误提示，不影响 TgtoDrive 触发这一步。
+- 刷新调用的是各服务器模块的 `refresh_root_library()` / `refresh_library_by_items()`，
+  返回 `None` 表示未认证或服务不可用，会记为失败并写入原因。
