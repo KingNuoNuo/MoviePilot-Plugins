@@ -1,0 +1,14 @@
+{
+  "TgtoDriveSync": {
+    "name": "TgtoDrive STRM 同步",
+    "description": "整理入库后自动触发 TgtoDrive 生成网盘 STRM，完成后刷新 Emby 媒体库。",
+    "labels": "网盘,媒体库",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/refresh2.png",
+    "author": "靖哥哥",
+    "level": 1,
+    "history": {
+      "v1.0.0": "首个版本：TransferComplete 事件触发 TgtoDrive STRM 同步，等待后刷新 Emby，支持防抖、通知、手动 API 与远程命令。"
+    }
+  }
+}
