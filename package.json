@@ -1,14 +1,15 @@
 {
   "TgtoDriveSync": {
     "name": "TgtoDrive STRM 同步",
-    "description": "整理入库后自动触发 TgtoDrive 生成网盘 STRM，完成后刷新 Emby 媒体库。",
+    "description": "整理入库后自动触发 TgtoDrive 生成网盘 STRM，完成后刷新 Emby / 飞牛影视媒体库。",
     "labels": "网盘,媒体库",
-    "version": "1.0.1",
+    "version": "1.1.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/refresh2.png",
     "author": "KingNuoNuo",
     "level": 1,
     "v2": true,
     "history": {
+      "v1.1.0": "新增飞牛影视媒体库刷新（全库扫描 / 指定媒体库），支持用户名密码或 token 认证。",
       "v1.0.1": "修正作者信息为 KingNuoNuo，补充作者主页。",
       "v1.0.0": "首个版本：TransferComplete 事件触发 TgtoDrive STRM 同步，等待后刷新 Emby，支持防抖、通知、手动 API 与远程命令。"
     }
