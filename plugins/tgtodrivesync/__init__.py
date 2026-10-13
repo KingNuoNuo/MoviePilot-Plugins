@@ -41,6 +41,10 @@ STRM_SOURCES = [
     "115网盘分享",
 ]
 
+# TgtoDrive 在「同一来源已有同步任务」时会拒绝新请求，这类响应不是错误。
+# 命中这些关键词时按「同步进行中」处理，而非失败。
+TRIGGER_RUNNING_HINTS = ("正在执行", "执行中", "稍后再试", "处理中", "任务已存在")
+
 
 def _load_mediaserver_helper():
     """按 MoviePilot 版本加载 MediaServerHelper（v2 在 app.helper，v3 在 app.application）。"""
@@ -74,7 +78,7 @@ class TgtoDriveSync(_PluginBase):
     # 插件图标（使用官方图标库中的通用刷新图标）
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/refresh2.png"
     # 插件版本
-    plugin_version = "1.5.0"
+    plugin_version = "1.5.1"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -383,7 +387,7 @@ class TgtoDriveSync(_PluginBase):
                     stat += f" 飞牛={'成功' if item.get('fn_ok') else '未执行/失败'}"
             line = (
                 f"[{item.get('time')}] 来源={item.get('source')} "
-                f"触发={'成功' if item.get('trigger_ok') else '失败'} {stat}"
+                f"触发={self._trigger_state_label(item)} {stat}"
             )
             line += f"\n{item.get('message', '')}"
             rows.append({
@@ -477,16 +481,26 @@ class TgtoDriveSync(_PluginBase):
             }
 
             # 1. 触发 TgtoDrive 生成 STRM
-            trigger_ok, trigger_msg = self._trigger_strm_sync()
-            record["trigger_ok"] = trigger_ok
+            state, trigger_msg = self._trigger_strm_sync()
+            record["trigger_state"] = state
+            record["trigger_ok"] = state != "failed"
             record["message"] = f"STRM同步：{trigger_msg}"
-            logger.info(f"TgtoDrive STRM 同步触发结果：{trigger_ok} - {trigger_msg}")
+            logger.info(f"TgtoDrive STRM 同步触发结果：{state} - {trigger_msg}")
 
-            if trigger_ok:
+            if state != "failed":
                 # 2. 等待 STRM 生成
-                if self._wait_seconds > 0:
-                    logger.info(f"等待 {self._wait_seconds} 秒以便 TgtoDrive 完成 STRM 生成...")
-                    time.sleep(self._wait_seconds)
+                self._sleep_wait()
+
+                # 若首次被拒（同一来源已有任务在执行），等原任务结束后重试一次，
+                # 以确保本次入库的内容也被生成
+                if state == "running":
+                    retry_state, retry_msg = self._trigger_strm_sync()
+                    record["message"] += f"\n重试触发：{retry_msg}"
+                    logger.info(f"STRM 同步重试触发：{retry_state} - {retry_msg}")
+                    if retry_state == "ok":
+                        self._sleep_wait()
+                    elif retry_state == "running":
+                        record["message"] += "\n（仍被占用，按最佳努力刷新）"
 
                 # 3. 刷新全部已配置的媒体服务器
                 targets = self._refresh_media_servers(info)
@@ -507,10 +521,29 @@ class TgtoDriveSync(_PluginBase):
             with self._lock:
                 self._running = False
 
-    def _trigger_strm_sync(self) -> Tuple[bool, str]:
-        """调用 TgtoDrive OpenAPI 触发 STRM 同步。"""
+    @staticmethod
+    def _trigger_state_label(record: dict) -> str:
+        """把触发状态转成中文标签（兼容不含 trigger_state 的旧记录）。"""
+        state = record.get("trigger_state")
+        if state in ("ok", "running", "failed"):
+            return {"ok": "成功", "running": "同步中", "failed": "失败"}[state]
+        return "成功" if record.get("trigger_ok") else "失败"
+
+    def _sleep_wait(self):
+        """等待 STRM 生成（可配置秒数）。"""
+        if self._wait_seconds > 0:
+            logger.info(f"等待 {self._wait_seconds} 秒以便 TgtoDrive 完成 STRM 生成...")
+            time.sleep(self._wait_seconds)
+
+    def _trigger_strm_sync(self) -> Tuple[str, str]:
+        """调用 TgtoDrive OpenAPI 触发 STRM 同步。
+
+        :return: (状态, 说明)，状态取值 ``ok`` / ``running`` / ``failed``。
+                 ``running`` 表示同一来源已有同步任务在执行（TgtoDrive 拒绝并发），
+                 这不是错误，调用方应按「同步进行中」继续处理。
+        """
         if not self._tgtodrive_url or not self._openapi_token:
-            return False, "TgtoDrive 地址或 OpenAPI Token 未配置"
+            return "failed", "TgtoDrive 地址或 OpenAPI Token 未配置"
         url = f"{self._tgtodrive_url.rstrip('/')}/api/strm-sync/run"
         headers = {
             "Authorization": f"Bearer {self._openapi_token}",
@@ -530,11 +563,13 @@ class TgtoDriveSync(_PluginBase):
             except ValueError:
                 data = {}
             if resp.ok and data.get("success"):
-                return True, str(data.get("message") or "已开始同步")
-            err = data.get("error") or data.get("message") or f"HTTP {resp.status_code}"
-            return False, str(err)
+                return "ok", str(data.get("message") or "已开始同步")
+            err = str(data.get("error") or data.get("message") or f"HTTP {resp.status_code}")
+            if any(hint in err for hint in TRIGGER_RUNNING_HINTS):
+                return "running", err
+            return "failed", err
         except requests.RequestException as err:
-            return False, f"请求异常：{err}"
+            return "failed", f"请求异常：{err}"
 
     def _refresh_media_servers(self, info: dict) -> List[Tuple[str, bool, str]]:
         """刷新 MoviePilot 中已配置并启用的全部媒体服务器，返回 [(名称, 是否成功, 说明)]。"""
@@ -632,7 +667,7 @@ class TgtoDriveSync(_PluginBase):
         title_part = f"（{title}）" if title else ""
         text = (
             f"来源：{record.get('source')}\n"
-            f"STRM 触发：{'成功' if record.get('trigger_ok') else '失败'}\n"
+            f"STRM 触发：{self._trigger_state_label(record)}\n"
         )
         targets = record.get("targets") or []
         if targets:
