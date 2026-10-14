@@ -1,4 +1,24 @@
+<div align="center">
+
 # TgtoDrive STRM 同步插件（MoviePilot）
+
+**MoviePilot v3 插件** —— 整理入库后自动触发生成网盘 STRM，完成后自动刷新 Emby / Jellyfin / Plex 媒体库。
+
+[![Stars](https://img.shields.io/github/stars/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/stargazers)
+[![Forks](https://img.shields.io/github/forks/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/network/members)
+[![Watchers](https://img.shields.io/github/watchers/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/watchers)
+[![Issues](https://img.shields.io/github/issues/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/issues)
+[![License](https://img.shields.io/github/license/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](LICENSE)
+[![Last Commit](https://img.shields.io/github/last-commit/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/commits/main)
+[![Top Language](https://img.shields.io/github/languages/top/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins)
+
+[📦 插件市场安装](#方式一作为自定义插件市场推荐) · [🐛 反馈问题](https://github.com/KingNuoNuo/MoviePilot-Plugins/issues) · [💡 功能建议](https://github.com/KingNuoNuo/MoviePilot-Plugins/issues)
+
+`MoviePilot` `MoviePilot Plugin` `TgtoDrive` `STRM` `Media Server` `Emby` `Jellyfin` `Plex` `Netdisk` `NAS` `Self-hosted` `Python`
+
+</div>
+
+---
 
 MoviePilot 整理入库（`TransferComplete` 事件）后，自动调用 **TgtoDrive 官方 OpenAPI**
 触发生成网盘 STRM，等待生成完成后**刷新全部已配置的媒体服务器**，并发送通知。
@@ -161,3 +181,32 @@ curl -X POST "http://10.0.0.4:12366/api/strm-sync/run" \
   会返回明确的错误提示，不影响 TgtoDrive 触发这一步。
 - 刷新调用的是各服务器模块的 `refresh_root_library()` / `refresh_library_by_items()`，
   返回 `None` 表示未认证或服务不可用，会记为失败并写入原因。
+
+## English
+
+**TgtoDrive STRM Sync** is a [MoviePilot](https://github.com/jxxghp/MoviePilot) v3 plugin. When MoviePilot finishes transferring files into your library
+(`TransferComplete` event), it automatically calls the official TgtoDrive OpenAPI to generate
+cloud-drive STRM links, waits for the sync to finish, then refreshes every configured media
+server and sends a notification.
+
+- Media-server refresh is generic: Emby / Jellyfin / Plex / 飞牛影视 / 绿联影视 / Navidrome / Vyo / 极影视 / custom
+- Debounced queue accumulates multiple imports, then triggers one STRM sync and refreshes every affected library
+- The plugin decides which libraries to refresh by path-prefix matching against `get_librarys()`, falling back to a full-library refresh with an explicit reason
+- Install it as a custom plugin market source, or just drop the `plugins/tgtodrivesync/` folder into your MoviePilot plugin directory
+
+<!-- traffic:start -->
+
+## 📊 访问统计
+
+![近 14 天访问趋势](docs/traffic.svg)
+
+| 指标 | 近 14 天 |
+| --- | ---: |
+| 页面浏览量 | 1 |
+| 独立访客 | 1 |
+| 克隆次数 | 85 |
+| 独立克隆者 | 40 |
+
+<sub>数据窗口 2026-09-30 ~ 2026-10-13 · 由 GitHub Actions 每日更新于 2026-10-14 · 来源：GitHub Traffic API（仅统计最近 14 天）</sub>
+
+<!-- traffic:end -->
