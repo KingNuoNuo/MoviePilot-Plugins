@@ -1,7 +1,17 @@
-# 猫眼榜单订阅
+# 猫眼榜单订阅（MaoyanRank）
+
+> [← 返回插件一览](../../README.md#插件一览) · 版本 v4.2.0 · 目录 `plugins.v3/maoyanrank`
 
 按配置的榜单类型、平台和排名数量获取猫眼数据，识别媒体后添加订阅；
 同时把抓取结果落成**榜单快照**，通过对外接口提供给 App、脚本与宿主推荐页。
+
+## 安装
+
+MoviePilot →「设定 → 插件市场 → 添加市场」，填入
+`https://github.com/KingNuoNuo/MoviePilot-Plugins`，保存后搜索「**猫眼榜单订阅**」安装并启用。
+
+本地部署也可把 `plugins.v3/maoyanrank` 整个目录拷贝到 MoviePilot 的插件目录
+（容器内通常为 `/app/app/plugins/`，以你的实际部署为准），重启容器即可。
 
 ## 对外接口
 

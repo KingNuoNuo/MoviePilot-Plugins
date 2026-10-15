@@ -1,8 +1,8 @@
 <div align="center">
 
-# TgtoDrive STRM 同步插件（MoviePilot）
+# MoviePilot 插件仓库
 
-**MoviePilot v3 插件** —— 整理入库后自动触发生成网盘 STRM，完成后自动刷新 Emby / Jellyfin / Plex 媒体库。
+**自建 MoviePilot v3 插件市场源** —— 整理入库自动生成网盘 STRM 并刷新媒体库；猫眼榜单订阅与榜单对外接口。
 
 [![Stars](https://img.shields.io/github/stars/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/stargazers)
 [![Forks](https://img.shields.io/github/forks/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/network/members)
@@ -12,65 +12,33 @@
 [![Last Commit](https://img.shields.io/github/last-commit/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/commits/main)
 [![Top Language](https://img.shields.io/github/languages/top/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins)
 
-[📦 插件市场安装](#方式一作为自定义插件市场推荐) · [🐛 反馈问题](https://github.com/KingNuoNuo/MoviePilot-Plugins/issues) · [💡 功能建议](https://github.com/KingNuoNuo/MoviePilot-Plugins/issues)
+[📦 插件市场安装](#install-market) · [🧩 插件一览](#插件一览) · [🐛 反馈问题](https://github.com/KingNuoNuo/MoviePilot-Plugins/issues) · [💡 功能建议](https://github.com/KingNuoNuo/MoviePilot-Plugins/issues)
 
-`MoviePilot` `MoviePilot Plugin` `TgtoDrive` `STRM` `Media Server` `Emby` `Jellyfin` `Plex` `Netdisk` `NAS` `Self-hosted` `Python`
+`MoviePilot` `MoviePilot Plugin` `TgtoDrive` `STRM` `Media Server` `Emby` `Jellyfin` `Plex` `Netdisk` `NAS` `Self-hosted` `Maoyan` `Ranking` `Python`
 
 </div>
 
 ---
 
-MoviePilot 整理入库（`TransferComplete` 事件）后，自动调用 **TgtoDrive 官方 OpenAPI**
-触发生成网盘 STRM，等待生成完成后**刷新全部已配置的媒体服务器**，并发送通知。
-媒体库刷新是**通用适配**的，自动覆盖 Emby / Jellyfin / Plex / 飞牛影视 / 绿联影视 /
-Navidrome / Vyo / 极影视以及自定义等所有类型，宿主后续新增类型也无需改插件。
+## 插件一览
 
-## 工作流程
+本仓库同时提供 v2/v3 两代插件清单，添加为自定义市场源即可同时看到全部插件。
+**点插件名进入该插件的独立说明页**（安装、配置、接口与已知边界都在里面）。
 
-```
-MoviePilot 整理入库
-      │  (EventType.TransferComplete)
-      ▼
-进入待刷新队列（多次入库累积，不覆盖）
-      ▼
-[防抖合并 N 秒：窗口内再来就重置计时]
-      ▼
-取走整个队列 → POST {TgtoDrive}/api/strm-sync/run   { "source": "123云盘" }
-      │  (Bearer OpenAPI Token)
-      ▼
-等待 X 秒（TgtoDrive 的 STRM 同步为后台异步任务）
-      ▼
-刷新媒体库（用队列里的全部条目，遍历已配置的媒体服务器）
-  ├─ Emby / Jellyfin / Plex / 飞牛影视 / 绿联影视 / Navidrome / Vyo / 极影视 / 自定义 …
-  ├─ 能定位到具体库的 → 单库刷新（refresh_library_by_items）
-  └─ 不支持的 → 整库刷新（refresh_root_library）
-      ▼
-发送通知（含本次文件清单）+ 记录执行历史
-```
+| 插件 | 版本 | 简介 | 说明 |
+| --- | --- | --- | --- |
+| **[TgtoDrive STRM 同步](plugins/tgtodrivesync/README.md)**<br><sub>`TgtoDriveSync` · `plugins/tgtodrivesync`</sub> | v1.7.1 | 整理入库后自动调用 TgtoDrive OpenAPI 生成网盘 STRM，完成后刷新全部已配置媒体服务器并发送通知。 | [→ 插件说明](plugins/tgtodrivesync/README.md) |
+| **[猫眼榜单订阅](plugins.v3/maoyanrank/README.md)**<br><sub>`MaoyanRank` · `plugins.v3/maoyanrank`</sub> | v4.2.0 | 抓取猫眼电影票房与剧集/综艺热度榜单并自动订阅；提供 `/rank`、`/rank-list`、`/refresh` 对外接口，可作为宿主推荐页数据源。 | [→ 插件说明](plugins.v3/maoyanrank/README.md) |
 
-> ⚠️ TgtoDrive 的 `/api/strm-sync/run` 只返回「任务已开始」，官方 OpenAPI 中**没有提供
-> STRM 同步的完成回调 / 进度查询接口**。因此本插件用「触发后等待 N 秒」来估算生成时间，
-> 请根据网盘规模把「触发后等待秒数」调到合适值（默认 60 秒）。
+**安装**：MoviePilot →「设定 → 插件市场 → 添加市场」，填入仓库地址 `https://github.com/KingNuoNuo/MoviePilot-Plugins`，保存后在市场内搜索插件名安装。
 
-## 前置：在 TgtoDrive 里创建 OpenAPI Token
+**其它链接**：[打包产物](#packages)（直接下载压缩包） · [反馈问题 / 功能建议](https://github.com/KingNuoNuo/MoviePilot-Plugins/issues)
 
-1. 打开 TgtoDrive 管理台 `http://<NAS_IP>:12366` 并登录。
-2. 进入「**实用工具 → OpenAPI**」。
-3. 点击创建访问令牌，**完整令牌只在创建时显示一次**，复制保存（服务端只存 SHA-256 摘要）。
-4. 令牌具有后台管理员权限，请只用于可信脚本；最多同时保存 20 个，撤销后立即失效。
-
-## 前置（可选）：在 MoviePilot 中配置媒体服务器
-
-插件通过 MoviePilot 的 `MediaServerHelper` 取出「**设定 → 媒体服务器**」中已配置并启用的
-全部服务器实例，逐个调用其刷新能力。因此**只需在 MoviePilot 里配好媒体服务器**，插件会自动适配，
-无需在插件内重复填写地址或密钥。
-
-> ⚠️ 飞牛影视需使用**管理员账号**：飞牛只有管理员才能触发媒体库刷新，非管理员会直接失败。
-> 刷新策略**自动择优**：能定位到具体媒体库的只刷新受影响的库，不支持单库刷新的（Jellyfin、Navidrome）自动整库刷新。
+---
 
 ## 安装
 
-### 方式一：作为自定义插件市场（推荐）
+<a id="install-market"></a>
 
 1. MoviePilot →「设定 → 插件市场 → 添加市场」，填入本仓库地址：
 
@@ -78,190 +46,60 @@ MoviePilot 整理入库
    https://github.com/KingNuoNuo/MoviePilot-Plugins
    ```
 
-2. 保存后，在市场里搜索「**TgtoDrive STRM 同步**」并安装、启用。
+2. 保存后，在市场里搜索插件名（如「**TgtoDrive STRM 同步**」「**猫眼榜单订阅**」）并安装、启用。
 
-仓库结构：
+本地部署也可把插件目录整个拷贝到 MoviePilot 的插件目录（容器内通常为 `/app/app/plugins/`，
+以你的实际部署为准），重启 MoviePilot 容器即可在插件列表看到：
+
+- TgtoDrive → `plugins/tgtodrivesync`
+- 猫眼榜单 → `plugins.v3/maoyanrank`
+
+## 仓库结构
 
 ```
 MoviePilot-Plugins/
 ├── package.json                 # V1/V2 插件清单（市场识别）
 ├── package.v3.json              # V3 插件清单（市场识别）
-├── plugins/
+├── plugins/                     # v2 代插件目录
 │   └── tgtodrivesync/
-│       └── __init__.py          # 插件主体（类名 TgtoDriveSync）
-└── plugins.v3/
-    └── maoyanrank/
-        ├── __init__.py          # 插件主体（类名 MaoyanRank）
-        └── README.md
+│       ├── __init__.py          # 插件主体（类名 TgtoDriveSync）
+│       └── README.md            # 插件说明
+├── plugins.v3/                  # v3 代插件目录
+│   └── maoyanrank/
+│       ├── __init__.py          # 插件主体（类名 MaoyanRank）
+│       └── README.md            # 插件说明
+├── tests/                       # 插件测试（按 tests/v3/<插件id>/ 组织）
+└── dist/                        # 打包产物
 ```
 
 > MoviePilot v3 会同时扫描 `package.json` 与 `package.v3.json`（`plugins/` 与 `plugins.v3/`），
 > 同名插件按版本号取高者，因此两代插件可以共存在同一个仓库里。
-
-### 方式二：本地直接放置
-
-把 `plugins/tgtodrivesync` 整个目录拷贝到 MoviePilot 的插件目录（容器内通常为
-`/app/app/plugins/`，以你的实际部署为准），重启 MoviePilot 容器即可在插件列表看到。
-
-## 配置项
-
-| 配置 | 说明 | 默认 |
-| --- | --- | --- |
-| 启用插件 | 总开关 | 关 |
-| 发送通知 | 流程结果是否发通知 | 开 |
-| TgtoDrive 地址 | 例如 `http://10.0.0.4:12366` | 空 |
-| TgtoDrive OpenAPI Token | 上一步创建的令牌 | 空 |
-| STRM 同步来源 | `123云盘` / `115网盘` / `光鸭云盘` 及各自音乐/分享 | `123云盘` |
-| 触发后等待秒数 | 等待 STRM 生成的时间 | 60 |
-| 防抖秒数 | 合并短时间内的多次入库 | 30 |
-| 最大等待秒数 | 批量入库时到此强制触发一次，防防抖被无限重置（0=不限） | 300 |
-| 只刷新指定媒体服务器 | 可选。填 MoviePilot 里的服务器名称，多个用英文逗号分隔，留空=全部 | 空 |
-
-## 待刷新队列与文件显示
-
-- **队列合并**：防抖窗口（「防抖秒数」）内收到的多次入库会**累积成队列**（按目标路径去重，
-  同一文件重复入库只算一次），到点后一次性触发 STRM 同步，并用队列里的**全部条目**去刷新媒体库。
-  队列上限 200 条，超出丢弃最旧的。
-- **最大等待**：批量整理时事件接连到达会让防抖被反复重置、可能长时间不触发。
-  「最大等待秒数」到点即**强制触发一次**（默认 300 秒，0 表示不限）。
-- **插件页显示**：详情页顶部显示「**【等待刷新】待刷新文件 N 个**」并逐条列出；
-  上一轮还在执行时会标注「正在刷新中」，且**不会丢文件**（保留队列稍后重试）。
-- **执行历史 / 通知**：列出本次刷新的**受影响媒体库**与文件清单
-  （通知最多列 10 个文件，超出显示「… 其余 N 个」）。
-
-## 「受影响的媒体库」是怎么判定的
-
-插件**自己**判定刷新范围，而不是把判定交给各媒体服务器模块（模块内部匹配失败时会**静默**退化成整库、
-甚至什么都不刷却返回成功）：
-
-1. 取实例的 `get_librarys()`，用**路径前缀**把本次入库的文件匹配到具体媒体库；
-2. 匹配到 → 走单库刷新（`refresh_library_by_items`），并在结果里列出库名；
-3. 匹配不到 / 取不到列表 / 模块不支持单库 → 整库刷新，并**注明原因**
-   （`未匹配到媒体库，请检查路径映射是否一致` / `无法获取媒体库列表` / `该模块不支持单库刷新`）。
-
-> ⚠️ 单库刷新能否生效取决于**路径映射**：MoviePilot 里配置的路径必须与媒体服务器侧的库路径一致
-> （例如容器内外路径要对应）。对不上时插件会明确告诉你「未匹配到媒体库」，而不是假装成功。
-
-## 手动触发
-
-- **插件 API**（需带 MoviePilot 的 `API_TOKEN`）：
-  - `GET /api/v1/plugin/TgtoDriveSync/trigger?apikey=xxx` — 立即触发同步并刷新
-  - `GET /api/v1/plugin/TgtoDriveSync/test?apikey=xxx` — 测试 TgtoDrive 连接
-- **远程命令**：`/tgtodrive_sync`（在支持命令的渠道中发送）
-
-## 直接验证 TgtoDrive 接口
-
-```bash
-# 触发 123 云盘 STRM 同步
-curl -X POST "http://10.0.0.4:12366/api/strm-sync/run" \
-  -H "Authorization: Bearer <OPENAPI_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"source":"123云盘"}'
-
-# 期望响应： {"success": true, "message": "..."}
-```
+> **插件目录名必须是小写的插件类名**（如 `MaoyanRank` → `plugins.v3/maoyanrank/`）。
 
 ## 打包产物
+
+<a id="packages"></a>
 
 `dist/` 目录下提供可直接使用的压缩包：
 
 | 文件 | 说明 |
 | --- | --- |
-| `MoviePilot-Plugins.zip` | 完整插件仓库结构（`package.json` + `plugins/tgtodrivesync/`），解压即可推 Git 或当市场源 |
-| `tgtodrivesync.zip` | 仅插件目录，解压后把 `tgtodrivesync/` 放进 MoviePilot 插件目录 |
-
-## 已知边界
-
-- TgtoDrive 无 STRM 完成回调，刷新的时机靠「等待秒数」估算；若同步较慢可调大该值。
-- **TgtoDrive 同一来源不允许并发同步**：若触发时已有任务在执行，它会返回
-  「…STRM 同步任务正在执行中，请稍后再试」。这**不算失败**：插件会按「同步进行中」处理，
-  等待设定秒数让原任务结束后**重试一次**触发（确保本次入库内容也被生成），再刷新媒体库；
-  若重试时仍被占用，则按最佳努力直接刷新并在记录中注明。
-- `source` 取值取自 TgtoDrive 前端枚举，若其版本升级后新增来源，请在
-  `__init__.py` 顶部的 `STRM_SOURCES` 中同步补充。
-- **刷新哪个库，由 MoviePilot 决定**：插件只刷新「设定 → 媒体服务器」里已配置并启用的服务器；
-  未配置的不会出现在结果里。要跳过某些服务器，用「只刷新指定媒体服务器」按名称过滤。
-- **刷新策略自动择优，由插件自己判定**：插件用 `get_librarys()` + 路径前缀匹配媒体库，
-  命中才单库刷新；不支持的（Jellyfin / Navidrome 等）、匹配不到的一律整库刷新并注明原因。
-  这样不会出现「模块内部静默降级、插件却报告已单库刷新」的情况。
-- **取实例的路径分代**：`MediaServerHelper` 在 v2 位于 `app.helper.mediaserver`、
-  v3 位于 `app.application.mediaserver`，插件已做双路径兼容；若宿主未提供该类，
-  会返回明确的错误提示，不影响 TgtoDrive 触发这一步。
-- 刷新调用的是各服务器模块的 `refresh_root_library()` / `refresh_library_by_items()`，
-  返回 `None` 表示未认证或服务不可用，会记为失败并写入原因。
+| `MoviePilot-Plugins.zip` | 完整插件仓库结构（`package.json` + `package.v3.json` + `plugins/` + `plugins.v3/`），解压即可推 Git 或当市场源 |
+| `tgtodrivesync.zip` | 仅 TgtoDrive 插件目录，解压后把 `tgtodrivesync/` 放进 MoviePilot 插件目录 |
+| `maoyanrank.zip` | 仅猫眼榜单插件目录，解压后把 `maoyanrank/` 放进 MoviePilot 插件目录 |
 
 ---
 
-# 猫眼榜单订阅（MaoyanRank）· V3
+# English
 
-`plugins.v3/maoyanrank`（上游 `jxxghp/MoviePilot-Plugins` 的 maoyanrank，作者「逗猫」）。
-在原有「抓猫眼榜单 → 自动订阅」基础上，**新增榜单对外接口**，并把抓取结果落成
-**榜单快照**（含名次、票房/热度、媒体身份），供 App、脚本与宿主推荐页直接消费。
+A self-hosted [MoviePilot](https://github.com/jxxghp/MoviePilot) plugin market source with two plugins.
+Add `https://github.com/KingNuoNuo/MoviePilot-Plugins` as a custom market source, then install any plugin by name.
+**Click a plugin name below for its own documentation page.**
 
-## 对外接口
-
-路径前缀为 `/api/v1/plugin/MaoyanRank`，认证沿用宿主默认的 **API 令牌**
-（`X-API-KEY` 头或 `?apikey=` 查询参数），因此 App 的 API 令牌模式也能读取，
-不再依赖网页登录态。
-
-| 接口 | 说明 | 认证 |
-| --- | --- | --- |
-| `GET /rank` | 榜单快照：带名次、类型、平台、票房/热度、媒体来源与海报。支持 `board_type`（`movie`/`web-movie`/`web-heat`/`web-tv`/`zongyi`）、`board`（榜单名关键字）、`limit`（每榜条数）筛选 | API 令牌 |
-| `GET /rank-list` | 供宿主**推荐页 / 浏览页**消费的榜单列表，返回 `Response[List[MediaInfo]]`，声明 `page` 参数 | 网页登录态（`bear`） |
-| `GET`/`POST /refresh` | 立即触发一次抓取并按配置添加订阅，返回抓取榜单数、条目数、新增订阅数 | API 令牌 |
-
-```bash
-# 取最近一次快照（每榜最多 5 条）
-curl "http://<MP>:3000/api/v1/plugin/MaoyanRank/rank?apikey=<API_TOKEN>&limit=5"
-
-# 只看剧集热度榜
-curl "http://<MP>:3000/api/v1/plugin/MaoyanRank/rank?apikey=<API_TOKEN>&board_type=web-heat"
-
-# 立即刷新一次
-curl -X POST "http://<MP>:3000/api/v1/plugin/MaoyanRank/refresh?apikey=<API_TOKEN>"
-```
-
-响应为宿主统一三段式 `{ success, message, data }`；`data.boards[]` 为榜单，
-`items[]` 为条目（`rank` 名次、`box_office` 票房、`heat` 热度、
-`media_source`/`media_id` 媒体身份、`poster` 海报）。未识别到媒体的条目**仍会返回**，
-只是身份字段为空，便于前端先渲染榜单。
-
-## 接入宿主推荐页（可选）
-
-打开插件配置里的「**接入推荐页数据源**」后，插件通过
-`ChainEventType.RecommendSource` 把已配置的榜单注册到宿主推荐页：
-
-- 猫眼电影票房 → 分类「电影」
-- 猫眼电视剧热度 / 猫眼网络剧热度 / 猫眼综艺热度 → 分类「电视剧」
-
-只注册**配置里已勾选**的榜单类型；未启用插件或未打开该开关时不注册任何数据源，
-也不影响其它插件塞入的数据源（是**叠加**而非替换）。
-
-## 快照与兜底
-
-- 每次刷新把榜单落成插件数据 `snapshot`；**抓取全失败时保留上一次快照**，
-  避免异常时段接口返回空数据。
-- 升级后尚未跑过刷新时，`/rank` 会**回退到订阅流水**并在 `message` 中注明，
-  保证接口始终可用。
-- 推荐页的 `/rank-list` 会过滤掉没有媒体身份的条目（这类条目无法被宿主识别为媒体）。
-
-## 兼容性
-
-- 抓取逻辑（浏览器会话、反爬、平台筛选、异常隔离）与订阅逻辑**未改动**，
-  既有的 `get_url_info` / `set_sub` 行为与参数顺序保持不变。
-- 只有 `GET /refresh` 与调度器会在 `save_data` 之外多写一个 `snapshot` 键。
-
-## English
-
-**TgtoDrive STRM Sync** is a [MoviePilot](https://github.com/jxxghp/MoviePilot) v3 plugin. When MoviePilot finishes transferring files into your library
-(`TransferComplete` event), it automatically calls the official TgtoDrive OpenAPI to generate
-cloud-drive STRM links, waits for the sync to finish, then refreshes every configured media
-server and sends a notification.
-
-- Media-server refresh is generic: Emby / Jellyfin / Plex / 飞牛影视 / 绿联影视 / Navidrome / Vyo / 极影视 / custom
-- Debounced queue accumulates multiple imports, then triggers one STRM sync and refreshes every affected library
-- The plugin decides which libraries to refresh by path-prefix matching against `get_librarys()`, falling back to a full-library refresh with an explicit reason
-- Install it as a custom plugin market source, or just drop the `plugins/tgtodrivesync/` folder into your MoviePilot plugin directory
+| Plugin | Version | What it does | Docs |
+| --- | --- | --- | --- |
+| **TgtoDrive STRM Sync** (`TgtoDriveSync`) | v1.7.1 | Calls the official TgtoDrive OpenAPI when MoviePilot finishes transferring files (`TransferComplete`) to generate cloud-drive STRM links, waits for the sync, then refreshes every configured media server and sends a notification. | [→ Docs](plugins/tgtodrivesync/README.md) |
+| **MaoyanRank** (`MaoyanRank`) | v4.2.0 | Scrapes Maoyan box-office and TV/variety popularity boards and auto-subscribes; exposes `/rank`, `/rank-list` and `/refresh` endpoints and can register itself as a host recommendation source. | [→ Docs](plugins.v3/maoyanrank/README.md) |
 
 <!-- traffic:start -->
 
