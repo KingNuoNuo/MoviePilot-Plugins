@@ -174,8 +174,10 @@ class MaoyanRank(_PluginBase):
     plugin_config_prefix = "maoyanrank_"
     # 加载顺序
     plugin_order = 6
-    # 可使用的用户级别
-    auth_level = 1
+    # 可使用的用户级别：0 = 不做站点用户认证也能加载
+    # （MoviePilot 的 PluginAccessPolicy 要求 宿主 auth_level >= auth_level，
+    #   未做站点用户认证的环境 auth_level 为 0，声明 1 会让插件在市场列表里被直接过滤掉）
+    auth_level = 0
 
     # 退出事件
     _event = Event()

@@ -7,7 +7,7 @@
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
-    "level": 1,
+    "level": 0,
     "release": false,
     "system_version": ">=3.0.0",
     "history": {
