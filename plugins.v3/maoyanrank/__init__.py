@@ -144,7 +144,8 @@ class MaoyanRank(_PluginBase):
 
     Fork 自 jxxghp/moviepilot-plugins 的 plugins.v3/maoyanrank
     (上游原插件作者: 逗猫 @baozaodetudou, 上游版本 v4.1.4)；
-    本仓库在此基础上新增榜单对外接口、榜单快照与推荐页数据源。
+    本仓库在此基础上新增榜单对外接口、榜单快照与推荐页数据源，
+    版本号自本仓库起从 v1.0.0 独立计数。
 
     电影获取的url: https://piaofang.maoyan.com/dashboard-ajax/movie
     电视剧获取的url: {tv_url}?showDate=20240223&seriesType=0&platformType=0
@@ -162,13 +163,13 @@ class MaoyanRank(_PluginBase):
     # 插件描述
     plugin_desc = "监控猫眼数据，自动添加订阅。"
     # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/baozaodetudou/MoviePilot-Plugins/main/icons/maoyan.jpg"
+    plugin_icon = "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan.jpg"
     # 插件版本
-    plugin_version = "4.2.0"
+    plugin_version = "1.0.0"
     # 插件作者
-    plugin_author = "逗猫"
+    plugin_author = "KingNuoNuo"
     # 作者主页
-    author_url = "https://github.com/baozaodetudou"
+    author_url = "https://github.com/KingNuoNuo"
     # 插件配置项ID前缀
     plugin_config_prefix = "maoyanrank_"
     # 加载顺序

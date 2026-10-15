@@ -28,11 +28,12 @@
 | 插件 | 版本 | 简介 | 说明 |
 | --- | --- | --- | --- |
 | **[TgtoDrive STRM 同步](plugins/tgtodrivesync/README.md)**<br><sub>`TgtoDriveSync` · `plugins/tgtodrivesync`</sub> | v1.7.1 | 整理入库后自动调用 TgtoDrive OpenAPI 生成网盘 STRM，完成后刷新全部已配置媒体服务器并发送通知。 | [→ 插件说明](plugins/tgtodrivesync/README.md) |
-| **[猫眼榜单订阅](plugins.v3/maoyanrank/README.md)**<br><sub>`MaoyanRank` · `plugins.v3/maoyanrank`</sub> | v4.2.0 | 抓取猫眼电影票房与剧集/综艺热度榜单并自动订阅；提供 `/rank`、`/rank-list`、`/refresh` 对外接口，可作为宿主推荐页数据源。 | [→ 插件说明](plugins.v3/maoyanrank/README.md) |
+| **[猫眼榜单订阅](plugins.v3/maoyanrank/README.md)**<br><sub>`MaoyanRank` · `plugins.v3/maoyanrank`</sub> | v1.0.0 | 抓取猫眼电影票房与剧集/综艺热度榜单并自动订阅；提供 `/rank`、`/rank-list`、`/refresh` 对外接口，可作为宿主推荐页数据源。 | [→ 插件说明](plugins.v3/maoyanrank/README.md) |
 
 > **来源说明**：`猫眼榜单订阅` **Fork 自 [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins)**
-> 的同名插件（原作者 [逗猫 @baozaodetudou](https://github.com/baozaodetudou)），基于上游 v4.1.4 改造扩展，
-> 详见 [插件说明](plugins.v3/maoyanrank/README.md#来源)。
+> 的同名插件（原作者 [逗猫 @baozaodetudou](https://github.com/baozaodetudou)），基于上游 v4.1.4 改造为
+> **独立发行版**，作者署名与版本号（自 **v1.0.0** 重新计数）均已独立，详见
+> [插件说明](plugins.v3/maoyanrank/README.md#来源)。
 
 **安装**：MoviePilot →「设定 → 插件市场 → 添加市场」，填入仓库地址 `https://github.com/KingNuoNuo/MoviePilot-Plugins`，保存后在市场内搜索插件名安装。
 
@@ -103,10 +104,11 @@ Add `https://github.com/KingNuoNuo/MoviePilot-Plugins` as a custom market source
 | Plugin | Version | What it does | Docs |
 | --- | --- | --- | --- |
 | **TgtoDrive STRM Sync** (`TgtoDriveSync`) | v1.7.1 | Calls the official TgtoDrive OpenAPI when MoviePilot finishes transferring files (`TransferComplete`) to generate cloud-drive STRM links, waits for the sync, then refreshes every configured media server and sends a notification. | [→ Docs](plugins/tgtodrivesync/README.md) |
-| **MaoyanRank** (`MaoyanRank`) | v4.2.0 | Scrapes Maoyan box-office and TV/variety popularity boards and auto-subscribes; exposes `/rank`, `/rank-list` and `/refresh` endpoints and can register itself as a host recommendation source. | [→ Docs](plugins.v3/maoyanrank/README.md) |
+| **MaoyanRank** (`MaoyanRank`) | v1.0.0 | Scrapes Maoyan box-office and TV/variety popularity boards and auto-subscribes; exposes `/rank`, `/rank-list` and `/refresh` endpoints and can register itself as a host recommendation source. | [→ Docs](plugins.v3/maoyanrank/README.md) |
 
 > **Origin**: `MaoyanRank` is forked from [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins)
-> (original author [@baozaodetudou](https://github.com/baozaodetudou)), based on upstream v4.1.4.
+> (original author [@baozaodetudou](https://github.com/baozaodetudou)), re-released as an
+> **independent fork** with its own authorship and versioning starting at v1.0.0.
 
 <!-- traffic:start -->
 
