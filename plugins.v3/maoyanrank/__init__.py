@@ -141,6 +141,11 @@ def _safe_board_payload(board: dict, rows: List[Any]) -> Dict[str, Any]:
 class MaoyanRank(_PluginBase):
     """
     获取猫眼的排行榜进行订阅,建议每天一次
+
+    Fork 自 jxxghp/moviepilot-plugins 的 plugins.v3/maoyanrank
+    (上游原插件作者: 逗猫 @baozaodetudou, 上游版本 v4.1.4)；
+    本仓库在此基础上新增榜单对外接口、榜单快照与推荐页数据源。
+
     电影获取的url: https://piaofang.maoyan.com/dashboard-ajax/movie
     电视剧获取的url: {tv_url}?showDate=20240223&seriesType=0&platformType=0
         参数 showDate: 时间具体到天

@@ -30,6 +30,10 @@
 | **[TgtoDrive STRM 同步](plugins/tgtodrivesync/README.md)**<br><sub>`TgtoDriveSync` · `plugins/tgtodrivesync`</sub> | v1.7.1 | 整理入库后自动调用 TgtoDrive OpenAPI 生成网盘 STRM，完成后刷新全部已配置媒体服务器并发送通知。 | [→ 插件说明](plugins/tgtodrivesync/README.md) |
 | **[猫眼榜单订阅](plugins.v3/maoyanrank/README.md)**<br><sub>`MaoyanRank` · `plugins.v3/maoyanrank`</sub> | v4.2.0 | 抓取猫眼电影票房与剧集/综艺热度榜单并自动订阅；提供 `/rank`、`/rank-list`、`/refresh` 对外接口，可作为宿主推荐页数据源。 | [→ 插件说明](plugins.v3/maoyanrank/README.md) |
 
+> **来源说明**：`猫眼榜单订阅` **Fork 自 [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins)**
+> 的同名插件（原作者 [逗猫 @baozaodetudou](https://github.com/baozaodetudou)），基于上游 v4.1.4 改造扩展，
+> 详见 [插件说明](plugins.v3/maoyanrank/README.md#来源)。
+
 **安装**：MoviePilot →「设定 → 插件市场 → 添加市场」，填入仓库地址 `https://github.com/KingNuoNuo/MoviePilot-Plugins`，保存后在市场内搜索插件名安装。
 
 **其它链接**：[打包产物](#packages)（直接下载压缩包） · [反馈问题 / 功能建议](https://github.com/KingNuoNuo/MoviePilot-Plugins/issues)
@@ -100,6 +104,9 @@ Add `https://github.com/KingNuoNuo/MoviePilot-Plugins` as a custom market source
 | --- | --- | --- | --- |
 | **TgtoDrive STRM Sync** (`TgtoDriveSync`) | v1.7.1 | Calls the official TgtoDrive OpenAPI when MoviePilot finishes transferring files (`TransferComplete`) to generate cloud-drive STRM links, waits for the sync, then refreshes every configured media server and sends a notification. | [→ Docs](plugins/tgtodrivesync/README.md) |
 | **MaoyanRank** (`MaoyanRank`) | v4.2.0 | Scrapes Maoyan box-office and TV/variety popularity boards and auto-subscribes; exposes `/rank`, `/rank-list` and `/refresh` endpoints and can register itself as a host recommendation source. | [→ Docs](plugins.v3/maoyanrank/README.md) |
+
+> **Origin**: `MaoyanRank` is forked from [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins)
+> (original author [@baozaodetudou](https://github.com/baozaodetudou)), based on upstream v4.1.4.
 
 <!-- traffic:start -->
 

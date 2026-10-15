@@ -5,6 +5,17 @@
 按配置的榜单类型、平台和排名数量获取猫眼数据，识别媒体后添加订阅；
 同时把抓取结果落成**榜单快照**，通过对外接口提供给 App、脚本与宿主推荐页。
 
+## 来源
+
+本插件 **Fork 自 [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins)**
+中的 `plugins.v3/maoyanrank/`（上游原插件「猫眼榜单订阅」，原作者
+[逗猫 @baozaodetudou](https://github.com/baozaodetudou)）。
+
+- 上游版本：**v4.1.4**；本仓库基于该版本改造，版本号升至 **v4.2.0**
+- 上游能力：抓取猫眼榜单 → 识别媒体 → 添加订阅
+- 本仓库新增：榜单对外接口（`/rank`、`/rank-list`、`/refresh`）、榜单快照
+  （含名次 / 票房 / 热度 / 媒体身份）与宿主推荐页数据源，见下文
+
 ## 安装
 
 MoviePilot →「设定 → 插件市场 → 添加市场」，填入
