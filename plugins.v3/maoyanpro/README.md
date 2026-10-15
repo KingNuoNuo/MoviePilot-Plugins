@@ -61,8 +61,15 @@ MoviePilot →「设定 → 插件市场 → 添加市场」，填入
 
 ## 对外接口
 
-注册在宿主 `/api/v1/plugin/MaoyanPro` 前缀下，默认使用宿主的 **API 令牌**认证
-（`X-API-KEY` 头或 `?apikey=` 查询参数），也可用网页登录态调用。
+注册在宿主 `/api/v1/plugin/MaoyanPro` 前缀下，`/rank` 与 `/rank-list` 都用宿主的
+**`bear` 模式**认证（依赖 `verify_token`），即三种凭据任选其一：
+
+- App 登录态的 **JWT**：`Authorization: Bearer <access_token>`
+- **API 令牌**：`X-API-KEY: <API_TOKEN>` 头，或 `?apikey=<API_TOKEN>` 查询参数
+- `?token=<API_TOKEN>` 查询参数
+
+> 注意：宿主默认的 `apikey` 模式只认 API 令牌，用账号密码登录的 App 会 401，
+> 所以 `/rank` 显式声明了 `auth="bear"`，两种模式都能读。
 
 | 接口 | 返回 | 说明 |
 | --- | --- | --- |
@@ -79,7 +86,9 @@ MoviePilot →「设定 → 插件市场 → 添加市场」，填入
 
 ```bash
 curl "http://<MP>:3000/api/v1/plugin/MaoyanPro/rank?apikey=<API_TOKEN>&limit=5"
-curl "http://<MP>:3000/api/v1/plugin/MaoyanPro/rank?apikey=<API_TOKEN>&board_type=web-heat"
+curl "http://<MP>:3000/api/v1/plugin/MaoyanPro/rank?apikey=<API_TOKEN>&board_type=web-all"
+curl -H "Authorization: Bearer <access_token>" \
+     "http://<MP>:3000/api/v1/plugin/MaoyanPro/rank?board_type=zongyi"
 curl -X POST "http://<MP>:3000/api/v1/plugin/MaoyanPro/refresh?apikey=<API_TOKEN>"
 ```
 

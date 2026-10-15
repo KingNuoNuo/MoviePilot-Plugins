@@ -168,7 +168,7 @@ class MaoyanPro(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan.png"
     # 插件版本
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -388,14 +388,17 @@ class MaoyanPro(_PluginBase):
           用宿主统一响应包裹，便于接入宿主普通数据客户端。
         - `/refresh`：立即触发一次抓取与订阅，等价于插件的「立即运行一次」。
 
-        认证沿用宿主默认的 API 令牌（`X-API-KEY` 头或 `apikey` 查询参数），
-        因此 App 的 API 令牌模式也能读取，不再依赖网页登录态。
+        认证用宿主的 `bear` 模式（依赖 `verify_token`）：它同时接受 App 登录态
+        的 JWT（`Authorization: Bearer`）、API 令牌（`X-API-KEY` 头或 `apikey` 查询
+        参数）与 `token` 查询参数。默认的 `apikey` 模式只认 API 令牌，账号密码登录
+        的 App 会 401，因此这里显式声明 `bear`。
         """
         return [
             {
                 "path": "/rank",
                 "endpoint": self.get_rank_snapshot,
                 "methods": ["GET"],
+                "auth": "bear",
                 "summary": "猫眼榜单快照",
                 "description": "返回最近一次抓取的猫眼榜单快照，可按榜单类型筛选条目数量",
                 "response_model": schemas.Response[MaoyanProSnapshot],
