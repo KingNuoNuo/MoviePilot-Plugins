@@ -93,7 +93,7 @@ class TgtoDriveSync(_PluginBase):
     # 插件图标（使用官方图标库中的通用刷新图标）
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/refresh2.png"
     # 插件版本
-    plugin_version = "1.7.0"
+    plugin_version = "1.7.1"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -102,8 +102,10 @@ class TgtoDriveSync(_PluginBase):
     plugin_config_prefix = "tgtodrivesync_"
     # 加载顺序
     plugin_order = 15
-    # 可使用的用户级别
-    auth_level = 1
+    # 可使用的用户级别：0 = 不做站点用户认证也能加载
+    # （MoviePilot 的 PluginAccessPolicy 要求 宿主 auth_level >= auth_level，
+    #   未做站点用户认证的环境 auth_level 为 0，声明 1 会被判「未通过用户认证」而拒绝加载）
+    auth_level = 0
 
     # ---- 基础配置 ----
     _enabled: bool = False
