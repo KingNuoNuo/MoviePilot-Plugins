@@ -93,6 +93,21 @@ MoviePilot-Plugins/
 | `tgtodrivesync.zip` | 仅 TgtoDrive 插件目录，解压后把 `tgtodrivesync/` 放进 MoviePilot 插件目录 |
 | `maoyanrank.zip` | 仅猫眼榜单插件目录，解压后把 `maoyanrank/` 放进 MoviePilot 插件目录 |
 
+## 自动同步上游（MaoyanRank）
+
+`猫眼榜单订阅` 是独立发行的 Fork。工作流 `.github/workflows/sync-maoyanrank.yml` 每天检查上游
+[jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins) 的 `plugins.v3/maoyanrank/`，
+有改动时用 **三方合并**把上游改动套进本仓库的版本，递增 patch 版本号并重建打包产物，然后**开 PR** 等人工审核。
+
+| 情况 | 工作流行为 |
+| --- | --- |
+| 上游无改动 | 直接结束，不产生任何提交 |
+| 合并无冲突 | 递增版本（如 `1.0.0 → 1.0.1`）、更新索引与两处 README 版本号、重建 `dist/`，然后开 PR |
+| 合并有冲突 | 分支里保留冲突标记，**不动版本号、不重建打包产物**，并开 Issue；解决并合并后，下一次运行会自动收尾 |
+
+- 三方合并的基线放在 `.upstream/maoyanrank/`，每次成功同步后随 PR 一起推进
+- 手动触发：Actions → Sync MaoyanRank from upstream → Run workflow（可勾选 `force` 强制执行一次）
+
 ---
 
 # English
