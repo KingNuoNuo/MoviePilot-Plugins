@@ -162,9 +162,9 @@ class MaoyanPro(_PluginBase):
 
     """
     # 插件名称
-    plugin_name = "猫眼榜单订阅"
+    plugin_name = "猫眼榜单"
     # 插件描述
-    plugin_desc = "监控猫眼数据，自动添加订阅。"
+    plugin_desc = "监控猫眼数据，提供榜单显示和订阅功能。"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan.png"
     # 插件版本
@@ -311,22 +311,22 @@ class MaoyanPro(_PluginBase):
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
             # 周期执行
             if self._cron:
-                logger.info(f"猫眼榜单订阅服务启动，周期：{self._cron}")
+                logger.info(f"猫眼榜单服务启动，周期：{self._cron}")
                 try:
                     self._scheduler.add_job(func=self.__refresh_maoyan,
                                             trigger=CronTrigger.from_crontab(self._cron),
-                                            name="猫眼榜单订阅")
+                                            name="猫眼榜单")
                 except Exception as e:
-                    logger.error(f"猫眼榜单订阅服务启动失败，错误信息：{str(e)}")
-                    self.systemmessage.put(f"猫眼榜单订阅服务启动失败，错误信息：{str(e)}")
+                    logger.error(f"猫眼榜单服务启动失败，错误信息：{str(e)}")
+                    self.systemmessage.put(f"猫眼榜单服务启动失败，错误信息：{str(e)}")
             else:
                 self._scheduler.add_job(func=self.__refresh_maoyan, trigger=CronTrigger.from_crontab("0 9 * * *"),
-                                        name="猫眼榜单订阅")
-                logger.info("猫眼榜单订阅服务启动，周期：每天 09:00")
+                                        name="猫眼榜单")
+                logger.info("猫眼榜单服务启动，周期：每天 09:00")
 
             # 一次性执行
             if self._onlyonce:
-                logger.info("猫眼榜单订阅服务启动，立即运行一次")
+                logger.info("猫眼榜单服务启动，立即运行一次")
                 self._scheduler.add_job(func=self.__refresh_maoyan, trigger='date',
                                         run_date=datetime.datetime.now(
                                             tz=pytz.timezone(settings.TZ)) + datetime.timedelta(seconds=3)

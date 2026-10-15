@@ -2,7 +2,7 @@
 
 # MoviePilot 插件仓库
 
-**自建 MoviePilot v3 插件市场源** —— 整理入库自动生成网盘 STRM 并刷新媒体库；猫眼榜单订阅与榜单对外接口。
+**自建 MoviePilot v3 插件市场源** —— 整理入库自动生成网盘 STRM 并刷新媒体库；猫眼榜单显示与订阅、榜单对外接口。
 
 [![Stars](https://img.shields.io/github/stars/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/stargazers)
 [![Forks](https://img.shields.io/github/forks/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/network/members)
@@ -28,10 +28,10 @@
 | 插件 | 版本 | 简介 | 说明 |
 | --- | --- | --- | --- |
 | **[TgtoDrive STRM 同步](plugins/tgtodrivesync/README.md)**<br><sub>`TgtoDriveSync` · `plugins/tgtodrivesync`</sub> | v1.7.1 | 整理入库后自动调用 TgtoDrive OpenAPI 生成网盘 STRM，完成后刷新全部已配置媒体服务器并发送通知。 | [→ 插件说明](plugins/tgtodrivesync/README.md) |
-| **[猫眼榜单订阅](plugins.v3/maoyanpro/README.md)**<br><sub>`MaoyanPro` · `plugins.v3/maoyanpro`</sub> | v1.1.1 | 抓取猫眼电影票房、剧集综合榜（电视剧+网剧）与综艺热度榜单并自动订阅（电影/剧集分开配置，订阅与推荐页数据源相互独立）；提供 `/rank`、`/rank-list`、`/refresh` 对外接口，可作为宿主推荐页数据源。 | [→ 插件说明](plugins.v3/maoyanpro/README.md) |
+| **[猫眼榜单](plugins.v3/maoyanpro/README.md)**<br><sub>`MaoyanPro` · `plugins.v3/maoyanpro`</sub> | v1.1.1 | 监控猫眼数据，提供榜单显示与订阅功能：抓取电影票房、剧集综合榜（电视剧+网剧）与综艺热度榜单并自动订阅（电影/剧集分开配置，订阅与推荐页数据源相互独立）；提供 `/rank`、`/rank-list`、`/refresh` 对外接口，可作为宿主推荐页数据源。 | [→ 插件说明](plugins.v3/maoyanpro/README.md) |
 
-> **来源说明**：`猫眼榜单订阅` **Fork 自 [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins)**
-> 的同名插件（原作者 [逗猫 @baozaodetudou](https://github.com/baozaodetudou)），基于上游 v4.1.4 改造为
+> **来源说明**：`猫眼榜单` **Fork 自 [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins)**
+> 的「猫眼榜单订阅」插件（原作者 [逗猫 @baozaodetudou](https://github.com/baozaodetudou)），基于上游 v4.1.4 改造为
 > **独立发行版**（插件 ID `MaoyanPro`），作者署名与版本号（自 **v1.0.0** 重新计数）均已独立，详见
 > [插件说明](plugins.v3/maoyanpro/README.md#来源)。
 
@@ -51,7 +51,7 @@
    https://github.com/KingNuoNuo/MoviePilot-Plugins
    ```
 
-2. 保存后，在市场里搜索插件名（如「**TgtoDrive STRM 同步**」「**猫眼榜单订阅**」）并安装、启用。
+2. 保存后，在市场里搜索插件名（如「**TgtoDrive STRM 同步**」「**猫眼榜单**」）并安装、启用。
 
 本地部署也可把插件目录整个拷贝到 MoviePilot 的插件目录（容器内通常为 `/app/app/plugins/`，
 以你的实际部署为准），重启 MoviePilot 容器即可在插件列表看到：
@@ -95,7 +95,7 @@ MoviePilot-Plugins/
 
 ## 自动同步上游（MaoyanRank → MaoyanPro）
 
-`猫眼榜单订阅` 是独立发行的 Fork。工作流 `.github/workflows/sync-maoyanrank.yml` 每天检查上游
+`猫眼榜单` 是独立发行的 Fork。工作流 `.github/workflows/sync-maoyanrank.yml` 每天检查上游
 [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins) 的 `plugins.v3/maoyanrank/`，
 有改动时用 **三方合并**把上游改动套进本仓库的 `plugins.v3/maoyanpro/`，递增 patch 版本号并重建打包产物，然后**开 PR** 等人工审核。
 
@@ -119,7 +119,7 @@ Add `https://github.com/KingNuoNuo/MoviePilot-Plugins` as a custom market source
 | Plugin | Version | What it does | Docs |
 | --- | --- | --- | --- |
 | **TgtoDrive STRM Sync** (`TgtoDriveSync`) | v1.7.1 | Calls the official TgtoDrive OpenAPI when MoviePilot finishes transferring files (`TransferComplete`) to generate cloud-drive STRM links, waits for the sync, then refreshes every configured media server and sends a notification. | [→ Docs](plugins/tgtodrivesync/README.md) |
-| **MaoyanPro** (`MaoyanPro`) | v1.1.1 | Scrapes Maoyan box-office, combined TV+web-drama and variety popularity boards and auto-subscribes; exposes `/rank`, `/rank-list` and `/refresh` endpoints and can register itself as a host recommendation source. | [→ Docs](plugins.v3/maoyanpro/README.md) |
+| **MaoyanPro** (`MaoyanPro`) | v1.1.1 | Monitors Maoyan data and provides board display plus subscription: scrapes box-office, combined TV+web-drama and variety popularity boards and auto-subscribes; exposes `/rank`, `/rank-list` and `/refresh` endpoints and can register itself as a host recommendation source. | [→ Docs](plugins.v3/maoyanpro/README.md) |
 
 > **Origin**: `MaoyanPro` is forked from [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins)
 > (original author [@baozaodetudou](https://github.com/baozaodetudou)), re-released as an

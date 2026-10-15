@@ -6,7 +6,7 @@
 ```
 tests/
 └─ v3/
-   └─ maoyanpro/      # 猫眼榜单订阅（plugins.v3/maoyanpro）
+   └─ maoyanpro/      # 猫眼榜单（plugins.v3/maoyanpro）
 ```
 
 ## 运行

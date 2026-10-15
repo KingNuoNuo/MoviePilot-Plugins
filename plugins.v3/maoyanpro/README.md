@@ -1,4 +1,4 @@
-# 猫眼榜单订阅（MaoyanPro）
+# 猫眼榜单（MaoyanPro）
 
 > [← 返回插件一览](../../README.md#插件一览) · 版本 v1.1.1 · 目录 `plugins.v3/maoyanpro`
 
@@ -29,7 +29,7 @@
 ## 安装
 
 MoviePilot →「设定 → 插件市场 → 添加市场」，填入
-`https://github.com/KingNuoNuo/MoviePilot-Plugins`，保存后搜索「**猫眼榜单订阅**」安装并启用。
+`https://github.com/KingNuoNuo/MoviePilot-Plugins`，保存后搜索「**猫眼榜单**」安装并启用。
 
 本地部署也可把 `plugins.v3/maoyanpro` 整个目录拷贝到 MoviePilot 的插件目录
 （容器内通常为 `/app/app/plugins/`，以你的实际部署为准），重启容器即可。
