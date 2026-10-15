@@ -84,11 +84,19 @@ MoviePilot 整理入库
 
 ```
 MoviePilot-Plugins/
-├── package.json                 # 插件清单（市场识别）
-└── plugins/
-    └── tgtodrivesync/
-        └── __init__.py          # 插件主体（类名 TgtoDriveSync）
+├── package.json                 # V1/V2 插件清单（市场识别）
+├── package.v3.json              # V3 插件清单（市场识别）
+├── plugins/
+│   └── tgtodrivesync/
+│       └── __init__.py          # 插件主体（类名 TgtoDriveSync）
+└── plugins.v3/
+    └── maoyanrank/
+        ├── __init__.py          # 插件主体（类名 MaoyanRank）
+        └── README.md
 ```
+
+> MoviePilot v3 会同时扫描 `package.json` 与 `package.v3.json`（`plugins/` 与 `plugins.v3/`），
+> 同名插件按版本号取高者，因此两代插件可以共存在同一个仓库里。
 
 ### 方式二：本地直接放置
 
@@ -181,6 +189,67 @@ curl -X POST "http://10.0.0.4:12366/api/strm-sync/run" \
   会返回明确的错误提示，不影响 TgtoDrive 触发这一步。
 - 刷新调用的是各服务器模块的 `refresh_root_library()` / `refresh_library_by_items()`，
   返回 `None` 表示未认证或服务不可用，会记为失败并写入原因。
+
+---
+
+# 猫眼榜单订阅（MaoyanRank）· V3
+
+`plugins.v3/maoyanrank`（上游 `jxxghp/MoviePilot-Plugins` 的 maoyanrank，作者「逗猫」）。
+在原有「抓猫眼榜单 → 自动订阅」基础上，**新增榜单对外接口**，并把抓取结果落成
+**榜单快照**（含名次、票房/热度、媒体身份），供 App、脚本与宿主推荐页直接消费。
+
+## 对外接口
+
+路径前缀为 `/api/v1/plugin/MaoyanRank`，认证沿用宿主默认的 **API 令牌**
+（`X-API-KEY` 头或 `?apikey=` 查询参数），因此 App 的 API 令牌模式也能读取，
+不再依赖网页登录态。
+
+| 接口 | 说明 | 认证 |
+| --- | --- | --- |
+| `GET /rank` | 榜单快照：带名次、类型、平台、票房/热度、媒体来源与海报。支持 `board_type`（`movie`/`web-movie`/`web-heat`/`web-tv`/`zongyi`）、`board`（榜单名关键字）、`limit`（每榜条数）筛选 | API 令牌 |
+| `GET /rank-list` | 供宿主**推荐页 / 浏览页**消费的榜单列表，返回 `Response[List[MediaInfo]]`，声明 `page` 参数 | 网页登录态（`bear`） |
+| `GET`/`POST /refresh` | 立即触发一次抓取并按配置添加订阅，返回抓取榜单数、条目数、新增订阅数 | API 令牌 |
+
+```bash
+# 取最近一次快照（每榜最多 5 条）
+curl "http://<MP>:3000/api/v1/plugin/MaoyanRank/rank?apikey=<API_TOKEN>&limit=5"
+
+# 只看剧集热度榜
+curl "http://<MP>:3000/api/v1/plugin/MaoyanRank/rank?apikey=<API_TOKEN>&board_type=web-heat"
+
+# 立即刷新一次
+curl -X POST "http://<MP>:3000/api/v1/plugin/MaoyanRank/refresh?apikey=<API_TOKEN>"
+```
+
+响应为宿主统一三段式 `{ success, message, data }`；`data.boards[]` 为榜单，
+`items[]` 为条目（`rank` 名次、`box_office` 票房、`heat` 热度、
+`media_source`/`media_id` 媒体身份、`poster` 海报）。未识别到媒体的条目**仍会返回**，
+只是身份字段为空，便于前端先渲染榜单。
+
+## 接入宿主推荐页（可选）
+
+打开插件配置里的「**接入推荐页数据源**」后，插件通过
+`ChainEventType.RecommendSource` 把已配置的榜单注册到宿主推荐页：
+
+- 猫眼电影票房 → 分类「电影」
+- 猫眼电视剧热度 / 猫眼网络剧热度 / 猫眼综艺热度 → 分类「电视剧」
+
+只注册**配置里已勾选**的榜单类型；未启用插件或未打开该开关时不注册任何数据源，
+也不影响其它插件塞入的数据源（是**叠加**而非替换）。
+
+## 快照与兜底
+
+- 每次刷新把榜单落成插件数据 `snapshot`；**抓取全失败时保留上一次快照**，
+  避免异常时段接口返回空数据。
+- 升级后尚未跑过刷新时，`/rank` 会**回退到订阅流水**并在 `message` 中注明，
+  保证接口始终可用。
+- 推荐页的 `/rank-list` 会过滤掉没有媒体身份的条目（这类条目无法被宿主识别为媒体）。
+
+## 兼容性
+
+- 抓取逻辑（浏览器会话、反爬、平台筛选、异常隔离）与订阅逻辑**未改动**，
+  既有的 `get_url_info` / `set_sub` 行为与参数顺序保持不变。
+- 只有 `GET /refresh` 与调度器会在 `save_data` 之外多写一个 `snapshot` 键。
 
 ## English
 
