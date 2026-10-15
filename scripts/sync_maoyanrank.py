@@ -71,7 +71,7 @@ TOTAL_ZIP_ORDER = (
     "package.json",
     "package.v3.json",
     "README.md",
-    "icons/maoyan.jpg",
+    "icons/maoyan.png",
     "plugins/tgtodrivesync/__init__.py",
     "plugins/tgtodrivesync/README.md",
     "plugins.v3/maoyanrank/__init__.py",

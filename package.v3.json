@@ -4,7 +4,7 @@
     "description": "监控猫眼数据，自动添加订阅。支持对外提供榜单快照接口，并可作为宿主推荐页的数据源。",
     "labels": "订阅,榜单",
     "version": "1.0.0",
-    "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan.jpg",
+    "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
     "level": 1,
