@@ -35,7 +35,7 @@ from app.sdk.media import normalize_media_source, resolve_media_identity
 # 页面（推荐页、浏览页）时显式返回并声明参数化的 schemas.Response[DataModel]。
 # ---------------------------------------------------------------------------
 
-class MaoyanRankItem(BaseModel):
+class MaoyanProItem(BaseModel):
     """猫眼榜单中的单个条目。"""
 
     rank: int = Field(..., description="榜单名次，从 1 开始")
@@ -55,7 +55,7 @@ class MaoyanRankItem(BaseModel):
     year: str = Field("", description="年份，未识别时为空")
 
 
-class MaoyanRankBoard(BaseModel):
+class MaoyanProBoard(BaseModel):
     """猫眼单个榜单的最新快照。"""
 
     board: str = Field(..., description="榜单名称")
@@ -66,15 +66,15 @@ class MaoyanRankBoard(BaseModel):
     url: str = Field("", description="榜单来源地址")
     count: int = Field(0, description="榜单条目数")
     updated_at: str = Field("", description="快照时间")
-    items: List[MaoyanRankItem] = Field(default_factory=list, description="榜单条目")
+    items: List[MaoyanProItem] = Field(default_factory=list, description="榜单条目")
 
 
-class MaoyanRankSnapshot(BaseModel):
+class MaoyanProSnapshot(BaseModel):
     """猫眼榜单快照汇总数据。"""
 
     updated_at: str = Field("", description="最近一次刷新的快照时间")
     total: int = Field(0, description="返回的条目总数")
-    boards: List[MaoyanRankBoard] = Field(default_factory=list, description="榜单列表")
+    boards: List[MaoyanProBoard] = Field(default_factory=list, description="榜单列表")
 
 
 class MaoyanRefreshResult(BaseModel):
@@ -138,14 +138,14 @@ def _safe_board_payload(board: dict, rows: List[Any]) -> Dict[str, Any]:
     }
 
 
-class MaoyanRank(_PluginBase):
+class MaoyanPro(_PluginBase):
     """
     获取猫眼的排行榜进行订阅,建议每天一次
 
-    Fork 自 jxxghp/moviepilot-plugins 的 plugins.v3/maoyanrank
-    (上游原插件作者: 逗猫 @baozaodetudou, 上游版本 v4.1.4)；
+    Fork 自 jxxghp/moviepilot-plugins 的 MaoyanRank 插件
+    (上游目录 plugins.v3/maoyanrank，上游原插件作者: 逗猫 @baozaodetudou, 上游版本 v4.1.4)；
     本仓库在此基础上新增榜单对外接口、榜单快照与推荐页数据源，
-    版本号自本仓库起从 v1.0.0 独立计数。
+    并以独立身份 MaoyanPro 发行，版本号自本仓库起从 v1.0.0 独立计数。
 
     电影获取的url: https://piaofang.maoyan.com/dashboard-ajax/movie
     电视剧获取的url: {tv_url}?showDate=20240223&seriesType=0&platformType=0
@@ -171,7 +171,7 @@ class MaoyanRank(_PluginBase):
     # 作者主页
     author_url = "https://github.com/KingNuoNuo"
     # 插件配置项ID前缀
-    plugin_config_prefix = "maoyanrank_"
+    plugin_config_prefix = "maoyanpro_"
     # 加载顺序
     plugin_order = 6
     # 可使用的用户级别：0 = 不做站点用户认证也能加载
@@ -375,7 +375,7 @@ class MaoyanRank(_PluginBase):
                 "methods": ["GET"],
                 "summary": "猫眼榜单快照",
                 "description": "返回最近一次抓取的猫眼榜单快照，可按榜单类型筛选条目数量",
-                "response_model": schemas.Response[MaoyanRankSnapshot],
+                "response_model": schemas.Response[MaoyanProSnapshot],
             },
             {
                 "path": "/rank-list",
@@ -397,7 +397,7 @@ class MaoyanRank(_PluginBase):
         ]
 
     def get_rank_snapshot(self, board_type: str = None, limit: int = None,
-                          board: str = None) -> schemas.Response[MaoyanRankSnapshot]:
+                          board: str = None) -> schemas.Response[MaoyanProSnapshot]:
         """
         返回最近一次抓取的猫眼榜单快照。
 
@@ -428,12 +428,12 @@ class MaoyanRank(_PluginBase):
             rows = item.get("items") or []
             if limit and limit > 0:
                 rows = rows[:limit]
-            selected.append(MaoyanRankBoard(**_safe_board_payload(item, rows)))
+            selected.append(MaoyanProBoard(**_safe_board_payload(item, rows)))
 
         return schemas.Response(
             success=True,
             message="",
-            data=MaoyanRankSnapshot(
+            data=MaoyanProSnapshot(
                 updated_at=str(snapshot.get("updated_at") or ""),
                 total=sum(item.count for item in selected),
                 boards=selected,
@@ -460,7 +460,7 @@ class MaoyanRank(_PluginBase):
             message="已按当前配置完成一次猫眼榜单抓取",
         )
 
-    def __snapshot_from_history(self) -> MaoyanRankSnapshot:
+    def __snapshot_from_history(self) -> MaoyanProSnapshot:
         """
         用订阅流水兜底构造榜单快照。
 
@@ -469,14 +469,14 @@ class MaoyanRank(_PluginBase):
         """
         history = self.get_data("history") or []
         if not isinstance(history, list):
-            return MaoyanRankSnapshot()
+            return MaoyanProSnapshot()
         history = sorted(
             [row for row in history if isinstance(row, dict)],
             key=lambda row: row.get("time") or "",
             reverse=True,
         )
         items = [
-            MaoyanRankItem(
+            MaoyanProItem(
                 rank=index,
                 title=str(row.get("title") or ""),
                 type_name=str(row.get("type") or ""),
@@ -491,12 +491,12 @@ class MaoyanRank(_PluginBase):
             for index, row in enumerate(history, start=1)
         ]
         if not items:
-            return MaoyanRankSnapshot()
-        return MaoyanRankSnapshot(
+            return MaoyanProSnapshot()
+        return MaoyanProSnapshot(
             updated_at=str(history[0].get("time") or ""),
             total=len(items),
             boards=[
-                MaoyanRankBoard(
+                MaoyanProBoard(
                     board="猫眼订阅流水",
                     type="",
                     type_name="订阅流水",
@@ -1531,7 +1531,7 @@ class MaoyanRank(_PluginBase):
                 # 元数据
                 meta = MetaInfo(title)
                 meta.year = year
-                unique_flag = f"maoyanrank: {mtype}_{title}_{year}"
+                unique_flag = f"maoyanpro: {mtype}_{title}_{year}"
                 # 检查是否已处理过
                 if unique_flag in [h.get("unique") for h in history]:
                     continue

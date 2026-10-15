@@ -6,7 +6,7 @@
 ```
 tests/
 └─ v3/
-   └─ maoyanrank/     # 猫眼榜单订阅（plugins.v3/maoyanrank）
+   └─ maoyanpro/      # 猫眼榜单订阅（plugins.v3/maoyanpro）
 ```
 
 ## 运行
@@ -19,7 +19,7 @@ tests/
 python -m pytest tests/v3
 
 # 只跑猫眼插件
-python -m pytest tests/v3/maoyanrank
+python -m pytest tests/v3/maoyanpro
 ```
 
 测试通过生产命名空间 `app.plugins.<plugin_id>` 导入插件，不要把插件目录加入 `sys.path`

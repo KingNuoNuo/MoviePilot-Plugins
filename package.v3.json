@@ -1,5 +1,5 @@
 {
-  "MaoyanRank": {
+  "MaoyanPro": {
     "name": "猫眼榜单订阅",
     "description": "监控猫眼数据，自动添加订阅。支持对外提供榜单快照接口，并可作为宿主推荐页的数据源。",
     "labels": "订阅,榜单",
@@ -11,7 +11,7 @@
     "release": false,
     "system_version": ">=3.0.0",
     "history": {
-      "v1.0.0": "首个独立版本，版本号自本仓库从 1.0.0 重新计数（代码基于上游 MaoyanRank v4.1.4 改造）。新增榜单对外接口：GET /rank 返回带名次与量值的榜单快照（可按类型筛选条数），GET /rank-list 供宿主推荐页与浏览页消费，GET/POST /refresh 手动触发一次抓取与订阅。接口沿用宿主默认 API 令牌认证，App 的 API 令牌模式也能读取。抓取结果改为落成榜单快照（含名次、票房、热度、媒体身份），抓取全失败时保留上一次快照；可选用 ChainEventType.RecommendSource 把猫眼榜单注册为推荐页数据源。"
+      "v1.0.0": "首个独立版本，版本号自本仓库从 1.0.0 重新计数（代码基于上游 MaoyanRank v4.1.4 改造）。插件 ID 为 MaoyanPro（类名/目录/接口前缀同步为 maoyanpro），与上游同名插件彻底区分、互不覆盖。新增榜单对外接口：GET /rank 返回带名次与量值的榜单快照（可按类型筛选条数），GET /rank-list 供宿主推荐页与浏览页消费，GET/POST /refresh 手动触发一次抓取与订阅。接口沿用宿主默认 API 令牌认证，App 的 API 令牌模式也能读取。抓取结果改为落成榜单快照（含名次、票房、热度、媒体身份），抓取全失败时保留上一次快照；可选用 ChainEventType.RecommendSource 把猫眼榜单注册为推荐页数据源。"
     }
   }
 }

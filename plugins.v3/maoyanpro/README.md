@@ -1,6 +1,6 @@
-# 猫眼榜单订阅（MaoyanRank）
+# 猫眼榜单订阅（MaoyanPro）
 
-> [← 返回插件一览](../../README.md#插件一览) · 版本 v1.0.0 · 目录 `plugins.v3/maoyanrank`
+> [← 返回插件一览](../../README.md#插件一览) · 版本 v1.0.0 · 目录 `plugins.v3/maoyanpro`
 
 按配置的榜单类型、平台和排名数量获取猫眼数据，识别媒体后添加订阅；
 同时把抓取结果落成**榜单快照**，通过对外接口提供给 App、脚本与宿主推荐页。
@@ -13,6 +13,8 @@
 
 - 上游版本：**v4.1.4**；本仓库基于该版本改造为**独立发行版**，版本号自本仓库从
   **v1.0.0** 重新计数（不沿用上游编号），作者与主页署名均为本仓库（`KingNuoNuo`）
+- 插件 ID：`MaoyanPro`（类名、目录 `plugins.v3/maoyanpro/`、接口前缀
+  `/api/v1/plugin/MaoyanPro` 与配置前缀同步为 maoyanpro），与上游同名插件彻底区分、互不覆盖
 - 上游能力：抓取猫眼榜单 → 识别媒体 → 添加订阅
 - 本仓库新增：榜单对外接口（`/rank`、`/rank-list`、`/refresh`）、榜单快照
   （含名次 / 票房 / 热度 / 媒体身份）与宿主推荐页数据源，见下文
@@ -20,7 +22,7 @@
 
 ## 上游同步
 
-上游改动通过**三方合并**自动跟进（工作流 `sync-maoyanrank.yml`，基线存于 `.upstream/maoyanrank/`）：
+上游改动通过**三方合并**自动跟进（工作流 `sync-maoyanrank.yml`，基线存于 `.upstream/maoyanpro/`）：
 上游一有更新就开 PR，无冲突时自动递增 patch 版本号并重建打包产物。详见仓库根 README 的「自动同步上游」。
 
 ## 安装
@@ -28,17 +30,17 @@
 MoviePilot →「设定 → 插件市场 → 添加市场」，填入
 `https://github.com/KingNuoNuo/MoviePilot-Plugins`，保存后搜索「**猫眼榜单订阅**」安装并启用。
 
-本地部署也可把 `plugins.v3/maoyanrank` 整个目录拷贝到 MoviePilot 的插件目录
+本地部署也可把 `plugins.v3/maoyanpro` 整个目录拷贝到 MoviePilot 的插件目录
 （容器内通常为 `/app/app/plugins/`，以你的实际部署为准），重启容器即可。
 
 ## 对外接口
 
-注册在宿主 `/api/v1/plugin/MaoyanRank` 前缀下，默认使用宿主的 **API 令牌**认证
+注册在宿主 `/api/v1/plugin/MaoyanPro` 前缀下，默认使用宿主的 **API 令牌**认证
 （`X-API-KEY` 头或 `?apikey=` 查询参数），也可用网页登录态调用。
 
 | 接口 | 返回 | 说明 |
 | --- | --- | --- |
-| `GET /rank` | `Response[MaoyanRankSnapshot]` | 榜单快照，含名次、类型、平台、票房/热度、媒体身份与海报 |
+| `GET /rank` | `Response[MaoyanProSnapshot]` | 榜单快照，含名次、类型、平台、票房/热度、媒体身份与海报 |
 | `GET /rank-list` | `Response[List[MediaInfo]]` | 推荐页 / 浏览页数据源，声明 `page` 参数 |
 | `GET` `POST /refresh` | `MaoyanRefreshResult` | 立即触发一次抓取与订阅 |
 
@@ -50,9 +52,9 @@ MoviePilot →「设定 → 插件市场 → 添加市场」，填入
 - `limit`：每个榜单最多返回的条目数，用于限制响应体大小
 
 ```bash
-curl "http://<MP>:3000/api/v1/plugin/MaoyanRank/rank?apikey=<API_TOKEN>&limit=5"
-curl "http://<MP>:3000/api/v1/plugin/MaoyanRank/rank?apikey=<API_TOKEN>&board_type=web-heat"
-curl -X POST "http://<MP>:3000/api/v1/plugin/MaoyanRank/refresh?apikey=<API_TOKEN>"
+curl "http://<MP>:3000/api/v1/plugin/MaoyanPro/rank?apikey=<API_TOKEN>&limit=5"
+curl "http://<MP>:3000/api/v1/plugin/MaoyanPro/rank?apikey=<API_TOKEN>&board_type=web-heat"
+curl -X POST "http://<MP>:3000/api/v1/plugin/MaoyanPro/refresh?apikey=<API_TOKEN>"
 ```
 
 响应为宿主统一三段式 `{ success, message, data }`，`data.boards[].items[]` 即榜单条目。

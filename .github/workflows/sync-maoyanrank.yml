@@ -70,7 +70,7 @@ jobs:
       - name: 校验合并结果
         if: steps.guard.outputs.open == '0' && steps.sync.outputs.changed == 'true' && steps.sync.outputs.conflict != 'true'
         run: |
-          python -m py_compile plugins.v3/maoyanrank/__init__.py
+          python -m py_compile plugins.v3/maoyanpro/__init__.py
           echo "合并后的插件源码语法检查通过。"
           python -m pip install --quiet pytest pyyaml
           python -m pytest tests/scripts -q

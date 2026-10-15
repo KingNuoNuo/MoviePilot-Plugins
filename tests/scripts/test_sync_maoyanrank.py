@@ -50,8 +50,8 @@ class TestVersionHelpers:
 
 class TestReadmePatterns:
     def test_plugin_readme_version(self, sync):
-        text = "> [← 返回插件一览](x.md) · 版本 v1.0.0 · 目录 `plugins.v3/maoyanrank`"
-        assert sync.VERSION_IN_PLUGIN_README.sub(r"\g<1>1.0.1", text, count=1).endswith("`plugins.v3/maoyanrank`")
+        text = "> [← 返回插件一览](x.md) · 版本 v1.0.0 · 目录 `plugins.v3/maoyanpro`"
+        assert sync.VERSION_IN_PLUGIN_README.sub(r"\g<1>1.0.1", text, count=1).endswith("`plugins.v3/maoyanpro`")
         assert "版本 v1.0.1" in sync.VERSION_IN_PLUGIN_README.sub(r"\g<1>1.0.1", text, count=1)
 
     def test_plugin_readme_upstream_version(self, sync):
@@ -60,13 +60,13 @@ class TestReadmePatterns:
         assert "上游版本：**v4.1.5**" in out
 
     def test_main_readme_version_cell_only_matches_table_cell(self, sync):
-        row = "| **[猫眼榜单订阅](plugins.v3/maoyanrank/README.md)** | v1.0.0 | 简介 | → |"
+        row = "| **[猫眼榜单订阅](plugins.v3/maoyanpro/README.md)** | v1.0.0 | 简介 | → |"
         out = sync.VERSION_CELL_IN_MAIN_README.sub(r"\g<1>1.0.1\g<2>", row)
         assert "| v1.0.1 |" in out
 
     def test_main_readme_ignores_prose_mention(self, sync):
         # 「基于上游 v4.1.4 改造」这类叙述不该被当成版本号单元格改写
-        prose = "> 的同名插件，基于上游 v4.1.4 改造为独立发行版，详见 [插件说明](plugins.v3/maoyanrank/README.md#来源)。"
+        prose = "> 的同名插件，基于上游 v4.1.4 改造为独立发行版，详见 [插件说明](plugins.v3/maoyanpro/README.md#来源)。"
         out, n = sync.VERSION_CELL_IN_MAIN_README.subn(r"\g<1>1.0.1\g<2>", prose)
         assert n == 0 and out == prose
 

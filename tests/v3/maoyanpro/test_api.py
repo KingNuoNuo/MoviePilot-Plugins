@@ -20,10 +20,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.plugins import maoyanrank
-from app.plugins.maoyanrank import (
-    MaoyanRank,
-    MaoyanRankSnapshot,
+from app.plugins import maoyanpro
+from app.plugins.maoyanpro import (
+    MaoyanPro,
+    MaoyanProSnapshot,
     MaoyanRefreshResult,
 )
 from app.schemas import (
@@ -38,15 +38,15 @@ from app.schemas.types import ChainEventType
 @pytest.fixture
 def plugin(monkeypatch):
     """绕过宿主初始化，并隔离网络与浏览器。"""
-    instance = object.__new__(MaoyanRank)
+    instance = object.__new__(MaoyanPro)
     instance._data = {}
     instance._type = ['movie', 'web-heat', 'web-tv', 'zongyi', 'web-movie']
     instance._enabled = True
     instance._recommend_enabled = True
     instance._api_enabled = True
     instance._num = 10
-    monkeypatch.setattr(instance, "_MaoyanRank__with_browser", lambda callback: None)
-    monkeypatch.setattr(maoyanrank, "RequestUtils", lambda *a, **k: SimpleNamespace(
+    monkeypatch.setattr(instance, "_MaoyanPro__with_browser", lambda callback: None)
+    monkeypatch.setattr(maoyanpro, "RequestUtils", lambda *a, **k: SimpleNamespace(
         get_res=lambda *a, **k: None
     ))
     return instance
@@ -104,7 +104,7 @@ def test_rank_endpoint_returns_snapshot_with_metrics(plugin):
     result = plugin.get_rank_snapshot()
 
     assert result.success is True
-    assert isinstance(result.data, MaoyanRankSnapshot)
+    assert isinstance(result.data, MaoyanProSnapshot)
     assert result.data.updated_at == "2026-10-15 12:00:00"
     assert result.data.total == 3
     assert [board.board for board in result.data.boards] == [
@@ -244,7 +244,7 @@ def test_recommend_source_registers_configured_boards(plugin):
     for expected in ["猫眼电影票房", "猫眼电视剧热度", "猫眼网络剧热度", "猫眼综艺热度"]:
         assert expected in names
     for source in event_data.extra_sources[1:]:
-        assert source.api_path.startswith("plugin/MaoyanRank/rank-list?board_type=")
+        assert source.api_path.startswith("plugin/MaoyanPro/rank-list?board_type=")
     movie_source = next(s for s in event_data.extra_sources if s.name == "猫眼电影票房")
     assert movie_source.type == "电影"
 
@@ -275,7 +275,7 @@ def test_recommend_source_only_includes_selected_boards(plugin):
 
 def test_refresh_now_reports_counts(plugin, monkeypatch):
     """手动刷新返回抓取与订阅统计。"""
-    monkeypatch.setattr(plugin, "_MaoyanRank__refresh_maoyan", lambda: {
+    monkeypatch.setattr(plugin, "_MaoyanPro__refresh_maoyan", lambda: {
         "board_count": 2, "item_count": 4, "subscribed": 2,
     })
 
@@ -298,7 +298,7 @@ def test_refresh_now_handles_missing_config_and_errors(plugin, monkeypatch):
     def boom():
         raise RuntimeError("upstream down")
 
-    monkeypatch.setattr(plugin, "_MaoyanRank__refresh_maoyan", boom)
+    monkeypatch.setattr(plugin, "_MaoyanPro__refresh_maoyan", boom)
     failed = plugin.refresh_now()
     assert failed.refreshed is False
     assert "刷新失败" in failed.message
@@ -328,7 +328,7 @@ def test_refresh_builds_board_snapshot_with_identity(plugin, monkeypatch):
         }]
         return [{"title": "院线电影", "releaseInfo": "上映3天"}], []
 
-    monkeypatch.setattr(plugin, "_MaoyanRank__get_url_info", fetch)
+    monkeypatch.setattr(plugin, "_MaoyanPro__get_url_info", fetch)
 
     def recognize(meta, mtype, cache):
         """返回带身份的识别结果，用于验证回填。"""
@@ -344,10 +344,10 @@ def test_refresh_builds_board_snapshot_with_identity(plugin, monkeypatch):
         get_no_exists_info=lambda meta, mediainfo: (False, {}))
     plugin.subscribechain = SimpleNamespace(
         exists=lambda mediainfo, meta: False, add=lambda **kwargs: None)
-    monkeypatch.setattr(plugin, "_MaoyanRank__resolve_tv_subscribe_season",
+    monkeypatch.setattr(plugin, "_MaoyanPro__resolve_tv_subscribe_season",
                         lambda **kwargs: 1)
 
-    stats = plugin._MaoyanRank__refresh_maoyan()
+    stats = plugin._MaoyanPro__refresh_maoyan()
 
     assert stats["board_count"] == 1
     assert stats["subscribed"] == 1
@@ -369,10 +369,10 @@ def test_refresh_keeps_previous_snapshot_when_fetch_fails(plugin, monkeypatch):
                         lambda key: previous if key == "snapshot" else [])
     monkeypatch.setattr(plugin, "save_data",
                         lambda key, value: saved.__setitem__(key, value))
-    monkeypatch.setattr(plugin, "_MaoyanRank__get_url_info",
+    monkeypatch.setattr(plugin, "_MaoyanPro__get_url_info",
                         lambda *args, **kwargs: ([], []))
 
-    plugin._MaoyanRank__refresh_maoyan()
+    plugin._MaoyanPro__refresh_maoyan()
 
     assert "snapshot" not in saved
     assert plugin.get_data("snapshot") == previous
@@ -380,7 +380,7 @@ def test_refresh_keeps_previous_snapshot_when_fetch_fails(plugin, monkeypatch):
 
 def test_rank_metrics_reads_current_maoyan_fields(plugin):
     """量值解析覆盖现网字段：票房用 boxSplitUnit，热度用 currHeatDesc。"""
-    metrics = plugin._MaoyanRank__rank_metrics(
+    metrics = plugin._MaoyanPro__rank_metrics(
         {"boxSplitUnit": {"num": "161.93", "unit": "万"}, "boxRate": "28.1%",
          "showCount": 98919},
         {"releaseInfo": "上映11天", "platformDesc": "院线"},
@@ -389,12 +389,12 @@ def test_rank_metrics_reads_current_maoyan_fields(plugin):
     assert metrics["heat"] == "28.1%"
     assert metrics["release_info"] == "上映11天"
 
-    heat = plugin._MaoyanRank__rank_metrics(
+    heat = plugin._MaoyanPro__rank_metrics(
         {"currHeatDesc": "9820", "barValue": "9820"}, {"platformDesc": "腾讯视频"})
     assert heat["heat"] == "9820"
     assert heat["platform"] == "腾讯视频"
 
-    empty = plugin._MaoyanRank__rank_metrics({}, {})
+    empty = plugin._MaoyanPro__rank_metrics({}, {})
     assert (empty["box_office"], empty["heat"]) == ("", "")
 
 
@@ -406,7 +406,7 @@ def test_parse_rank_items_keeps_rank_and_board(plugin):
         {"movieInfo": {"movieName": ""}},
         {"movieInfo": {"movieName": "第四条"}},
     ]
-    items = plugin._MaoyanRank__parse_rank_items(
+    items = plugin._MaoyanPro__parse_rank_items(
         data, 4, "movieInfo", "movieName", "电影票房榜单",
         meta={"board": "电影票房榜单", "board_type": "movie",
               "url": "u", "show_date": "2026-10-15"},
@@ -424,9 +424,9 @@ def test_parse_rank_items_keeps_rank_and_board(plugin):
 def test_board_type_resolved_from_series_type(plugin, series_type, expected):
     """热度榜单按 seriesType 区分电视剧、网络剧与综艺。"""
     base = "https://piaofang.maoyan.com/i/api/encrypt/dashboard/webHeatData"
-    assert plugin._MaoyanRank__board_type_from_url(
+    assert plugin._MaoyanPro__board_type_from_url(
         f"{base}?seriesType={series_type}") == expected
-    assert plugin._MaoyanRank__board_type_from_url("") == "web-heat"
+    assert plugin._MaoyanPro__board_type_from_url("") == "web-heat"
 
 
 def test_existing_subscription_behaviour_unchanged(plugin, monkeypatch):
@@ -444,7 +444,7 @@ def test_existing_subscription_behaviour_unchanged(plugin, monkeypatch):
     plugin._mg_enabled = plugin._yk_enabled = False
     plugin.get_data = lambda key: [] if key == "history" else None
     plugin.save_data = lambda key, value: None
-    monkeypatch.setattr(plugin, "_MaoyanRank__get_url_info", fetch)
+    monkeypatch.setattr(plugin, "_MaoyanPro__get_url_info", fetch)
     recognize = Mock(return_value=SimpleNamespace(
         title="电影", year="2026", type=MediaType.MOVIE,
         media_source=SimpleNamespace(value="themoviedb"), media_id="1",
@@ -455,7 +455,7 @@ def test_existing_subscription_behaviour_unchanged(plugin, monkeypatch):
     plugin.subscribechain = SimpleNamespace(
         exists=lambda mediainfo, meta: False, add=lambda **kwargs: None)
 
-    plugin._MaoyanRank__refresh_maoyan()
+    plugin._MaoyanPro__refresh_maoyan()
 
     assert captured["args"][0].endswith("/dashboard-ajax/movie")
     assert captured["args"][2] == ""
@@ -470,7 +470,7 @@ def test_existing_subscription_behaviour_unchanged(plugin, monkeypatch):
 ])
 def test_release_year_parsing_unchanged(release_info, year):
     """上映年份解析规则保持既有行为。"""
-    assert MaoyanRank._MaoyanRank__release_year(
+    assert MaoyanPro._MaoyanPro__release_year(
         release_info, datetime.datetime(2026, 1, 5)) == year
 
 

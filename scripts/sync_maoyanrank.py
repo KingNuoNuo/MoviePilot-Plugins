@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""把上游 MaoyanRank 插件的改动同步进本仓库的独立发行版。
+"""把上游 MaoyanRank 插件的改动同步进本仓库的独立发行版 MaoyanPro。
 
 上游：jxxghp/moviepilot-plugins 的 plugins.v3/maoyanrank/
-基线：.upstream/maoyanrank/（上次成功同步时保存的上游原文）
-本仓库：plugins.v3/maoyanrank/
+基线：.upstream/maoyanpro/（上次成功同步时保存的上游原文）
+本仓库：plugins.v3/maoyanpro/
 
 合并方式：三方合并（git merge-file）
-    base   = .upstream/maoyanrank/<file>   上次同步时的上游原文
-    ours   = plugins.v3/maoyanrank/<file>  本仓库的独立发行版
+    base   = .upstream/maoyanpro/<file>   上次同步时的上游原文
+    ours   = plugins.v3/maoyanpro/<file>  本仓库的独立发行版
     theirs = 上游最新 <file>
 
   - 无冲突：写回合并结果 → patch 版本 +1 → 同步 package.v3.json 与两处 README 的版本号
@@ -48,8 +48,8 @@ UPSTREAM_RAW = os.environ.get("MAOYAN_UPSTREAM_BASE") or (
     f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/main/{UPSTREAM_DIR}"
 )
 
-PLUGIN_ID = "maoyanrank"
-PLUGIN_KEY = "MaoyanRank"  # 索引里的键与插件类名一致
+PLUGIN_ID = "maoyanpro"
+PLUGIN_KEY = "MaoyanPro"  # 索引里的键与插件类名一致
 LOCAL_DIR = REPO / "plugins.v3" / PLUGIN_ID
 BASE_DIR = REPO / ".upstream" / PLUGIN_ID
 META_FILE = BASE_DIR / "meta.json"
@@ -74,8 +74,8 @@ TOTAL_ZIP_ORDER = (
     "icons/maoyan.png",
     "plugins/tgtodrivesync/__init__.py",
     "plugins/tgtodrivesync/README.md",
-    "plugins.v3/maoyanrank/__init__.py",
-    "plugins.v3/maoyanrank/README.md",
+    "plugins.v3/maoyanpro/__init__.py",
+    "plugins.v3/maoyanpro/README.md",
 )
 
 TOTAL_ZIP_NAME = "MoviePilot-Plugins.zip"
