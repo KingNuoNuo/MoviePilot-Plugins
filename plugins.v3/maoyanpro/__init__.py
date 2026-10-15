@@ -164,7 +164,7 @@ class MaoyanPro(_PluginBase):
     # 插件名称
     plugin_name = "猫眼榜单"
     # 插件描述
-    plugin_desc = "监控猫眼数据，提供榜单显示和订阅功能。"
+    plugin_desc = "猫眼榜单显示和订阅功能。"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan.png"
     # 插件版本
