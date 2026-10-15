@@ -19,7 +19,10 @@ from app.sdk.config import settings
 from app.sdk.media import MediaInfo
 from app.sdk.browser import launch_browser_context
 from app.sdk.media import MetaInfo
-from app.sdk.events import eventmanager, Event
+# 注意：宿主 v3 的 Event 是事件总线事件类（构造必须传 event_type），
+# 不能遮蔽 threading.Event，否则类体里的 `_event = Event()` 会在导入期直接报错
+from app.sdk.events import eventmanager
+from app.sdk.events import Event as SdkEvent
 from app.sdk.logging import logger
 from app.plugins import _PluginBase
 from app.schemas import MediaSource, MediaType
@@ -509,7 +512,7 @@ class MaoyanPro(_PluginBase):
         )
 
     @eventmanager.register(ChainEventType.RecommendSource)
-    def recommend_source(self, event: Event):
+    def recommend_source(self, event: SdkEvent):
         """把猫眼榜单注册为宿主推荐页的数据源。"""
         if not (self._enabled and self._recommend_enabled and self._api_enabled):
             return
