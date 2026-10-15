@@ -40,11 +40,23 @@ def plugin(monkeypatch):
     """绕过宿主初始化，并隔离网络与浏览器。"""
     instance = object.__new__(MaoyanPro)
     instance._data = {}
-    instance._type = ['movie', 'web-heat', 'web-tv', 'zongyi', 'web-movie']
+    instance._type_movie = ['movie', 'web-movie']
+    instance._type_tv = ['web-all', 'zongyi']
+    instance._type_zongyi = ['zongyi']
+    instance._type = ['movie', 'web-movie', 'web-all', 'zongyi']
     instance._enabled = True
     instance._recommend_enabled = True
     instance._api_enabled = True
-    instance._num = 10
+    instance._movie_sub_num = 10
+    instance._movie_rec_num = 20
+    instance._tv_sub_num = 10
+    instance._tv_rec_num = 20
+    instance._zongyi_sub_num = 10
+    instance._zongyi_rec_num = 20
+    instance._tx_sub_num = 0
+    instance._iqy_sub_num = 0
+    instance._mg_sub_num = 0
+    instance._yk_sub_num = 0
     monkeypatch.setattr(instance, "_MaoyanPro__with_browser", lambda callback: None)
     monkeypatch.setattr(maoyanpro, "RequestUtils", lambda *a, **k: SimpleNamespace(
         get_res=lambda *a, **k: None
@@ -77,15 +89,15 @@ def snapshot_boards():
             ],
         },
         {
-            "board": "剧集热度榜单（腾讯视频）", "type": "web-heat", "type_name": "剧集热度",
+            "board": "剧集综合榜单（腾讯视频）", "type": "web-all", "type_name": "剧集综合",
             "platform": "腾讯视频", "show_date": "2026-10-15",
             "url": ("https://piaofang.maoyan.com/i/api/encrypt/dashboard/"
                     "webHeatData?seriesType=0&platformType=3"),
             "count": 1, "updated_at": "2026-10-15 12:00:00",
             "items": [
-                {"rank": 1, "title": "沉默的荣耀", "board_type": "web-heat",
-                 "type_name": "剧集热度", "platformDesc": "腾讯视频",
-                 "releaseInfo": "上线28天", "board": "剧集热度榜单（腾讯视频）",
+                {"rank": 1, "title": "沉默的荣耀", "board_type": "web-all",
+                 "type_name": "剧集综合", "platformDesc": "腾讯视频",
+                 "releaseInfo": "上线28天", "board": "剧集综合榜单（腾讯视频）",
                  "show_date": "2026-10-15", "box_office": "", "heat": "9820",
                  "media_source": "themoviedb", "media_id": "219920",
                  "poster": "https://image.tmdb.org/t/p/w500/b.jpg",
@@ -108,7 +120,7 @@ def test_rank_endpoint_returns_snapshot_with_metrics(plugin):
     assert result.data.updated_at == "2026-10-15 12:00:00"
     assert result.data.total == 3
     assert [board.board for board in result.data.boards] == [
-        "电影票房榜单", "剧集热度榜单（腾讯视频）",
+        "电影票房榜单", "剧集综合榜单（腾讯视频）",
     ]
     first = result.data.boards[0].items[0]
     assert (first.rank, first.title, first.box_office, first.heat) == (
@@ -126,9 +138,9 @@ def test_rank_endpoint_filters_by_type_board_and_limit(plugin):
         "updated_at": "2026-10-15 12:00:00", "total": 3, "boards": snapshot_boards(),
     })
 
-    only_heat = plugin.get_rank_snapshot(board_type="web-heat")
+    only_heat = plugin.get_rank_snapshot(board_type="web-all")
     assert len(only_heat.data.boards) == 1
-    assert only_heat.data.boards[0].type == "web-heat"
+    assert only_heat.data.boards[0].type == "web-all"
 
     limited = plugin.get_rank_snapshot(limit=1)
     assert limited.data.total == 2
@@ -203,8 +215,8 @@ def test_rank_list_terminates_pagination(plugin):
     """列表视图翻到第二页立即返回空，避免无限翻页。"""
     plugin.save_data("snapshot", {"boards": snapshot_boards()})
 
-    assert plugin.rank_list(board_type="web-heat", page=2).data == []
-    assert len(plugin.rank_list(board_type="web-heat", page=1).data) == 1
+    assert plugin.rank_list(board_type="web-all", page=2).data == []
+    assert len(plugin.rank_list(board_type="web-all", page=1).data) == 1
 
 
 def test_rank_list_handles_unknown_board_type(plugin):
@@ -241,7 +253,7 @@ def test_recommend_source_registers_configured_boards(plugin):
 
     names = [source.name for source in event_data.extra_sources]
     assert names[0] == "已有来源"
-    for expected in ["猫眼电影票房", "猫眼电视剧热度", "猫眼网络剧热度", "猫眼综艺热度"]:
+    for expected in ["猫眼电影票房", "猫眼剧集综合热度", "猫眼综艺热度"]:
         assert expected in names
     for source in event_data.extra_sources[1:]:
         assert source.api_path.startswith("plugin/MaoyanPro/rank-list?board_type=")
@@ -250,14 +262,24 @@ def test_recommend_source_registers_configured_boards(plugin):
 
 
 def test_recommend_source_skips_when_disabled(plugin):
-    """未开启推荐源或插件停用时都不注册数据源。"""
+    """未开启推荐源或对外接口停用时都不注册数据源；订阅开关不影响推荐源。"""
     plugin._recommend_enabled = False
     event_data = RecommendSourceEventData()
     plugin.recommend_source(SimpleNamespace(event_data=event_data))
     assert event_data.extra_sources == []
 
     plugin._recommend_enabled = True
+    event_data = RecommendSourceEventData()
+    plugin.recommend_source(SimpleNamespace(event_data=event_data))
+    assert event_data.extra_sources
+
+    # 订阅总开关关闭时，推荐页数据源照常注册（v1.1.0 起功能解耦）
     plugin._enabled = False
+    event_data = RecommendSourceEventData()
+    plugin.recommend_source(SimpleNamespace(event_data=event_data))
+    assert event_data.extra_sources
+
+    plugin._api_enabled = False
     event_data = RecommendSourceEventData()
     plugin.recommend_source(SimpleNamespace(event_data=event_data))
     assert event_data.extra_sources == []
@@ -271,6 +293,17 @@ def test_recommend_source_only_includes_selected_boards(plugin):
     plugin.recommend_source(SimpleNamespace(event_data=event_data))
 
     assert [source.name for source in event_data.extra_sources] == ["猫眼电影票房"]
+
+
+def test_recommend_source_registers_combined_tv_board(plugin):
+    """配置剧集综合榜时注册对应的推荐源。"""
+    plugin._type = ["web-all"]
+    event_data = RecommendSourceEventData()
+
+    plugin.recommend_source(SimpleNamespace(event_data=event_data))
+
+    assert [source.name for source in event_data.extra_sources] == ["猫眼剧集综合热度"]
+    assert event_data.extra_sources[0].api_path.endswith("board_type=web-all")
 
 
 def test_refresh_now_reports_counts(plugin, monkeypatch):
@@ -306,10 +339,7 @@ def test_refresh_now_handles_missing_config_and_errors(plugin, monkeypatch):
 
 def test_refresh_builds_board_snapshot_with_identity(plugin, monkeypatch):
     """刷新入口落成带媒体身份的持久化快照。"""
-    plugin._type = ['movie', 'web-heat']
-    plugin._all_enabled = True
-    plugin._tx_enabled = plugin._iqy_enabled = False
-    plugin._mg_enabled = plugin._yk_enabled = False
+    plugin._type = ['movie', 'web-all']
     saved = {}
     monkeypatch.setattr(plugin, "get_data", lambda key: [] if key == "history" else None)
     monkeypatch.setattr(plugin, "save_data",
@@ -326,7 +356,8 @@ def test_refresh_builds_board_snapshot_with_identity(plugin, monkeypatch):
                        "board": "电影票房榜单", "show_date": "2026-10-15",
                        "box_office": "100万", "heat": "20%"}],
         }]
-        return [{"title": "院线电影", "releaseInfo": "上映3天"}], []
+        return [{"title": "院线电影", "releaseInfo": "上映3天"}], [], \
+            [{"title": "院线电影", "releaseInfo": "上映3天"}], []
 
     monkeypatch.setattr(plugin, "_MaoyanPro__get_url_info", fetch)
 
@@ -370,12 +401,45 @@ def test_refresh_keeps_previous_snapshot_when_fetch_fails(plugin, monkeypatch):
     monkeypatch.setattr(plugin, "save_data",
                         lambda key, value: saved.__setitem__(key, value))
     monkeypatch.setattr(plugin, "_MaoyanPro__get_url_info",
-                        lambda *args, **kwargs: ([], []))
+                        lambda *args, **kwargs: ([], [], [], []))
 
     plugin._MaoyanPro__refresh_maoyan()
 
     assert "snapshot" not in saved
     assert plugin.get_data("snapshot") == previous
+
+
+def test_refresh_skips_subscribe_but_keeps_snapshot_when_disabled(plugin, monkeypatch):
+    """订阅总开关关闭时完全不订阅，但榜单快照照常更新（推荐页数据不受影响）。"""
+    plugin._type = ['movie']
+    plugin._enabled = False
+    plugin._recommend_enabled = True
+    saved = {}
+    monkeypatch.setattr(plugin, "get_data", lambda key: [] if key == "history" else None)
+    monkeypatch.setattr(plugin, "save_data",
+                        lambda key, value: saved.__setitem__(key, value))
+
+    def fetch(movie_url, tv_urls, web_movie_url, num):
+        """模拟一次抓取：返回待订阅条目，验证关闭订阅后不会被消费。"""
+        plugin._last_boards = [{
+            "board": "电影票房榜单", "type": "movie", "type_name": "电影票房",
+            "platform": "", "show_date": "2026-10-15", "url": movie_url, "count": 1,
+            "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "items": [{"rank": 1, "title": "院线电影", "board_type": "movie",
+                       "type_name": "", "platformDesc": "院线", "releaseInfo": "上映3天",
+                       "board": "电影票房榜单", "show_date": "2026-10-15"}],
+        }]
+        return [{"title": "院线电影"}], [], [{"title": "院线电影"}], []
+
+    monkeypatch.setattr(plugin, "_MaoyanPro__get_url_info", fetch)
+    set_sub = Mock()
+    monkeypatch.setattr(MaoyanPro, "set_sub", set_sub)
+
+    stats = plugin._MaoyanPro__refresh_maoyan()
+
+    set_sub.assert_not_called()
+    assert "snapshot" in saved
+    assert saved["snapshot"]["boards"][0]["items"][0]["title"] == "院线电影"
 
 
 def test_rank_metrics_reads_current_maoyan_fields(plugin):
@@ -419,14 +483,14 @@ def test_parse_rank_items_keeps_rank_and_board(plugin):
 
 
 @pytest.mark.parametrize("series_type,expected", [
-    ("0", "web-heat"), ("1", "web-tv"), ("2", "zongyi"),
+    ("0", "web-all"), ("1", "web-all"), ("2", "zongyi"), ("9", "web-all"),
 ])
 def test_board_type_resolved_from_series_type(plugin, series_type, expected):
-    """热度榜单按 seriesType 区分电视剧、网络剧与综艺。"""
+    """剧集不再单独抓榜，除综艺（seriesType=2）外一律归为剧集综合榜。"""
     base = "https://piaofang.maoyan.com/i/api/encrypt/dashboard/webHeatData"
     assert plugin._MaoyanPro__board_type_from_url(
         f"{base}?seriesType={series_type}") == expected
-    assert plugin._MaoyanPro__board_type_from_url("") == "web-heat"
+    assert plugin._MaoyanPro__board_type_from_url("") == "web-all"
 
 
 def test_existing_subscription_behaviour_unchanged(plugin, monkeypatch):
@@ -436,12 +500,9 @@ def test_existing_subscription_behaviour_unchanged(plugin, monkeypatch):
     def fetch(movie_url, tv_urls, web_movie_url, num=10):
         """记录入参，确保刷新入口传给抓取的参数顺序未变。"""
         captured["args"] = (movie_url, tv_urls, web_movie_url, num)
-        return [{"title": "电影"}], [{"title": "剧集"}]
+        return [{"title": "电影"}], [{"title": "剧集"}], [{"title": "电影"}], []
 
-    plugin._type = ["movie", "web-heat"]
-    plugin._all_enabled = True
-    plugin._tx_enabled = plugin._iqy_enabled = False
-    plugin._mg_enabled = plugin._yk_enabled = False
+    plugin._type = ["movie", "web-all"]
     plugin.get_data = lambda key: [] if key == "history" else None
     plugin.save_data = lambda key, value: None
     monkeypatch.setattr(plugin, "_MaoyanPro__get_url_info", fetch)
@@ -459,8 +520,191 @@ def test_existing_subscription_behaviour_unchanged(plugin, monkeypatch):
 
     assert captured["args"][0].endswith("/dashboard-ajax/movie")
     assert captured["args"][2] == ""
-    assert captured["args"][3] == 10
+    # 抓取条数取订阅条数与推荐条数的较大者（fixture：电影订阅 10 条、推荐 20 条）
+    assert captured["args"][3] == 20
     assert recognize.called
+
+
+def _form_fields(plugin):
+    """把表单结构拍平成 {model: props}，返回字段表与默认值。"""
+    form, defaults = plugin.get_form()
+    fields = {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            props = node.get("props") or {}
+            if "model" in props:
+                fields[props["model"]] = props
+            for value in node.get("content") or []:
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(form)
+    return fields, defaults
+
+
+def test_form_separates_movie_and_tv_subscription_types(plugin):
+    """订阅类型把电影与剧集分开设置，综艺并入剧集下拉，条数字段 0 即代表关闭。"""
+    fields, defaults = _form_fields(plugin)
+
+    assert fields["type_movie"]["label"] == "电影订阅类型"
+    assert [item["value"] for item in fields["type_movie"]["items"]] == ["movie", "web-movie"]
+    assert fields["type_tv"]["label"] == "剧集订阅类型"
+    assert [item["value"] for item in fields["type_tv"]["items"]] == ["web-all", "zongyi"]
+    # 剧集不再拆电视剧/网剧单榜；综艺并入剧集下拉后不再单列
+    assert "type_zongyi" not in fields
+    assert [item["title"] for item in fields["type_tv"]["items"]] == [
+        "剧集综合榜单（电视剧+网剧）", "综艺热度榜单",
+    ]
+
+    # 三组「订阅条数 + 推荐条数」，订阅条数可选 0（不订阅）、推荐条数可选 0（不展示）
+    for model in ("movie_sub_num", "tv_sub_num", "zongyi_sub_num"):
+        assert fields[model]["items"][0] == {"title": "0", "value": 0}
+    for model in ("movie_rec_num", "tv_rec_num", "zongyi_rec_num"):
+        assert fields[model]["items"][0] == {"title": "0", "value": 0}
+    # 平台榜只保留订阅条数
+    for model in ("tx_sub_num", "iqy_sub_num", "mg_sub_num", "yk_sub_num"):
+        assert model in fields
+        assert fields[model]["items"][0]["value"] == 0
+
+    # 旧的合并 type 字段与五个平台/全网开关均已移除
+    assert "type" not in fields
+    assert not {"all_enabled", "tx_enabled", "iqy_enabled",
+                "mg_enabled", "yk_enabled"} & set(fields)
+
+    assert defaults["type_movie"] == ["movie", "web-movie"]
+    assert defaults["type_tv"] == ["web-all", "zongyi"]
+    assert "type_zongyi" not in defaults
+    assert defaults["tx_sub_num"] == 0
+
+
+def test_legacy_types_merge_into_combined_tv_board():
+    """旧配置里独立的综艺、电视剧/网剧单榜会并入剧集综合榜，且不产生重复项。"""
+    instance = object.__new__(MaoyanPro)
+    instance._MaoyanPro__load_type_config({
+        "type_movie": ["movie"],
+        "type_tv": ["web-heat", "web-tv"],
+        "type_zongyi": ["zongyi"],
+    })
+
+    assert instance._type_tv == ["web-all", "zongyi"]
+    assert instance._type == ["movie", "web-all", "zongyi"]
+    assert instance._type_zongyi == ["zongyi"]
+
+    # 已含综合榜的旧配置不会被重复插入
+    instance._MaoyanPro__load_type_config({
+        "type_movie": ["movie"],
+        "type_tv": ["web-heat", "web-all"],
+        "type_zongyi": ["zongyi"],
+    })
+
+    assert instance._type_tv == ["web-all", "zongyi"]
+    assert instance._type == ["movie", "web-all", "zongyi"]
+
+
+def test_config_groups_types_and_numbers():
+    """电影/剧集（含综艺）两组类型与条数各自独立生效。"""
+    instance = object.__new__(MaoyanPro)
+    instance._MaoyanPro__load_type_config({
+        "type_movie": ["movie"],
+        "type_tv": ["web-all"],
+        "type_zongyi": [],
+        "movie_sub_num": 5, "movie_rec_num": 30,
+        "tv_sub_num": 0, "tv_rec_num": 20,
+        "zongyi_sub_num": 0, "zongyi_rec_num": 0,
+        "tx_sub_num": 3, "iqy_sub_num": 0, "mg_sub_num": 7, "yk_sub_num": 0,
+    })
+
+    assert instance._type == ["movie", "web-all"]
+    assert (instance._movie_sub_num, instance._movie_rec_num) == (5, 30)
+    assert (instance._tv_sub_num, instance._tv_rec_num) == (0, 20)
+    assert (instance._tx_sub_num, instance._mg_sub_num) == (3, 7)
+    assert (instance._iqy_sub_num, instance._yk_sub_num) == (0, 0)
+
+
+def test_legacy_config_migrates_to_split_groups():
+    """旧版合并 type 与平台开关的配置可平滑迁移，不必重配。"""
+    instance = object.__new__(MaoyanPro)
+    instance._MaoyanPro__load_type_config({
+        "type": ["movie", "web-all", "zongyi"],
+        "num": 3, "all_num": 5, "recommend_num": 30,
+        "tx_enabled": True, "tx_num": 7,
+        "iqy_enabled": False, "iqy_num": 9,
+    })
+
+    assert instance._type == ["movie", "web-all", "zongyi"]
+    assert instance._movie_sub_num == 3
+    assert instance._tv_sub_num == 5
+    assert instance._zongyi_sub_num == 5
+    assert instance._movie_rec_num == instance._tv_rec_num == instance._zongyi_rec_num == 30
+    assert instance._tx_sub_num == 7
+    # 旧开关关闭的平台视为不订阅
+    assert instance._iqy_sub_num == 0
+
+
+def test_refresh_uses_independent_numbers_and_combined_board(plugin, monkeypatch):
+    """综合榜走不带 seriesType 的地址；订阅条数与推荐条数互不影响。"""
+    captured = {}
+
+    def fetch(movie_url, tv_urls, web_movie_url, num=10):
+        captured["tv_urls"] = tv_urls
+        captured["movie_url"] = movie_url
+        return [], [], [], []
+
+    plugin._type = ["movie", "web-all", "zongyi"]
+    plugin._movie_sub_num, plugin._movie_rec_num = 5, 20
+    plugin._tv_sub_num, plugin._tv_rec_num = 5, 20
+    plugin._zongyi_sub_num, plugin._zongyi_rec_num = 0, 0
+    plugin._tx_sub_num = plugin._iqy_sub_num = 0
+    plugin._mg_sub_num = plugin._yk_sub_num = 0
+    plugin.get_data = lambda key: [] if key == "history" else None
+    plugin.save_data = lambda key, value: None
+    monkeypatch.setattr(plugin, "_MaoyanPro__get_url_info", fetch)
+
+    plugin._MaoyanPro__refresh_maoyan()
+
+    urls = {item[0]: (item[1], item[2], item[3]) for item in captured["tv_urls"]}
+    base = "https://piaofang.maoyan.com/i/api/encrypt/dashboard/webHeatData"
+    # 剧集只有综合榜一条：不传 seriesType，抓取条数取 max(订阅, 推荐) = 20，订阅上限仍是 5
+    combined = next(url for url in urls if "seriesType" not in url)
+    assert combined.startswith(base)
+    assert urls[combined] == (20, 5, True)
+    # 综艺订阅/推荐条数都为 0 → 该榜完全不抓取
+    assert not any("seriesType=2" in url for url in urls)
+
+
+def test_refresh_keeps_platform_boards_out_of_snapshot(plugin, monkeypatch):
+    """平台细分榜只服务订阅，不写入榜单快照。"""
+    captured = {}
+
+    def fetch(movie_url, tv_urls, web_movie_url, num=10):
+        captured["tv_urls"] = tv_urls
+        return [], [], [], []
+
+    plugin._type = ["web-all"]
+    plugin._tv_sub_num, plugin._tv_rec_num = 5, 20
+    plugin._tx_sub_num = 3
+    plugin._iqy_sub_num = plugin._mg_sub_num = plugin._yk_sub_num = 0
+    plugin.get_data = lambda key: [] if key == "history" else None
+    plugin.save_data = lambda key, value: None
+    monkeypatch.setattr(plugin, "_MaoyanPro__get_url_info", fetch)
+
+    plugin._MaoyanPro__refresh_maoyan()
+
+    by_snapshot = {item[3] for item in captured["tv_urls"]}
+    assert by_snapshot == {True, False}
+    platform = [item for item in captured["tv_urls"] if not item[3]]
+    assert len(platform) == 1 and "platformType=3" in platform[0][0]
+    assert platform[0][1] == platform[0][2] == 3
+
+
+def test_board_type_from_url_detects_combined_board(plugin):
+    """热度接口不传 seriesType 时为电视剧+网络剧综合榜。"""
+    base = "https://piaofang.maoyan.com/i/api/encrypt/dashboard/webHeatData"
+    assert plugin._MaoyanPro__board_type_from_url(f"{base}?showDate=20261015") == "web-all"
+    assert plugin._MaoyanPro__board_type_from_url(f"{base}?seriesType=1&showDate=20261015") == "web-all"
 
 
 @pytest.mark.parametrize("release_info,year", [

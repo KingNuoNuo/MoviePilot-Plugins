@@ -43,7 +43,7 @@ class MaoyanProItem(BaseModel):
 
     rank: int = Field(..., description="榜单名次，从 1 开始")
     title: str = Field(..., description="媒体标题")
-    type: str = Field("", description="榜单类型：movie/web-movie/web-heat/web-tv/zongyi")
+    type: str = Field("", description="榜单类型：movie/web-movie/web-all/zongyi")
     type_name: str = Field("", description="榜单类型中文名")
     platform: str = Field("", description="平台名称，如全网、腾讯视频")
     release_info: str = Field("", description="上线信息，如「上映 11 天」")
@@ -153,7 +153,7 @@ class MaoyanPro(_PluginBase):
     电影获取的url: https://piaofang.maoyan.com/dashboard-ajax/movie
     电视剧获取的url: {tv_url}?showDate=20240223&seriesType=0&platformType=0
         参数 showDate: 时间具体到天
-        参数 seriesType: 代表类型 0: 电视剧 1: 网络剧 2: 综艺 不传递-1代表电视剧+网络剧
+        参数 seriesType: 代表类型 0: 电视剧 1: 网络剧 2: 综艺；不传该参数时为电视剧+网络剧综合榜
         参数 platformType: 代表平台 0 全网 3 腾讯视频 2 爱奇艺 1 优酷 7 芒果 5 搜狐 4 乐视 6 PPTV 20 网络电影networkHot=3
 
     详情链接:
@@ -168,7 +168,7 @@ class MaoyanPro(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan.png"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.1"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -192,20 +192,30 @@ class MaoyanPro(_PluginBase):
     _onlyonce = False
     _cron = ""
     _clear = False
-    # type细分 movie: 电影 web-heat 电视榜单 web-tv 网剧 zongyi 综艺  web-movie 网络电影
-    _type = ['movie', 'web-heat', 'web-tv', 'zongyi', 'web-movie']
+    # 订阅类型细分：movie 电影票房 / web-movie 网络电影 / web-all 剧集综合榜
+    # （电视剧+网络剧，走猫眼不传 seriesType 的综合榜）/ zongyi 综艺热度。
+    # 电影与剧集分开配置，两边的勾选互不牵连；综艺属于剧集大类（只是热度榜口径
+    # 不同），类型选择并入「剧集订阅类型」同一个下拉，综艺条数仍单独配置。
+    _type_movie = ['movie', 'web-movie']
+    _type_tv = ['web-all', 'zongyi']
+    # 综艺类型在选择上归属 _type_tv，此属性仅作旧配置兼容与配置回写保留（派生视图）
+    _type_zongyi = ['zongyi']
+    # 实际抓取的榜单类型（由上方两组配置合并而来）
+    _type = ['movie', 'web-movie', 'web-all', 'zongyi']
 
-    _num = 10
-    _all_enabled: bool = False
-    _all_num = 10
-    _tx_enabled: bool = False
-    _tx_num = 10
-    _iqy_enabled: bool = False
-    _iqy_num = 10
-    _mg_enabled: bool = False
-    _mg_num = 10
-    _yk_enabled: bool = False
-    _yk_num = 10
+    # 各组「订阅条数」与「推荐条数」：订阅条数为 0 表示不订阅该榜（仍抓取供推荐页），
+    # 推荐条数为 0 表示推荐页与榜单接口不展示该榜，两者都为 0 则该榜完全不抓取。
+    _movie_sub_num = 10
+    _movie_rec_num = 20
+    _tv_sub_num = 10
+    _tv_rec_num = 20
+    _zongyi_sub_num = 10
+    _zongyi_rec_num = 20
+    # 平台细分榜只服务自动订阅（不写入榜单快照/推荐页），条数为 0 表示不订阅该平台
+    _tx_sub_num = 0
+    _iqy_sub_num = 0
+    _mg_sub_num = 0
+    _yk_sub_num = 0
 
     # 对外接口与推荐数据源开关
     _api_enabled = True
@@ -215,8 +225,7 @@ class MaoyanPro(_PluginBase):
     _TYPE_NAMES = {
         'movie': '电影票房',
         'web-movie': '网络电影',
-        'web-heat': '剧集热度',
-        'web-tv': '网络剧热度',
+        'web-all': '剧集综合',
         'zongyi': '综艺热度',
     }
 
@@ -224,10 +233,20 @@ class MaoyanPro(_PluginBase):
     _RECOMMEND_TYPES = {
         'movie': '电影',
         'web-movie': '电影',
-        'web-heat': '电视剧',
-        'web-tv': '电视剧',
+        'web-all': '电视剧',
         'zongyi': '电视剧',
     }
+
+    # 榜单类型 -> 识别媒体时使用的类型（电影榜按电影识别，热度榜按剧集识别）
+    _BOARD_MEDIA_TYPES = {
+        'movie': MediaType.MOVIE,
+        'web-movie': MediaType.MOVIE,
+        'web-all': MediaType.TV,
+        'zongyi': MediaType.TV,
+    }
+
+    # 单次刷新最多识别的条目数：平台细分榜会让待识别条目变多，超出的留待下次刷新补齐
+    _RESOLVE_LIMIT = 80
 
     # 猫眼热度接口的 platformType -> 平台名；空值代表全网
     _PLATFORM_NAMES = {
@@ -240,8 +259,21 @@ class MaoyanPro(_PluginBase):
         '20': '网络电影',
     }
 
-    # 猫眼热度接口的 seriesType -> 榜单类型
-    _SERIES_TYPES = {'0': 'web-heat', '1': 'web-tv', '2': 'zongyi'}
+    # 猫眼热度接口的 seriesType -> 榜单类型：剧集统一走综合榜（不传 seriesType），
+    # 只有综艺（2）是独立榜单，因此这里只登记综艺
+    _SERIES_TYPES = {'2': 'zongyi'}
+
+    # 「订阅条数」候选项：0 表示不订阅该榜（仍抓取供推荐页展示）
+    _SUB_NUM_ITEMS = [{'title': str(num), 'value': num} for num in (0, 1, 2, 3, 5, 7, 10)]
+    # 「推荐条数」候选项：0 表示推荐页与榜单接口不展示该榜
+    _REC_NUM_ITEMS = [{'title': str(num), 'value': num} for num in (0, 5, 10, 15, 20, 30, 50)]
+    # 平台细分榜配置：(新配置键, 旧的条数键, 旧的开关键)
+    _PLATFORM_CONFIG_KEYS = (
+        ('tx_sub_num', 'tx_num', 'tx_enabled'),
+        ('iqy_sub_num', 'iqy_num', 'iqy_enabled'),
+        ('mg_sub_num', 'mg_num', 'mg_enabled'),
+        ('yk_sub_num', 'yk_num', 'yk_enabled'),
+    )
 
     # 本次抓取到的榜单元数据，供对外接口落快照（不持久化，失败时为上层回退到历史）
     _last_boards: List[dict] = []
@@ -256,23 +288,9 @@ class MaoyanPro(_PluginBase):
             self._cron = config.get("cron")
             self._clear = config.get("clear")
             self._onlyonce = config.get("onlyonce")
-
-            self._type = config.get("type")
-            self._num = config.get("num", 10)
-
-            self._all_enabled = config.get("all_enabled", False)
-            self._tx_enabled = config.get("tx_enabled", False)
-            self._iqy_enabled = config.get("iqy_enabled", False)
-            self._mg_enabled = config.get("mg_enabled", False)
-            self._yk_enabled = config.get("yk_enabled", False)
-            self._all_num = config.get("all_num", 10)
-            self._tx_num = config.get("tx_num", 10)
-            self._iqy_num = config.get("iqy_num", 10)
-            self._mg_num = config.get("mg_num", 10)
-            self._yk_num = config.get("yk_num", 10)
-
             self._api_enabled = config.get("api_enabled", True)
             self._recommend_enabled = config.get("recommend_enabled", False)
+            self.__load_type_config(config)
 
         self.__migrate_history_identity()
 
@@ -287,7 +305,9 @@ class MaoyanPro(_PluginBase):
             self.__update_config()
             logger.info("历史清理完成")
 
-        if self._enabled or self._onlyonce:
+        # 订阅与推荐页数据源相互独立：任一开启都需要定时抓取榜单
+        # （推荐页数据来自榜单快照，抓取停了推荐页就没有新数据）
+        if self._enabled or self._recommend_enabled or self._onlyonce:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
             # 周期执行
             if self._cron:
@@ -322,8 +342,8 @@ class MaoyanPro(_PluginBase):
                 self._scheduler.start()
 
     def get_state(self) -> bool:
-        """返回插件启用状态。"""
-        return self._enabled
+        """返回插件启用状态：订阅或推荐页数据源任一开启即视为启用。"""
+        return bool(self._enabled or self._recommend_enabled)
 
     def __migrate_history_identity(self) -> None:
         """将旧猫眼榜单历史的 TMDB ID 原地迁移为统一媒体身份。"""
@@ -404,7 +424,7 @@ class MaoyanPro(_PluginBase):
         """
         返回最近一次抓取的猫眼榜单快照。
 
-        :param board_type: 仅返回指定榜单类型（movie/web-movie/web-heat/web-tv/zongyi）
+        :param board_type: 仅返回指定榜单类型（movie/web-movie/web-all/zongyi）
         :param limit: 每个榜单最多返回的条目数，用于限制响应体大小
         :param board: 仅返回榜单名包含该关键字的榜单（如「腾讯视频」）
         """
@@ -513,8 +533,8 @@ class MaoyanPro(_PluginBase):
 
     @eventmanager.register(ChainEventType.RecommendSource)
     def recommend_source(self, event: SdkEvent):
-        """把猫眼榜单注册为宿主推荐页的数据源。"""
-        if not (self._enabled and self._recommend_enabled and self._api_enabled):
+        """把猫眼榜单注册为宿主推荐页的数据源（与订阅功能相互独立）。"""
+        if not (self._recommend_enabled and self._api_enabled):
             return
         event_data: schemas.RecommendSourceEventData = event.event_data
         if not event_data:
@@ -527,8 +547,7 @@ class MaoyanPro(_PluginBase):
                 api_path=f"plugin/{self.__class__.__name__}/rank-list?board_type=movie",
                 type=self._RECOMMEND_TYPES['movie'],
             ))
-        for board_type, label in (('web-heat', '猫眼电视剧热度'),
-                                  ('web-tv', '猫眼网络剧热度'),
+        for board_type, label in (('web-all', '猫眼剧集综合热度'),
                                   ('zongyi', '猫眼综艺热度')):
             if board_type in (self._type or []):
                 sources.append(schemas.RecommendMediaSource(
@@ -546,7 +565,7 @@ class MaoyanPro(_PluginBase):
         else:
             event_data.extra_sources.extend(sources)
 
-    def rank_list(self, board_type: str = "web-heat", page: int = 1,
+    def rank_list(self, board_type: str = "web-all", page: int = 1,
                   limit: int = None) -> schemas.Response[List[schemas.MediaInfo]]:
         """
         推荐页/浏览页使用的榜单列表接口。
@@ -579,7 +598,7 @@ class MaoyanPro(_PluginBase):
                 media_id=media_id,
                 title=str(row.get("title") or ""),
                 year=str(row.get("year") or "") or None,
-                type=str(row.get("type_name") or self._TYPE_NAMES.get(board_type, "")),
+                type=str(row.get("type_name") or self._TYPE_NAMES.get(board_type, board_type)),
                 poster_path=str(row.get("poster") or "") or None,
                 overview=str(row.get("overview") or "") or None,
             )
@@ -590,460 +609,225 @@ class MaoyanPro(_PluginBase):
                 break
         return schemas.Response(success=True, data=result)
 
+    @classmethod
+    def __safe_num(cls, value, default: int = 0) -> int:
+        """把配置里的条数转成非负整数，非法值回退到默认值。"""
+        try:
+            num = int(value)
+        except (TypeError, ValueError):
+            return default
+        return num if num >= 0 else default
+
+    def __load_type_config(self, config: dict) -> None:
+        """
+        读取订阅类型与条数配置。
+
+        电影与剧集（含综艺）两组类型各成一组、互不牵连；同时兼容旧版只有合并 `type`
+        字段、独立的 `type_zongyi` 字段、平台开关（tx_enabled 等）的历史配置，老用户
+        升级后无需重新配置。
+        """
+        type_movie = config.get("type_movie")
+        type_tv = config.get("type_tv")
+        type_zongyi = config.get("type_zongyi")
+        legacy_type = config.get("type")
+        if type_movie is None and type_tv is None and type_zongyi is None and legacy_type:
+            # 旧配置：从合并的 type 列表还原出电影/剧集两组类型
+            legacy = [item for item in legacy_type if isinstance(item, str)]
+            type_movie = [item for item in legacy if item in ('movie', 'web-movie')]
+            type_tv = [item for item in legacy if item in ('web-heat', 'web-tv', 'web-all')]
+            type_zongyi = [item for item in legacy if item == 'zongyi']
+
+        # 综艺已并入剧集下拉：旧配置里独立的 type_zongyi 合并进剧集类型
+        tv_items = list(type_tv) if type_tv is not None else None
+        if type_zongyi:
+            extra = [item for item in type_zongyi if item == 'zongyi']
+            tv_items = list(tv_items or []) + extra
+        if tv_items is None:
+            tv_items = list(self._type_tv)
+        # 电视剧/网剧单榜已取消，旧配置里的这两个类型统一归并为剧集综合榜；
+        # 去重的同时保持配置顺序，避免迁移后出现重复项
+        merged_tv = ['web-all' if item in ('web-heat', 'web-tv') else item for item in tv_items]
+        self._type_tv = list(dict.fromkeys(
+            item for item in merged_tv if item in ('web-all', 'zongyi')))
+        self._type_movie = list(dict.fromkeys(
+            item for item in (type_movie if type_movie is not None else self._type_movie)
+            if item in ('movie', 'web-movie')))
+        # 派生视图：仅供旧版字段回写，综艺类型已归属剧集
+        self._type_zongyi = [item for item in self._type_tv if item == 'zongyi']
+        self._type = [*self._type_movie, *self._type_tv]
+
+        legacy_rec = config.get("recommend_num")
+        self._movie_sub_num = self.__safe_num(config.get("movie_sub_num", config.get("num")), 10)
+        self._movie_rec_num = self.__safe_num(config.get("movie_rec_num", legacy_rec), 20)
+        self._tv_sub_num = self.__safe_num(config.get("tv_sub_num", config.get("all_num")), 10)
+        self._tv_rec_num = self.__safe_num(config.get("tv_rec_num", legacy_rec), 20)
+        self._zongyi_sub_num = self.__safe_num(config.get("zongyi_sub_num", config.get("all_num")), 10)
+        self._zongyi_rec_num = self.__safe_num(config.get("zongyi_rec_num", legacy_rec), 20)
+        for new_key, num_key, enabled_key in self._PLATFORM_CONFIG_KEYS:
+            if new_key in config:
+                num = self.__safe_num(config.get(new_key), 0)
+            elif config.get(enabled_key):
+                # 旧配置：只有开关打开时才把旧条数搬过来，否则视为不订阅
+                num = self.__safe_num(config.get(num_key), 10)
+            else:
+                num = 0
+            setattr(self, f"_{new_key}", num)
+
+    @staticmethod
+    def __form_col(component: str, props: dict, md: int = 6) -> dict:
+        """构造宿主表单的一列（栅格：窄屏占满整行，宽屏按 md 分栏）。"""
+        return {
+            'component': 'VCol',
+            'props': {'cols': 12, 'md': md},
+            'content': [{'component': component, 'props': props}],
+        }
+
+    def __num_col(self, model: str, label: str, recommend: bool = False) -> dict:
+        """构造条数选择列：订阅条数可选 0（不订阅），推荐条数可选 0（不展示）。"""
+        return self.__form_col('VSelect', {
+            'chips': True,
+            'multiple': False,
+            'model': model,
+            'label': label,
+            'items': self._REC_NUM_ITEMS if recommend else self._SUB_NUM_ITEMS,
+        })
+
+    def __type_col(self, model: str, label: str, items: List[dict]) -> dict:
+        """构造榜单类型多选列。"""
+        return self.__form_col('VSelect', {
+            'chips': True,
+            'multiple': True,
+            'model': model,
+            'label': label,
+            'items': items,
+        })
+
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """提供榜单类型、平台、数量和执行周期配置。"""
-        return [
+        """提供订阅类型、订阅/推荐条数、平台订阅与执行周期配置。"""
+        rows = [
+            # 基础开关与执行周期
             {
-                'component': 'VForm',
+                'component': 'VRow',
                 'content': [
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'enabled',
-                                            'label': '启用插件',
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'onlyonce',
-                                            'label': '立即运行一次',
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VCronField',
-                                        'props': {
-                                            'model': 'cron',
-                                            'label': '执行周期',
-                                            'placeholder': '5位cron表达式，留空自动'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'clear',
-                                            'label': '清理历史记录',
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 22,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSelect',
-                                        'props': {
-                                            'chips': True,
-                                            'multiple': True,
-                                            'model': 'type',
-                                            'label': '订阅类型',
-                                            'items': [
-                                                {'title': '电影票房榜单', 'value': 'movie'},
-                                                {'title': '电视剧热度榜单', 'value': 'web-heat'},
-                                                {'title': '网剧热度榜单', 'value': 'web-tv'},
-                                                {'title': '综艺热度榜单', 'value': 'zongyi'},
-                                                {'title': '网络电影榜单', 'value': 'web-movie'},
-                                            ]
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 22,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSelect',
-                                        'props': {
-                                            'multiple': False,
-                                            'chips': True,
-                                            'model': 'num',
-                                            'label': '电影榜单条数',
-                                            'items': [
-                                                {'title': '1', 'value': 1},
-                                                {'title': '2', 'value': 2},
-                                                {'title': '3', 'value': 3},
-                                                {'title': '5', 'value': 5},
-                                                {'title': '7', 'value': 7},
-                                                {'title': '10', 'value': 10}
-                                            ]
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
-                                            'text': '下边针对电视剧，网剧，综艺的细分类进行设置不开启则不订阅电视剧；'
-                                                    '控制是并行的都打开会都进行订阅当然重复会进行过滤。'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'all_enabled',
-                                            'label': '全网热门订阅',
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSelect',
-                                        'props': {
-                                            'multiple': False,
-                                            'chips': True,
-                                            'model': 'all_num',
-                                            'label': '榜单条数',
-                                            'items': [
-                                                {'title': '1', 'value': 1},
-                                                {'title': '2', 'value': 2},
-                                                {'title': '3', 'value': 3},
-                                                {'title': '5', 'value': 5},
-                                                {'title': '7', 'value': 7},
-                                                {'title': '10', 'value': 10}
-                                            ]
-                                        }
-                                    }
-                                ]
-                            }
-
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'tx_enabled',
-                                            'label': '腾讯热门订阅',
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSelect',
-                                        'props': {
-                                            'multiple': False,
-                                            'chips': True,
-                                            'model': 'tx_num',
-                                            'label': '腾讯榜单条数',
-                                            'items': [
-                                                {'title': '1', 'value': 1},
-                                                {'title': '2', 'value': 2},
-                                                {'title': '3', 'value': 3},
-                                                {'title': '5', 'value': 5},
-                                                {'title': '7', 'value': 7},
-                                                {'title': '10', 'value': 10}
-                                            ]
-                                        }
-                                    }
-                                ]
-                            }
-
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'iqy_enabled',
-                                            'label': '爱奇艺热门订阅',
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSelect',
-                                        'props': {
-                                            'multiple': False,
-                                            'chips': True,
-                                            'model': 'iqy_num',
-                                            'label': '爱奇艺榜单条数',
-                                            'items': [
-                                                {'title': '1', 'value': 1},
-                                                {'title': '2', 'value': 2},
-                                                {'title': '3', 'value': 3},
-                                                {'title': '5', 'value': 5},
-                                                {'title': '7', 'value': 7},
-                                                {'title': '10', 'value': 10}
-                                            ]
-                                        }
-                                    }
-                                ]
-                            }
-
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'mg_enabled',
-                                            'label': '芒果热门订阅',
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSelect',
-                                        'props': {
-                                            'multiple': False,
-                                            'chips': True,
-                                            'model': 'mg_num',
-                                            'label': '芒果榜单条数',
-                                            'items': [
-                                                {'title': '1', 'value': 1},
-                                                {'title': '2', 'value': 2},
-                                                {'title': '3', 'value': 3},
-                                                {'title': '5', 'value': 5},
-                                                {'title': '7', 'value': 7},
-                                                {'title': '10', 'value': 10}
-                                            ]
-                                        }
-                                    }
-                                ]
-                            }
-
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'yk_enabled',
-                                            'label': '优酷热门订阅',
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSelect',
-                                        'props': {
-                                            'multiple': False,
-                                            'chips': True,
-                                            'model': 'yk_num',
-                                            'label': '优酷榜单条数',
-                                            'items': [
-                                                {'title': '1', 'value': 1},
-                                                {'title': '2', 'value': 2},
-                                                {'title': '3', 'value': 3},
-                                                {'title': '5', 'value': 5},
-                                                {'title': '7', 'value': 7},
-                                                {'title': '10', 'value': 10}
-                                            ]
-                                        }
-                                    }
-                                ]
-                            }
-
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'api_enabled',
-                                            'label': '开放榜单接口',
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'recommend_enabled',
-                                            'label': '接入推荐页数据源',
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                ]
-            }
-        ], {
+                    self.__form_col('VSwitch', {'model': 'enabled', 'label': '启用插件'}),
+                    self.__form_col('VSwitch', {'model': 'onlyonce', 'label': '立即运行一次'}),
+                ],
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    self.__form_col('VCronField', {
+                        'model': 'cron',
+                        'label': '执行周期',
+                        'placeholder': '5位cron表达式，留空自动',
+                    }),
+                    self.__form_col('VSwitch', {'model': 'clear', 'label': '清理历史记录'}),
+                ],
+            },
+            # 订阅类型：电影与剧集分开设置，各自决定抓取哪些榜单；
+            # 综艺属于剧集大类，类型勾选并入「剧集订阅类型」，条数仍在下方单独配置
+            {
+                'component': 'VRow',
+                'content': [
+                    self.__type_col('type_movie', '电影订阅类型', [
+                        {'title': '电影票房榜单', 'value': 'movie'},
+                        {'title': '网络电影榜单', 'value': 'web-movie'},
+                    ]),
+                    self.__type_col('type_tv', '剧集订阅类型', [
+                        {'title': '剧集综合榜单（电视剧+网剧）', 'value': 'web-all'},
+                        {'title': '综艺热度榜单', 'value': 'zongyi'},
+                    ]),
+                ],
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    self.__form_col('VAlert', {
+                        'type': 'info',
+                        'variant': 'tonal',
+                        'text': '订阅类型决定抓取与展示哪些榜单；订阅条数为 0 表示不订阅该榜'
+                                '（仍会抓取供推荐页使用），推荐条数为 0 表示推荐页与榜单接口不展示该榜，'
+                                '两者都为 0 则该榜完全不抓取。',
+                    }, md=12),
+                ],
+            },
+            # 各组条数：订阅条数只影响自动订阅，推荐条数只影响推荐页/榜单接口
+            {
+                'component': 'VRow',
+                'content': [
+                    self.__num_col('movie_sub_num', '电影榜单订阅条数'),
+                    self.__num_col('movie_rec_num', '电影榜单推荐条数', recommend=True),
+                ],
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    self.__num_col('tv_sub_num', '剧集榜单订阅条数'),
+                    self.__num_col('tv_rec_num', '剧集榜单推荐条数', recommend=True),
+                ],
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    self.__num_col('zongyi_sub_num', '综艺榜单订阅条数'),
+                    self.__num_col('zongyi_rec_num', '综艺榜单推荐条数', recommend=True),
+                ],
+            },
+            # 平台细分榜：只影响自动订阅，不写入榜单快照/推荐页
+            {
+                'component': 'VRow',
+                'content': [
+                    self.__form_col('VAlert', {
+                        'type': 'info',
+                        'variant': 'tonal',
+                        'text': '下方为各视频平台榜单的订阅条数，只影响自动订阅，不会写入榜单快照/推荐页；'
+                                '填 0 表示不订阅该平台。',
+                    }, md=12),
+                ],
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    self.__num_col('tx_sub_num', '腾讯视频订阅条数'),
+                    self.__num_col('iqy_sub_num', '爱奇艺订阅条数'),
+                ],
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    self.__num_col('mg_sub_num', '芒果TV订阅条数'),
+                    self.__num_col('yk_sub_num', '优酷订阅条数'),
+                ],
+            },
+            # 对外接口与推荐页数据源
+            {
+                'component': 'VRow',
+                'content': [
+                    self.__form_col('VSwitch', {'model': 'api_enabled', 'label': '开放榜单接口'}),
+                    self.__form_col('VSwitch', {'model': 'recommend_enabled', 'label': '接入推荐页数据源'}),
+                ],
+            },
+        ]
+        return [{
+            'component': 'VForm',
+            'content': rows,
+        }], {
             "enabled": False,
             "onlyonce": False,
             "cron": "",
             "clear": False,
-            "type": ['movie', 'web-heat', 'web-tv', 'zongyi', 'web-movie'],
-            "num": 10,
-            "all_enabled": False,
-            "tx_enabled": False,
-            "iqy_enabled": False,
-            "mg_enabled": False,
-            "yk_enabled": False,
-            "all_num": 10,
-            "tx_num": 10,
-            "iqy_num": 10,
-            "yk_num": 10,
+            "type_movie": ['movie', 'web-movie'],
+            "type_tv": ['web-all', 'zongyi'],
+            "movie_sub_num": 10,
+            "movie_rec_num": 20,
+            "tv_sub_num": 10,
+            "tv_rec_num": 20,
+            "zongyi_sub_num": 10,
+            "zongyi_rec_num": 20,
+            "tx_sub_num": 0,
+            "iqy_sub_num": 0,
+            "mg_sub_num": 0,
+            "yk_sub_num": 0,
             "api_enabled": True,
             "recommend_enabled": False,
         }
@@ -1342,18 +1126,20 @@ class MaoyanPro(_PluginBase):
             "cron": self._cron,
             "clear": self._clear,
             "onlyonce": self._onlyonce,
-            "type": self._type,
-            "num": self._num,
-            "all_enabled": self._all_enabled,
-            "tx_enabled": self._tx_enabled,
-            "iqy_enabled": self._iqy_enabled,
-            "mg_enabled": self._mg_enabled,
-            "yk_enabled": self._yk_enabled,
-            "all_num": self._all_num,
-            "tx_num": self._tx_num,
-            "iqy_num": self._iqy_num,
-            "mg_num": self._mg_num,
-            "yk_num": self._yk_num,
+            "type_movie": self._type_movie,
+            "type_tv": self._type_tv,
+            # 仅作兼容回写：综艺类型已并入 type_tv，此字段是它的派生视图
+            "type_zongyi": self._type_zongyi,
+            "movie_sub_num": self._movie_sub_num,
+            "movie_rec_num": self._movie_rec_num,
+            "tv_sub_num": self._tv_sub_num,
+            "tv_rec_num": self._tv_rec_num,
+            "zongyi_sub_num": self._zongyi_sub_num,
+            "zongyi_rec_num": self._zongyi_rec_num,
+            "tx_sub_num": self._tx_sub_num,
+            "iqy_sub_num": self._iqy_sub_num,
+            "mg_sub_num": self._mg_sub_num,
+            "yk_sub_num": self._yk_sub_num,
             "api_enabled": self._api_enabled,
             "recommend_enabled": self._recommend_enabled,
         })
@@ -1366,13 +1152,15 @@ class MaoyanPro(_PluginBase):
         电视剧获取的url:
         {tv_url}?showDate=20240223&seriesType=0&platformType=0
         参数 showDate: 时间具体到天
-        参数 seriesType: 代表类型 0: 电视剧 1: 网络剧 2: 综艺 不传递-1代表电视剧+网络剧
+        参数 seriesType: 代表类型 0: 电视剧 1: 网络剧 2: 综艺；不传该参数时为电视剧+网络剧综合榜
         参数 platformType: 代表平台 0 全网 3 腾讯视频 2 爱奇艺 1 优酷 7 芒果 5 搜狐 4 乐视 6 PPTV
         """
         logger.info(f"开始刷新猫眼榜单...")
         # 获取当前日期时间
         current_time = datetime.datetime.now()
-        nums = self._num
+        # 各组抓取条数取「订阅条数」与「推荐条数」的较大者：
+        # 订阅只取前「订阅条数」条，快照/推荐页保留抓取到的全部条目。
+        movie_nums = max(self._movie_sub_num, self._movie_rec_num)
         #
         history: List[dict] = self.get_data('history') or []
         #
@@ -1382,96 +1170,77 @@ class MaoyanPro(_PluginBase):
         # 获取当前日期时间格式化为字符串
         show_date = datetime.datetime.now(pytz.timezone('Asia/Shanghai')).strftime('%Y%m%d')
         maoyan_url = 'https://piaofang.maoyan.com'
-        if 'movie' in self._type:
+        if movie_nums > 0 and 'movie' in self._type:
             movie_url = f'{maoyan_url}/dashboard-ajax/movie'
-        if 'web-movie' in self._type:
-
+        if movie_nums > 0 and 'web-movie' in self._type:
             web_movie_url = (f'{maoyan_url}/i/api/encrypt/dashboard/webHeatNetData?'
                              f'showDate={show_date}&platformType=3&dateType=0&rankType=0')
-        # 0: 电视剧  1: 网络剧 2: 综艺 不传递-1代表电视剧+网络剧
+        # 0: 电视剧 1: 网络剧 2: 综艺；不传 seriesType 时为电视剧+网络剧综合榜
         # 参数 platformType: 代表平台 0 全网 3 腾讯视频 2 爱奇艺 1 优酷 7 芒果
-        # 电视剧
         tv_url = f'{maoyan_url}/i/api/encrypt/dashboard/webHeatData'
-        if 'web-heat' in self._type:
-            # 全网
-            if self._all_enabled:
-                url = f'{tv_url}?seriesType=0&showDate={show_date}'
-                tv_urls.append([url, self._all_num])
-            # tx
-            if self._tx_enabled:
-                url = f'{tv_url}?seriesType=0&platformType=3&showDate={show_date}'
-                tv_urls.append([url, self._tx_num])
-            # iqy
-            if self._iqy_enabled:
-                url = f'{tv_url}?seriesType=0&platformType=2&showDate={show_date}'
-                tv_urls.append([url, self._iqy_num])
-            # mg
-            if self._mg_enabled:
-                url = f'{tv_url}?seriesType=0&platformType=7&showDate={show_date}'
-                tv_urls.append([url, self._mg_num])
-            # yk
-            if self._yk_enabled:
-                url = f'{tv_url}?seriesType=0&platformType=1&showDate={show_date}'
-                tv_urls.append([url, self._yk_num])
-        # 网剧
-        if 'web-tv' in self._type:
-            # 全网
-            if self._all_enabled:
-                url = f'{tv_url}?seriesType=1&showDate={show_date}'
-                tv_urls.append([url, self._all_num])
-            # tx
-            if self._tx_enabled:
-                url = f'{tv_url}?seriesType=1&platformType=3&showDate={show_date}'
-                tv_urls.append([url, self._tx_num])
-            # iqy
-            if self._iqy_enabled:
-                url = f'{tv_url}?seriesType=1&platformType=2&showDate={show_date}'
-                tv_urls.append([url, self._iqy_num])
-            # mg
-            if self._mg_enabled:
-                url = f'{tv_url}?seriesType=1&platformType=7&showDate={show_date}'
-                tv_urls.append([url, self._mg_num])
-            # yk
-            if self._yk_enabled:
-                url = f'{tv_url}?seriesType=1&platformType=1&showDate={show_date}'
-                tv_urls.append([url, self._yk_num])
-        # 综艺
-        if 'zongyi' in self._type:
-            # 全网
-            if self._all_enabled:
-                url = f'{tv_url}?seriesType=2&showDate={show_date}'
-                tv_urls.append([url, self._all_num])
-            # tx
-            if self._tx_enabled:
-                url = f'{tv_url}?seriesType=2&platformType=3&showDate={show_date}'
-                tv_urls.append([url, self._tx_num])
-            # iqy
-            if self._iqy_enabled:
-                url = f'{tv_url}?seriesType=2&platformType=2&showDate={show_date}'
-                tv_urls.append([url, self._iqy_num])
-            # mg
-            if self._mg_enabled:
-                url = f'{tv_url}?seriesType=2&platformType=7&showDate={show_date}'
-                tv_urls.append([url, self._mg_num])
-            # yk
-            if self._yk_enabled:
-                url = f'{tv_url}?seriesType=2&platformType=1&showDate={show_date}'
-                tv_urls.append([url, self._yk_num])
+        # 订阅与推荐页显示相互独立：
+        # - 全网榜只要勾选了榜单类型就抓取（供榜单快照/推荐页显示）；
+        # - 平台细分榜只服务自动订阅，不写入榜单快照；
+        # - 每榜抓取条数取 max(订阅条数, 推荐条数)，订阅时只取前订阅条数条；
+        #   某榜的订阅条数与推荐条数都为 0 时该榜完全不抓取。
+        # tv_urls 元素: [抓取地址, 抓取条数, 订阅条数(None=该榜不参与订阅), 是否写入快照]
+        # 剧集只有综合榜（不传 seriesType，猫眼返回电视剧+网络剧综合榜）与综艺榜
+        for type_key, series_type, group in (('web-all', None, 'tv'),
+                                             ('zongyi', 2, 'zongyi')):
+            if type_key not in self._type:
+                continue
+            if group == 'tv':
+                sub_num, rec_num = self._tv_sub_num, self._tv_rec_num
+            else:
+                sub_num, rec_num = self._zongyi_sub_num, self._zongyi_rec_num
+            fetch_num = max(sub_num, rec_num)
+            if fetch_num <= 0:
+                continue
+            series_query = '' if series_type is None else f'seriesType={series_type}&'
+            # 全网榜：写入快照，供推荐页/对外接口展示
+            tv_urls.append([
+                f'{tv_url}?{series_query}showDate={show_date}',
+                fetch_num,
+                sub_num or None,
+                True,
+            ])
+            # 平台细分（3 腾讯视频 2 爱奇艺 7 芒果 1 优酷）：条数为 0 表示不订阅该平台
+            for platform_type, platform_num in ((3, self._tx_sub_num),
+                                                (2, self._iqy_sub_num),
+                                                (7, self._mg_sub_num),
+                                                (1, self._yk_sub_num)):
+                if platform_num <= 0:
+                    continue
+                tv_urls.append([
+                    f'{tv_url}?{series_query}platformType={platform_type}&showDate={show_date}',
+                    platform_num,
+                    platform_num,
+                    False,
+                ])
         tv_list = []
         movie_list = []
         # 本次运行新识别的媒体身份映射，供榜单快照补全
         self._resolved_identity = {}
+        # 本次识别出的媒体对象，订阅流程直接复用，避免同一标题识别两次
+        self._resolved_mediainfo = {}
         # 清空上一次运行的榜单元数据，避免抓取失败时沿用旧榜单
         self._last_boards = []
         try:
-            movie_list, tv_list = self.__get_url_info(movie_url, tv_urls, web_movie_url, nums)
+            movie_list, tv_list, sub_movies, sub_tv = self.__get_url_info(
+                movie_url, tv_urls, web_movie_url, movie_nums)
         except Exception as e:
             logger.error(f"获取猫眼榜单失败：{e}")
         # __get_url_info 会在内部重置榜单列表，抓取失败时此处回退为空列表
         last_boards = self._last_boards if isinstance(self._last_boards, list) else []
+        # 先为榜单快照识别媒体身份与海报：推荐页/对外接口不依赖订阅开关，
+        # 订阅流程随后复用这里的识别结果，不再重复请求识别链。
+        self.__resolve_board_identities(last_boards)
         subscribed_before = len(history)
-        self.set_sub(movie_list, history, MediaType.MOVIE)
-        self.set_sub(tv_list, history, MediaType.TV)
+        if self._enabled:
+            self.set_sub(sub_movies, history, MediaType.MOVIE)
+            self.set_sub(sub_tv, history, MediaType.TV)
+        else:
+            logger.info("订阅未启用，本次仅更新榜单快照（推荐页/对外接口数据）")
         # 保存历史记录
         self.save_data('history', history)
         # 保存榜单快照：接口读取的是一等公民的榜单数据，不再依赖订阅流水
@@ -1515,6 +1284,114 @@ class MaoyanPro(_PluginBase):
         }
         self.save_data("snapshot", snapshot)
 
+    def __resolve_board_identities(self, boards: List[dict]) -> None:
+        """
+        为榜单快照预识别媒体身份与海报（与订阅开关解耦）。
+
+        推荐页与对外接口在订阅关闭时同样需要海报与媒体身份，因此在抓取后统一识别一次：
+        同一标题只识别一次，结果同时供快照补全与订阅流程复用。
+        """
+        if not boards:
+            return
+        current_time = datetime.datetime.now()
+        resolved = 0
+        truncated = False
+        for board in boards:
+            mtype = self._BOARD_MEDIA_TYPES.get(board.get("type"), MediaType.TV)
+            for item in board.get("items", []):
+                title = item.get("title")
+                if not isinstance(title, str) or not title.strip():
+                    continue
+                if title in self._resolved_identity:
+                    continue
+                if resolved >= self._RESOLVE_LIMIT:
+                    truncated = True
+                    continue
+                identity = self.__recognize_board_item(
+                    title, item.get("releaseInfo"), mtype, current_time)
+                resolved += 1
+                if identity:
+                    self._resolved_identity[title] = identity
+        if truncated:
+            logger.warning(f"本次待识别条目超过 {self._RESOLVE_LIMIT} 条，"
+                           f"其余条目留待下次刷新补齐（宿主识别缓存会加速重复识别）")
+
+    def __recognize_board_item(self, title: str, release_info, mtype: MediaType,
+                               current_time: datetime.datetime) -> dict:
+        """
+        识别单个榜单条目，返回可写入快照的媒体身份（识别不到时至少补一张海报）。
+
+        识别会先带年份尝试；失败则去掉年份重试（新剧在数据源里常按开播天数展示，
+        推算出的年份反而会搜不到）。仍识别不到就用豆瓣检索补海报，保证推荐页有图。
+        """
+        year = self.__release_year(release_info, current_time)
+        # 第一次带年份（走宿主识别缓存），失败后去掉年份再试一次并强制不用缓存
+        for attempt_year in (year, None):
+            if attempt_year is None and year is None:
+                continue
+            meta = MetaInfo(title)
+            meta.year = attempt_year
+            try:
+                mediainfo: MediaInfo = self.chain.recognize_media(
+                    meta=meta, mtype=mtype, cache=attempt_year is not None)
+            except Exception as e:
+                logger.error(f"猫眼条目 {title} 识别异常，继续处理下一条：{e}")
+                continue
+            if mediainfo:
+                if attempt_year is None:
+                    logger.info(f"猫眼条目 {title} 去掉年份后识别成功：{mediainfo.title_year}")
+                self._resolved_mediainfo[title] = mediainfo
+                return {
+                    "media_source": mediainfo.media_source.value,
+                    "media_id": str(mediainfo.media_id),
+                    "poster": mediainfo.get_poster_image() or "",
+                    "overview": mediainfo.overview or "",
+                    "year": str(mediainfo.year or ""),
+                    "type": mediainfo.type.value,
+                }
+        logger.warning(f"未识别到媒体信息，标题：{title}，年份：{year}")
+        poster = self.__douban_poster(title, mtype)
+        if poster:
+            logger.info(f"猫眼条目 {title} 未识别到媒体信息，已用豆瓣检索补齐海报")
+        return {
+            "media_source": "",
+            "media_id": "",
+            "poster": poster,
+            "overview": "",
+            "year": str(year or ""),
+            "type": mtype.value,
+        }
+
+    def __douban_poster(self, title: str, mtype: MediaType) -> str:
+        """
+        识别失败时用豆瓣检索兜底补一张海报（只补图，不提供媒体身份）。
+
+        豆瓣图片有防盗链（无 Referer 返回 418），App 直连时同样需要补 Referer，
+        宿主图片代理则会自行带上，因此这里只负责给出可用的图片地址。
+        """
+        try:
+            candidates = RequestUtils(
+                headers={"User-Agent": self.get_random_user_agent()},
+                proxies=getattr(settings, "PROXY", None),
+                referer="https://movie.douban.com/",
+            ).get_json("https://movie.douban.com/j/subject_suggest", params={"q": title})
+        except Exception as e:
+            logger.debug(f"猫眼条目 {title} 豆瓣补图请求失败：{e}")
+            return ""
+        if not isinstance(candidates, list):
+            return ""
+        # 优先同名词条；剧集优先带集数（豆瓣 suggestion 用 episode 标记剧集）
+        same_title = [c for c in candidates if isinstance(c, dict) and c.get("title") == title]
+        pool = same_title or [c for c in candidates if isinstance(c, dict)]
+        if mtype == MediaType.TV:
+            pool.sort(key=lambda c: 0 if c.get("episode") else 1)
+        for candidate in pool:
+            img = candidate.get("img")
+            if isinstance(img, str) and img.startswith("http"):
+                # 缩略图换中等尺寸，避免 App 里糊掉
+                return img.replace("/s_ratio_poster/", "/m_ratio_poster/")
+        return ""
+
     def set_sub(self, addr_list, history, mtype):
         """
         将猫眼榜单条目识别为媒体信息，并添加到 MoviePilot 订阅。
@@ -1538,10 +1415,12 @@ class MaoyanPro(_PluginBase):
                 # 检查是否已处理过
                 if unique_flag in [h.get("unique") for h in history]:
                     continue
-                # 匹配媒体信息
-                mediainfo: MediaInfo = self.chain.recognize_media(meta=meta, mtype=mtype, cache=False)
+                # 匹配媒体信息（优先复用快照预识别的结果，避免重复请求识别链）
+                mediainfo: MediaInfo = getattr(self, "_resolved_mediainfo", {}).get(title)
                 if not mediainfo:
-                    logger.warn(f'未识别到媒体信息，标题：{title}，年份：{year}')
+                    mediainfo = self.chain.recognize_media(meta=meta, mtype=mtype, cache=False)
+                if not mediainfo:
+                    logger.warning(f'未识别到媒体信息，标题：{title}，年份：{year}')
                     continue
                 # 查询缺失的媒体信息
                 exist_flag, _ = self.downloadchain.get_no_exists_info(meta=meta, mediainfo=mediainfo)
@@ -1671,7 +1550,7 @@ class MaoyanPro(_PluginBase):
                 if latest_season:
                     return latest_season
             except Exception as err:
-                logger.warn(f"查询 TMDB 季信息失败，标题：{getattr(mediainfo, 'title', '')}，错误：{err}")
+                logger.warning(f"查询 TMDB 季信息失败，标题：{getattr(mediainfo, 'title', '')}，错误：{err}")
 
         latest_season = self.__latest_season_from_info(getattr(mediainfo, "season_info", None))
         if latest_season:
@@ -1700,16 +1579,23 @@ class MaoyanPro(_PluginBase):
 
     @classmethod
     def __board_type_from_url(cls, url: str) -> str:
-        """按热度接口的 seriesType 判定榜单类型，识别不出时归为剧集热度。"""
-        query = dict(parse_qsl(urlsplit(url).query)) if url else {}
-        return cls._SERIES_TYPES.get(query.get('seriesType', ''), 'web-heat')
+        """
+        按热度接口的 seriesType 判定榜单类型。
+
+        不传 seriesType 时猫眼返回的是电视剧+网络剧综合榜（实测 seriesType=-1 不被支持），
+        剧集统一走该综合榜，只有综艺（seriesType=2）是独立榜单，其余情况一律归为综合榜。
+        """
+        if not url:
+            return 'web-all'
+        query = dict(parse_qsl(urlsplit(url).query))
+        return cls._SERIES_TYPES.get(query.get('seriesType', ''), 'web-all')
 
     def __board_meta(self, url: str, board: str, board_type: str, show_date: str) -> Dict[str, str]:
         """
         从榜单地址推导归属信息，供对外接口标识榜单。
 
-        剧集热度接口用 seriesType 区分电视剧/网络剧/综艺，用 platformType 区分平台；
-        电影票房与网络电影则是固定来源。
+        剧集热度接口里剧集是电视剧+网络剧综合榜、综艺用 seriesType 区分，平台用
+        platformType 区分；电影票房与网络电影则是固定来源。
         """
         query = dict(parse_qsl(urlsplit(url).query)) if url else {}
         platform = self._PLATFORM_NAMES.get(query.get('platformType', ''), '')
@@ -1731,25 +1617,53 @@ class MaoyanPro(_PluginBase):
         self._last_boards = boards
         show_date = datetime.datetime.now(pytz.timezone('Asia/Shanghai')).strftime('%Y-%m-%d')
         sources = []
+        # 每个来源都带抓取条数、订阅条数上限（None = 该榜不参与订阅、仅供推荐页展示）
+        # 与是否写入榜单快照（平台细分榜只服务订阅，不落快照）
         if movie_url:
-            sources.append((
-                movie_url, num, '电影票房榜单', 'movieList', 'movieInfo', 'movieName', movies_list,
-                self.__board_meta(movie_url, '电影票房榜单', 'movie', show_date),
-            ))
+            sources.append({
+                'url': movie_url,
+                'limit': num,
+                'name': '电影票房榜单',
+                'data_key': 'movieList',
+                'info_key': 'movieInfo',
+                'title_key': 'movieName',
+                'target': movies_list,
+                'sub_limit': self._movie_sub_num or None,
+                'snapshot': True,
+                'meta': self.__board_meta(movie_url, '电影票房榜单', 'movie', show_date),
+            })
         if web_movie_url:
-            sources.append((
-                web_movie_url, num, '网络电影榜单', 'dataList', None, 'movieName', movies_list,
-                self.__board_meta(web_movie_url, '网络电影榜单', 'web-movie', show_date),
-            ))
-        for tv_url, tv_num in tv_urls:
+            sources.append({
+                'url': web_movie_url,
+                'limit': num,
+                'name': '网络电影榜单',
+                'data_key': 'dataList',
+                'info_key': None,
+                'title_key': 'movieName',
+                'target': movies_list,
+                'sub_limit': self._movie_sub_num or None,
+                'snapshot': True,
+                'meta': self.__board_meta(web_movie_url, '网络电影榜单', 'web-movie', show_date),
+            })
+        for tv_url, tv_num, tv_sub_limit, tv_snapshot in tv_urls:
             board_type = self.__board_type_from_url(tv_url)
-            sources.append((
-                tv_url, tv_num, '剧集热度榜单', 'dataList', 'seriesInfo', 'name', tv_list,
-                self.__board_meta(tv_url, self._TYPE_NAMES.get(board_type, '剧集热度榜单'), board_type, show_date),
-            ))
+            board_name = self._TYPE_NAMES.get(board_type, '剧集热度榜单')
+            sources.append({
+                'url': tv_url,
+                'limit': tv_num,
+                'name': board_name,
+                'data_key': 'dataList',
+                'info_key': 'seriesInfo',
+                'title_key': 'name',
+                'target': tv_list,
+                'sub_limit': tv_sub_limit,
+                'snapshot': tv_snapshot,
+                'meta': self.__board_meta(tv_url, board_name, board_type, show_date),
+            })
         if not sources:
-            return movies_list, tv_list
+            return movies_list, tv_list, [], []
 
+        sub_ranges = []
         processed = set()
 
         def collect(page=None):
@@ -1759,11 +1673,19 @@ class MaoyanPro(_PluginBase):
             if page is not None:
                 headers['User-Agent'] = page.evaluate('navigator.userAgent')
                 cookies = {cookie['name']: cookie['value'] for cookie in page.context.cookies()}
-            for index, (url, limit, name, data_key, info_key, title_key, target, meta) in enumerate(sources):
+            for index, source_info in enumerate(sources):
                 if index in processed:
                     continue
                 processed.add(index)
-                source = f"{name}（{url}）"
+                url = source_info['url']
+                limit = source_info['limit']
+                data_key = source_info['data_key']
+                info_key = source_info['info_key']
+                title_key = source_info['title_key']
+                target = source_info['target']
+                meta = source_info['meta']
+                sub_limit = source_info['sub_limit']
+                source = f"{source_info['name']}（{url}）"
                 try:
                     if page is not None and '/i/api/encrypt/dashboard/' in url:
                         payload = self.__request_browser_json(page, url)
@@ -1792,8 +1714,14 @@ class MaoyanPro(_PluginBase):
                     if not isinstance(data, list):
                         raise ValueError(f"响应缺少有效的 {data_key}.list 榜单列表")
                     items = self.__parse_rank_items(data, limit, info_key, title_key, source, meta=meta)
+                    slice_start = len(target)
                     target.extend(items)
-                    if items:
+                    # 记录该来源参与订阅的切片（前 sub_limit 条）；快照仍保存全量条目
+                    if sub_limit:
+                        slice_end = slice_start + min(len(items), sub_limit)
+                        if slice_end > slice_start:
+                            sub_ranges.append((target, slice_start, slice_end))
+                    if items and source_info['snapshot']:
                         boards.append({
                             "board": meta["board"],
                             "type": meta["board_type"],
@@ -1818,7 +1746,14 @@ class MaoyanPro(_PluginBase):
             collect()
 
         # 同一剧集可能出现在多个平台，保留原有按标题去重的行为。
-        return movies_list, list({item['title']: item for item in tv_list}.values())
+        deduped_tv = list({item['title']: item for item in tv_list}.values())
+        # 订阅子集：只取各来源前「订阅条数」条，与快照/推荐页展示条数互不影响
+        sub_movies = [item for target, start, end in sub_ranges if target is movies_list
+                      for item in target[start:end]]
+        sub_tv = list({item['title']: item
+                       for target, start, end in sub_ranges if target is tv_list
+                       for item in target[start:end]}.values())
+        return movies_list, deduped_tv, sub_movies, sub_tv
 
     @staticmethod
     def __request_browser_json(page, url):
