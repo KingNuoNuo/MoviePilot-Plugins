@@ -228,18 +228,66 @@ def test_rank_list_terminates_pagination(plugin):
 
 
 def test_rank_list_filters_by_platform(plugin):
-    """`/rank-list` 不带 platform 只取全网榜，带 platform 返回对应平台细分榜。"""
-    # 样本里 web-all 只有腾讯平台榜，没有全网综合榜
+    """`/rank-list` 带 platform 返回对应平台细分榜。"""
     plugin.save_data("snapshot", {"boards": snapshot_boards()})
-
-    # 未指定平台时平台细分榜不会抢占全网榜的展示位
-    assert plugin.rank_list(board_type="web-all").data == []
 
     platform = plugin.rank_list(board_type="web-all", platform=3)
     assert [item.title for item in platform.data] == ["沉默的荣耀"]
 
     # 平台对不上时返回空列表
     assert plugin.rank_list(board_type="web-all", platform=2).data == []
+
+
+def test_rank_list_paging_carries_platform_boards(plugin):
+    """「更多」页分页：第 1 页全网榜，后续页依次为有数据的平台榜（标题带平台后缀）。"""
+    boards = snapshot_boards()
+    boards += [
+        {
+            "board": "剧集综合榜单", "type": "web-all", "type_name": "剧集综合",
+            "platform": "", "platform_type": "", "show_date": "2026-10-15",
+            "url": "https://piaofang.maoyan.com/i/api/encrypt/dashboard/webHeatData",
+            "count": 1, "updated_at": "2026-10-15 12:00:00",
+            "items": [
+                {"rank": 1, "title": "雁回时", "board_type": "web-all",
+                 "type_name": "剧集综合", "platformDesc": "全网",
+                 "releaseInfo": "上线10天", "board": "剧集综合榜单",
+                 "show_date": "2026-10-15", "heat": "9100",
+                 "media_source": "themoviedb", "media_id": "260000",
+                 "poster": "https://image.tmdb.org/t/p/w500/c.jpg",
+                 "overview": "", "year": "2026"},
+            ],
+        },
+        {
+            "board": "剧集综合榜单（爱奇艺）", "type": "web-all", "type_name": "剧集综合",
+            "platform": "爱奇艺", "platform_type": "2", "show_date": "2026-10-15",
+            "url": ("https://piaofang.maoyan.com/i/api/encrypt/dashboard/"
+                    "webHeatData?platformType=2"),
+            "count": 1, "updated_at": "2026-10-15 12:00:00",
+            "items": [
+                {"rank": 1, "title": "玉簟秋", "board_type": "web-all",
+                 "type_name": "剧集综合", "platformDesc": "爱奇艺",
+                 "releaseInfo": "上线5天", "board": "剧集综合榜单（爱奇艺）",
+                 "show_date": "2026-10-15", "heat": "8800",
+                 "media_source": "themoviedb", "media_id": "260001",
+                 "poster": "https://image.tmdb.org/t/p/w500/d.jpg",
+                 "overview": "", "year": "2026"},
+            ],
+        },
+    ]
+    plugin.save_data("snapshot", {"boards": boards})
+    plugin._tx_rec_num = 10
+    plugin._iqy_rec_num = 10
+
+    page1 = plugin.rank_list(board_type="web-all", page=1)
+    assert [item.title for item in page1.data] == ["雁回时"]
+    # 推荐条数为 0 的平台即使快照里有数据也不进页序
+    page2 = plugin.rank_list(board_type="web-all", page=2)
+    assert [item.title for item in page2.data] == ["沉默的荣耀（腾讯视频）"]
+    assert page2.data[0].title_year == "沉默的荣耀（腾讯视频） (2025)"
+    page3 = plugin.rank_list(board_type="web-all", page=3)
+    assert [item.title for item in page3.data] == ["玉簟秋（爱奇艺）"]
+    # 超出页序返回空列表终止翻页
+    assert plugin.rank_list(board_type="web-all", page=4).data == []
 
 
 def test_rank_list_handles_unknown_board_type(plugin):
@@ -284,21 +332,16 @@ def test_recommend_source_registers_configured_boards(plugin):
     assert movie_source.type == "电影"
 
 
-def test_recommend_source_registers_platform_boards(plugin):
-    """平台推荐条数 > 0 时，注册该平台的剧集与综艺细分数据源。"""
+def test_recommend_source_keeps_platform_boards_off_main_page(plugin):
+    """平台推荐条数 > 0 也不注册平台源，主页面只保留全网源保持简洁。"""
     plugin._tx_rec_num = 10
     event_data = RecommendSourceEventData()
 
     plugin.recommend_source(SimpleNamespace(event_data=event_data))
 
     names = [source.name for source in event_data.extra_sources]
-    assert "猫眼腾讯视频剧集热度" in names
-    assert "猫眼腾讯视频综艺热度" in names
-    for source in event_data.extra_sources:
-        if source.name.startswith("猫眼腾讯视频"):
-            assert source.api_path.endswith("&platform=3")
-    # 未开启推荐条数的平台不注册
-    assert not any("爱奇艺" in name or "芒果" in name or "优酷" in name
+    assert names == ["猫眼电影票房", "猫眼剧集综合热度", "猫眼综艺热度"]
+    assert not any("腾讯" in name or "爱奇艺" in name or "芒果" in name or "优酷" in name
                    for name in names)
 
 

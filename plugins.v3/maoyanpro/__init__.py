@@ -170,7 +170,7 @@ class MaoyanPro(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan.png"
     # 插件版本
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -571,31 +571,19 @@ class MaoyanPro(_PluginBase):
                 api_path=f"plugin/{self.__class__.__name__}/rank-list?board_type=movie",
                 type=self._RECOMMEND_TYPES['movie'],
             ))
-        for board_type, board_label, series_label in (
-                ('web-all', '猫眼剧集综合热度', '剧集热度'),
-                ('zongyi', '猫眼综艺热度', '综艺热度')):
+        for board_type, board_label in (
+                ('web-all', '猫眼剧集综合热度'),
+                ('zongyi', '猫眼综艺热度')):
             if board_type not in (self._type or []):
                 continue
-            # 全网榜：只要勾选类型就注册
+            # 只注册全网榜保持推荐页主界面简洁；平台细分榜不单独挂源，
+            # 由 rank-list 的分页编组在「更多」页里依次展示（标题带平台后缀）
             sources.append(schemas.RecommendMediaSource(
                 name=board_label,
                 api_path=(f"plugin/{self.__class__.__name__}/rank-list?"
                           f"board_type={board_type}"),
                 type=self._RECOMMEND_TYPES[board_type],
             ))
-            # 平台细分榜：推荐条数 > 0 的平台才注册为独立数据源
-            for platform_type, (_, rec_key) in self._PLATFORM_NUM_KEYS.items():
-                if getattr(self, f"_{rec_key}", 0) <= 0:
-                    continue
-                platform_name = self._PLATFORM_NAMES.get(str(platform_type), '')
-                if not platform_name:
-                    continue
-                sources.append(schemas.RecommendMediaSource(
-                    name=f"猫眼{platform_name}{series_label}",
-                    api_path=(f"plugin/{self.__class__.__name__}/rank-list?"
-                              f"board_type={board_type}&platform={platform_type}"),
-                    type=self._RECOMMEND_TYPES[board_type],
-                ))
         if not sources:
             return
 
@@ -611,31 +599,39 @@ class MaoyanPro(_PluginBase):
         """
         推荐页/浏览页使用的榜单列表接口。
 
-        宿主列表视图按 page 翻页，并在返回空或与上一页相同时终止，因此这里把单榜单
-        视作一页数据返回，翻到第二页即给出空列表。
-
-        :param platform: 指定平台（猫眼 platformType，如 3=腾讯视频）时返回该平台的
-                         细分榜；不传时返回全网榜（忽略平台细分榜）
+        宿主列表视图按 page 翻页、翻到空页或重复页终止，因此把多张榜编成页序：
+        第 1 页 = 全网榜，第 2 页起 = 推荐条数 > 0 且快照里实际有数据的平台细分榜
+        （标题带「（平台名）」后缀）。这样推荐页主界面只挂全网源保持简洁，
+        点「更多」继续翻页就能依次看到各平台榜单。显式指定 platform 时只返回
+        该平台的细分榜（供调用方精确取数，不做分页编组）。
         """
-        if page and page > 1:
-            return schemas.Response(success=True, data=[])
-
         snapshot = self.get_data("snapshot") or {}
         boards = snapshot.get("boards") if isinstance(snapshot, dict) else None
-        rows = []
+        rows_by_platform: Dict[str, list] = {}
         if isinstance(boards, list):
             for item in boards:
                 if not isinstance(item, dict) or item.get("type") != board_type:
                     continue
-                board_platform = str(item.get("platform_type") or "")
-                if platform is None:
-                    # 未指定平台时只取全网榜，避免平台细分榜抢占展示位
-                    if board_platform:
-                        continue
-                elif board_platform != str(platform):
-                    continue
-                rows = item.get("items") or []
-                break
+                key = str(item.get("platform_type") or "")
+                rows_by_platform.setdefault(key, item.get("items") or [])
+
+        if platform is not None:
+            page_keys = [str(platform)]
+        else:
+            # 页序：全网榜在前，其后按固定顺序排推荐条数 > 0 的平台榜
+            candidates: List[tuple] = [('', None)]
+            candidates += [(str(pt), rec_key) for pt, (_, rec_key)
+                           in self._PLATFORM_NUM_KEYS.items()
+                           if getattr(self, f"_{rec_key}", 0) > 0]
+            # 只保留快照里实际有数据的页，避免中途出现空页提前终止翻页
+            page_keys = [key for key, _ in candidates if rows_by_platform.get(key)]
+
+        page_index = (page or 1) - 1
+        if page_index < 0 or page_index >= len(page_keys):
+            return schemas.Response(success=True, data=[])
+        rows = rows_by_platform.get(page_keys[page_index], [])
+        platform_name = ('' if page_keys[page_index] == ''
+                         else self._PLATFORM_NAMES.get(page_keys[page_index], ''))
 
         result: List[schemas.MediaInfo] = []
         for row in rows:
@@ -645,10 +641,15 @@ class MaoyanPro(_PluginBase):
                 media_source=row.get("media_source"),
                 media_id=row.get("media_id"),
             )
+            title = str(row.get("title") or "")
+            # 平台页的标题带平台后缀，扁平列表里也能一眼区分来自哪个平台；
+            # 显式指定 platform 的调用方拿原始标题即可
+            if platform is None and platform_name and title:
+                title = f"{title}（{platform_name}）"
             media = schemas.MediaInfo(
                 media_source=media_source,
                 media_id=media_id,
-                title=str(row.get("title") or ""),
+                title=title,
                 year=str(row.get("year") or "") or None,
                 type=str(row.get("type_name") or self._TYPE_NAMES.get(board_type, board_type)),
                 poster_path=str(row.get("poster") or "") or None,
