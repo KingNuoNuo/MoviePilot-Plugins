@@ -110,6 +110,14 @@ MoviePilot-Plugins/
 
 ---
 
+## 许可
+
+本仓库以 [GNU General Public License v3.0](LICENSE)（GPL-3.0）发布。
+
+`MaoyanPro` 是 [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins)（GPL-3.0）的独立 Fork，并通过 `sync-maoyanrank.yml` 持续合并上游改动，因此本仓库包含 GPL-3.0 代码，遵循同一许可。这些插件又在 MoviePilot 宿主进程内运行、直接调用宿主模块（宿主同为 GPL-3.0），从许可角度同样要求以 GPL 兼容的方式分发。
+
+---
+
 # English
 
 A self-hosted [MoviePilot](https://github.com/jxxghp/MoviePilot) plugin market source with two plugins.
@@ -124,6 +132,8 @@ Add `https://github.com/KingNuoNuo/MoviePilot-Plugins` as a custom market source
 > **Origin**: `MaoyanPro` is forked from [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins)
 > (original author [@baozaodetudou](https://github.com/baozaodetudou)), re-released as an
 > **independent fork** with its own authorship and versioning starting at v1.0.0.
+
+> Licensed under the [GNU General Public License v3.0](LICENSE).
 
 <!-- traffic:start -->
 
