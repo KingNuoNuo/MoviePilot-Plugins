@@ -65,6 +65,7 @@ class MaoyanProBoard(BaseModel):
     type: str = Field("", description="榜单类型标识")
     type_name: str = Field("", description="榜单类型中文名")
     platform: str = Field("", description="平台名称")
+    platform_type: str = Field("", description="猫眼 platformType 参数值，全网榜为空")
     show_date: str = Field("", description="榜单日期")
     url: str = Field("", description="榜单来源地址")
     count: int = Field(0, description="榜单条目数")
@@ -133,6 +134,7 @@ def _safe_board_payload(board: dict, rows: List[Any]) -> Dict[str, Any]:
         "type": text("type"),
         "type_name": text("type_name"),
         "platform": text("platform"),
+        "platform_type": text("platform_type"),
         "show_date": text("show_date"),
         "url": text("url"),
         "count": len(items),
@@ -168,7 +170,7 @@ class MaoyanPro(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan.png"
     # 插件版本
-    plugin_version = "1.1.2"
+    plugin_version = "1.2.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -216,6 +218,11 @@ class MaoyanPro(_PluginBase):
     _iqy_sub_num = 0
     _mg_sub_num = 0
     _yk_sub_num = 0
+    # 平台细分榜「推荐条数」：>0 时该平台榜写入榜单快照/推荐页，0 表示不展示
+    _tx_rec_num = 0
+    _iqy_rec_num = 0
+    _mg_rec_num = 0
+    _yk_rec_num = 0
 
     # 对外接口与推荐数据源开关
     _api_enabled = True
@@ -274,6 +281,13 @@ class MaoyanPro(_PluginBase):
         ('mg_sub_num', 'mg_num', 'mg_enabled'),
         ('yk_sub_num', 'yk_num', 'yk_enabled'),
     )
+    # 猫眼 platformType -> (订阅条数字段, 推荐条数字段)；抓取与推荐源注册共用
+    _PLATFORM_NUM_KEYS = {
+        3: ('tx_sub_num', 'tx_rec_num'),
+        2: ('iqy_sub_num', 'iqy_rec_num'),
+        7: ('mg_sub_num', 'mg_rec_num'),
+        1: ('yk_sub_num', 'yk_rec_num'),
+    }
 
     # 本次抓取到的榜单元数据，供对外接口落快照（不持久化，失败时为上层回退到历史）
     _last_boards: List[dict] = []
@@ -400,7 +414,8 @@ class MaoyanPro(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "猫眼榜单快照",
-                "description": "返回最近一次抓取的猫眼榜单快照，可按榜单类型筛选条目数量",
+                "description": "返回最近一次抓取的猫眼榜单快照，可按榜单类型筛选条目数量，"
+                               "也可按 platform（猫眼 platformType）筛选平台细分榜",
                 "response_model": schemas.Response[MaoyanProSnapshot],
             },
             {
@@ -423,13 +438,16 @@ class MaoyanPro(_PluginBase):
         ]
 
     def get_rank_snapshot(self, board_type: str = None, limit: int = None,
-                          board: str = None) -> schemas.Response[MaoyanProSnapshot]:
+                          board: str = None,
+                          platform: str = None) -> schemas.Response[MaoyanProSnapshot]:
         """
         返回最近一次抓取的猫眼榜单快照。
 
         :param board_type: 仅返回指定榜单类型（movie/web-movie/web-all/zongyi）
         :param limit: 每个榜单最多返回的条目数，用于限制响应体大小
         :param board: 仅返回榜单名包含该关键字的榜单（如「腾讯视频」）
+        :param platform: 仅返回指定平台（猫眼 platformType，如 3=腾讯视频）的榜单；
+                         不传时返回全部榜单（含已开启推荐的平台榜）
         """
         snapshot = self.get_data("snapshot") or {}
         boards = snapshot.get("boards") if isinstance(snapshot, dict) else None
@@ -450,6 +468,9 @@ class MaoyanPro(_PluginBase):
             if board_type and item.get("type") != board_type:
                 continue
             if board and board not in str(item.get("board", "")):
+                continue
+            if platform is not None and \
+                    str(item.get("platform_type") or "") != str(platform):
                 continue
             rows = item.get("items") or []
             if limit and limit > 0:
@@ -550,13 +571,29 @@ class MaoyanPro(_PluginBase):
                 api_path=f"plugin/{self.__class__.__name__}/rank-list?board_type=movie",
                 type=self._RECOMMEND_TYPES['movie'],
             ))
-        for board_type, label in (('web-all', '猫眼剧集综合热度'),
-                                  ('zongyi', '猫眼综艺热度')):
-            if board_type in (self._type or []):
+        for board_type, board_label, series_label in (
+                ('web-all', '猫眼剧集综合热度', '剧集热度'),
+                ('zongyi', '猫眼综艺热度', '综艺热度')):
+            if board_type not in (self._type or []):
+                continue
+            # 全网榜：只要勾选类型就注册
+            sources.append(schemas.RecommendMediaSource(
+                name=board_label,
+                api_path=(f"plugin/{self.__class__.__name__}/rank-list?"
+                          f"board_type={board_type}"),
+                type=self._RECOMMEND_TYPES[board_type],
+            ))
+            # 平台细分榜：推荐条数 > 0 的平台才注册为独立数据源
+            for platform_type, (_, rec_key) in self._PLATFORM_NUM_KEYS.items():
+                if getattr(self, f"_{rec_key}", 0) <= 0:
+                    continue
+                platform_name = self._PLATFORM_NAMES.get(str(platform_type), '')
+                if not platform_name:
+                    continue
                 sources.append(schemas.RecommendMediaSource(
-                    name=label,
+                    name=f"猫眼{platform_name}{series_label}",
                     api_path=(f"plugin/{self.__class__.__name__}/rank-list?"
-                              f"board_type={board_type}"),
+                              f"board_type={board_type}&platform={platform_type}"),
                     type=self._RECOMMEND_TYPES[board_type],
                 ))
         if not sources:
@@ -569,12 +606,16 @@ class MaoyanPro(_PluginBase):
             event_data.extra_sources.extend(sources)
 
     def rank_list(self, board_type: str = "web-all", page: int = 1,
-                  limit: int = None) -> schemas.Response[List[schemas.MediaInfo]]:
+                  limit: int = None,
+                  platform: str = None) -> schemas.Response[List[schemas.MediaInfo]]:
         """
         推荐页/浏览页使用的榜单列表接口。
 
         宿主列表视图按 page 翻页，并在返回空或与上一页相同时终止，因此这里把单榜单
         视作一页数据返回，翻到第二页即给出空列表。
+
+        :param platform: 指定平台（猫眼 platformType，如 3=腾讯视频）时返回该平台的
+                         细分榜；不传时返回全网榜（忽略平台细分榜）
         """
         if page and page > 1:
             return schemas.Response(success=True, data=[])
@@ -584,9 +625,17 @@ class MaoyanPro(_PluginBase):
         rows = []
         if isinstance(boards, list):
             for item in boards:
-                if isinstance(item, dict) and item.get("type") == board_type:
-                    rows = item.get("items") or []
-                    break
+                if not isinstance(item, dict) or item.get("type") != board_type:
+                    continue
+                board_platform = str(item.get("platform_type") or "")
+                if platform is None:
+                    # 未指定平台时只取全网榜，避免平台细分榜抢占展示位
+                    if board_platform:
+                        continue
+                elif board_platform != str(platform):
+                    continue
+                rows = item.get("items") or []
+                break
 
         result: List[schemas.MediaInfo] = []
         for row in rows:
@@ -675,6 +724,8 @@ class MaoyanPro(_PluginBase):
             else:
                 num = 0
             setattr(self, f"_{new_key}", num)
+        for platform_type, (_, rec_key) in self._PLATFORM_NUM_KEYS.items():
+            setattr(self, f"_{rec_key}", self.__safe_num(config.get(rec_key), 0))
 
     @staticmethod
     def __form_col(component: str, props: dict, md: int = 6) -> dict:
@@ -706,7 +757,7 @@ class MaoyanPro(_PluginBase):
         })
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """提供订阅类型、订阅/推荐条数、平台订阅与执行周期配置。"""
+        """提供订阅类型、订阅/推荐条数、平台订阅/推荐条数与执行周期配置。"""
         rows = [
             # 基础开关与执行周期
             {
@@ -776,15 +827,29 @@ class MaoyanPro(_PluginBase):
                     self.__num_col('zongyi_rec_num', '综艺榜单推荐条数', recommend=True),
                 ],
             },
-            # 平台细分榜：只影响自动订阅，不写入榜单快照/推荐页
+            # 平台细分榜：订阅条数只影响自动订阅，推荐条数决定是否进推荐页/榜单接口
             {
                 'component': 'VRow',
                 'content': [
                     self.__form_col('VAlert', {
                         'type': 'info',
                         'variant': 'tonal',
-                        'text': '下方为各视频平台榜单的订阅条数，只影响自动订阅，不会写入榜单快照/推荐页；'
-                                '填 0 表示不订阅该平台。',
+                        'text': '下方为各视频平台榜单的订阅/推荐条数：订阅条数只影响自动订阅，'
+                                '推荐条数决定推荐页与榜单接口是否展示该平台榜单；'
+                                '两者都为 0 则该平台榜不抓取。',
+                    }, md=12),
+                ],
+            },
+            # 平台细分榜：每平台一行，左列订阅条数、右列推荐条数
+            {
+                'component': 'VRow',
+                'content': [
+                    self.__form_col('VAlert', {
+                        'type': 'info',
+                        'variant': 'tonal',
+                        'text': '下方为各视频平台榜单的订阅/推荐条数（左订阅、右推荐）：'
+                                '订阅条数只影响自动订阅，推荐条数决定推荐页与榜单接口是否展示该平台榜单；'
+                                '两者都为 0 则该平台榜不抓取。',
                     }, md=12),
                 ],
             },
@@ -792,14 +857,28 @@ class MaoyanPro(_PluginBase):
                 'component': 'VRow',
                 'content': [
                     self.__num_col('tx_sub_num', '腾讯视频订阅条数'),
+                    self.__num_col('tx_rec_num', '腾讯视频推荐条数', recommend=True),
+                ],
+            },
+            {
+                'component': 'VRow',
+                'content': [
                     self.__num_col('iqy_sub_num', '爱奇艺订阅条数'),
+                    self.__num_col('iqy_rec_num', '爱奇艺推荐条数', recommend=True),
                 ],
             },
             {
                 'component': 'VRow',
                 'content': [
                     self.__num_col('mg_sub_num', '芒果TV订阅条数'),
+                    self.__num_col('mg_rec_num', '芒果TV推荐条数', recommend=True),
+                ],
+            },
+            {
+                'component': 'VRow',
+                'content': [
                     self.__num_col('yk_sub_num', '优酷订阅条数'),
+                    self.__num_col('yk_rec_num', '优酷推荐条数', recommend=True),
                 ],
             },
             # 对外接口与推荐页数据源
@@ -831,6 +910,10 @@ class MaoyanPro(_PluginBase):
             "iqy_sub_num": 0,
             "mg_sub_num": 0,
             "yk_sub_num": 0,
+            "tx_rec_num": 0,
+            "iqy_rec_num": 0,
+            "mg_rec_num": 0,
+            "yk_rec_num": 0,
             "api_enabled": True,
             "recommend_enabled": False,
         }
@@ -1143,6 +1226,10 @@ class MaoyanPro(_PluginBase):
             "iqy_sub_num": self._iqy_sub_num,
             "mg_sub_num": self._mg_sub_num,
             "yk_sub_num": self._yk_sub_num,
+            "tx_rec_num": self._tx_rec_num,
+            "iqy_rec_num": self._iqy_rec_num,
+            "mg_rec_num": self._mg_rec_num,
+            "yk_rec_num": self._yk_rec_num,
             "api_enabled": self._api_enabled,
             "recommend_enabled": self._recommend_enabled,
         })
@@ -1183,7 +1270,8 @@ class MaoyanPro(_PluginBase):
         tv_url = f'{maoyan_url}/i/api/encrypt/dashboard/webHeatData'
         # 订阅与推荐页显示相互独立：
         # - 全网榜只要勾选了榜单类型就抓取（供榜单快照/推荐页显示）；
-        # - 平台细分榜只服务自动订阅，不写入榜单快照；
+        # - 平台细分榜：订阅条数只服务自动订阅；推荐条数 > 0 时该平台榜
+        #   也写入榜单快照/推荐页（与全网榜同模型）；
         # - 每榜抓取条数取 max(订阅条数, 推荐条数)，订阅时只取前订阅条数条；
         #   某榜的订阅条数与推荐条数都为 0 时该榜完全不抓取。
         # tv_urls 元素: [抓取地址, 抓取条数, 订阅条数(None=该榜不参与订阅), 是否写入快照]
@@ -1207,18 +1295,18 @@ class MaoyanPro(_PluginBase):
                 sub_num or None,
                 True,
             ])
-            # 平台细分（3 腾讯视频 2 爱奇艺 7 芒果 1 优酷）：条数为 0 表示不订阅该平台
-            for platform_type, platform_num in ((3, self._tx_sub_num),
-                                                (2, self._iqy_sub_num),
-                                                (7, self._mg_sub_num),
-                                                (1, self._yk_sub_num)):
-                if platform_num <= 0:
+            # 平台细分（3 腾讯视频 2 爱奇艺 7 芒果 1 优酷）：订阅/推荐条数都为 0 不抓取
+            for platform_type, (sub_key, rec_key) in self._PLATFORM_NUM_KEYS.items():
+                platform_sub = getattr(self, f"_{sub_key}")
+                platform_rec = getattr(self, f"_{rec_key}")
+                platform_fetch = max(platform_sub, platform_rec)
+                if platform_fetch <= 0:
                     continue
                 tv_urls.append([
                     f'{tv_url}?{series_query}platformType={platform_type}&showDate={show_date}',
-                    platform_num,
-                    platform_num,
-                    False,
+                    platform_fetch,
+                    platform_sub or None,
+                    platform_rec > 0,
                 ])
         tv_list = []
         movie_list = []
@@ -1608,6 +1696,8 @@ class MaoyanPro(_PluginBase):
             "board_url": url,
             "show_date": show_date,
             "platform": platform,
+            # 猫眼 platformType 原值，供快照与推荐源按平台精确定位榜单；全网榜为空
+            "platform_type": query.get('platformType', ''),
             "type_name": self._TYPE_NAMES.get(board_type, board_type),
         }
 
@@ -1730,6 +1820,7 @@ class MaoyanPro(_PluginBase):
                             "type": meta["board_type"],
                             "type_name": meta["type_name"],
                             "platform": meta["platform"],
+                            "platform_type": meta.get("platform_type", ""),
                             "show_date": meta["show_date"],
                             "url": meta["board_url"],
                             "count": len(items),

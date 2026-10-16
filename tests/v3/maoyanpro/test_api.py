@@ -57,6 +57,10 @@ def plugin(monkeypatch):
     instance._iqy_sub_num = 0
     instance._mg_sub_num = 0
     instance._yk_sub_num = 0
+    instance._tx_rec_num = 0
+    instance._iqy_rec_num = 0
+    instance._mg_rec_num = 0
+    instance._yk_rec_num = 0
     monkeypatch.setattr(instance, "_MaoyanPro__with_browser", lambda callback: None)
     monkeypatch.setattr(maoyanpro, "RequestUtils", lambda *a, **k: SimpleNamespace(
         get_res=lambda *a, **k: None
@@ -69,7 +73,7 @@ def snapshot_boards():
     return [
         {
             "board": "电影票房榜单", "type": "movie", "type_name": "电影票房",
-            "platform": "", "show_date": "2026-10-15",
+            "platform": "", "platform_type": "", "show_date": "2026-10-15",
             "url": "https://piaofang.maoyan.com/dashboard-ajax/movie",
             "count": 2, "updated_at": "2026-10-15 12:00:00",
             "items": [
@@ -90,7 +94,7 @@ def snapshot_boards():
         },
         {
             "board": "剧集综合榜单（腾讯视频）", "type": "web-all", "type_name": "剧集综合",
-            "platform": "腾讯视频", "show_date": "2026-10-15",
+            "platform": "腾讯视频", "platform_type": "3", "show_date": "2026-10-15",
             "url": ("https://piaofang.maoyan.com/i/api/encrypt/dashboard/"
                     "webHeatData?seriesType=0&platformType=3"),
             "count": 1, "updated_at": "2026-10-15 12:00:00",
@@ -149,6 +153,10 @@ def test_rank_endpoint_filters_by_type_board_and_limit(plugin):
     by_board = plugin.get_rank_snapshot(board="腾讯")
     assert len(by_board.data.boards) == 1
     assert by_board.data.boards[0].platform == "腾讯视频"
+
+    by_platform = plugin.get_rank_snapshot(platform="3")
+    assert len(by_platform.data.boards) == 1
+    assert by_platform.data.boards[0].platform_type == "3"
 
     missing = plugin.get_rank_snapshot(board_type="zongyi")
     assert missing.data.boards == []
@@ -215,8 +223,23 @@ def test_rank_list_terminates_pagination(plugin):
     """列表视图翻到第二页立即返回空，避免无限翻页。"""
     plugin.save_data("snapshot", {"boards": snapshot_boards()})
 
-    assert plugin.rank_list(board_type="web-all", page=2).data == []
-    assert len(plugin.rank_list(board_type="web-all", page=1).data) == 1
+    assert plugin.rank_list(board_type="movie", page=2).data == []
+    assert len(plugin.rank_list(board_type="movie", page=1).data) == 2
+
+
+def test_rank_list_filters_by_platform(plugin):
+    """`/rank-list` 不带 platform 只取全网榜，带 platform 返回对应平台细分榜。"""
+    # 样本里 web-all 只有腾讯平台榜，没有全网综合榜
+    plugin.save_data("snapshot", {"boards": snapshot_boards()})
+
+    # 未指定平台时平台细分榜不会抢占全网榜的展示位
+    assert plugin.rank_list(board_type="web-all").data == []
+
+    platform = plugin.rank_list(board_type="web-all", platform=3)
+    assert [item.title for item in platform.data] == ["沉默的荣耀"]
+
+    # 平台对不上时返回空列表
+    assert plugin.rank_list(board_type="web-all", platform=2).data == []
 
 
 def test_rank_list_handles_unknown_board_type(plugin):
@@ -259,6 +282,24 @@ def test_recommend_source_registers_configured_boards(plugin):
         assert source.api_path.startswith("plugin/MaoyanPro/rank-list?board_type=")
     movie_source = next(s for s in event_data.extra_sources if s.name == "猫眼电影票房")
     assert movie_source.type == "电影"
+
+
+def test_recommend_source_registers_platform_boards(plugin):
+    """平台推荐条数 > 0 时，注册该平台的剧集与综艺细分数据源。"""
+    plugin._tx_rec_num = 10
+    event_data = RecommendSourceEventData()
+
+    plugin.recommend_source(SimpleNamespace(event_data=event_data))
+
+    names = [source.name for source in event_data.extra_sources]
+    assert "猫眼腾讯视频剧集热度" in names
+    assert "猫眼腾讯视频综艺热度" in names
+    for source in event_data.extra_sources:
+        if source.name.startswith("猫眼腾讯视频"):
+            assert source.api_path.endswith("&platform=3")
+    # 未开启推荐条数的平台不注册
+    assert not any("爱奇艺" in name or "芒果" in name or "优酷" in name
+                   for name in names)
 
 
 def test_recommend_source_skips_when_disabled(plugin):
@@ -349,7 +390,7 @@ def test_refresh_builds_board_snapshot_with_identity(plugin, monkeypatch):
         """模拟一次抓取：设置榜单元数据并返回待订阅条目。"""
         plugin._last_boards = [{
             "board": "电影票房榜单", "type": "movie", "type_name": "电影票房",
-            "platform": "", "show_date": "2026-10-15", "url": movie_url, "count": 1,
+            "platform": "", "platform_type": "", "show_date": "2026-10-15", "url": movie_url, "count": 1,
             "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "items": [{"rank": 1, "title": "院线电影", "board_type": "movie",
                        "type_name": "", "platformDesc": "院线", "releaseInfo": "上映3天",
@@ -423,7 +464,7 @@ def test_refresh_skips_subscribe_but_keeps_snapshot_when_disabled(plugin, monkey
         """模拟一次抓取：返回待订阅条目，验证关闭订阅后不会被消费。"""
         plugin._last_boards = [{
             "board": "电影票房榜单", "type": "movie", "type_name": "电影票房",
-            "platform": "", "show_date": "2026-10-15", "url": movie_url, "count": 1,
+            "platform": "", "platform_type": "", "show_date": "2026-10-15", "url": movie_url, "count": 1,
             "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "items": [{"rank": 1, "title": "院线电影", "board_type": "movie",
                        "type_name": "", "platformDesc": "院线", "releaseInfo": "上映3天",
@@ -564,8 +605,9 @@ def test_form_separates_movie_and_tv_subscription_types(plugin):
         assert fields[model]["items"][0] == {"title": "0", "value": 0}
     for model in ("movie_rec_num", "tv_rec_num", "zongyi_rec_num"):
         assert fields[model]["items"][0] == {"title": "0", "value": 0}
-    # 平台榜只保留订阅条数
-    for model in ("tx_sub_num", "iqy_sub_num", "mg_sub_num", "yk_sub_num"):
+    # 平台榜保留订阅条数，并新增推荐条数（>0 时平台榜进推荐页/榜单接口）
+    for model in ("tx_sub_num", "iqy_sub_num", "mg_sub_num", "yk_sub_num",
+                  "tx_rec_num", "iqy_rec_num", "mg_rec_num", "yk_rec_num"):
         assert model in fields
         assert fields[model]["items"][0]["value"] == 0
 
@@ -578,6 +620,7 @@ def test_form_separates_movie_and_tv_subscription_types(plugin):
     assert defaults["type_tv"] == ["web-all", "zongyi"]
     assert "type_zongyi" not in defaults
     assert defaults["tx_sub_num"] == 0
+    assert defaults["tx_rec_num"] == 0
 
 
 def test_legacy_types_merge_into_combined_tv_board():
@@ -615,6 +658,7 @@ def test_config_groups_types_and_numbers():
         "tv_sub_num": 0, "tv_rec_num": 20,
         "zongyi_sub_num": 0, "zongyi_rec_num": 0,
         "tx_sub_num": 3, "iqy_sub_num": 0, "mg_sub_num": 7, "yk_sub_num": 0,
+        "tx_rec_num": 10, "iqy_rec_num": 0, "mg_rec_num": 15, "yk_rec_num": 0,
     })
 
     assert instance._type == ["movie", "web-all"]
@@ -622,6 +666,8 @@ def test_config_groups_types_and_numbers():
     assert (instance._tv_sub_num, instance._tv_rec_num) == (0, 20)
     assert (instance._tx_sub_num, instance._mg_sub_num) == (3, 7)
     assert (instance._iqy_sub_num, instance._yk_sub_num) == (0, 0)
+    assert (instance._tx_rec_num, instance._mg_rec_num) == (10, 15)
+    assert (instance._iqy_rec_num, instance._yk_rec_num) == (0, 0)
 
 
 def test_legacy_config_migrates_to_split_groups():
@@ -676,7 +722,7 @@ def test_refresh_uses_independent_numbers_and_combined_board(plugin, monkeypatch
 
 
 def test_refresh_keeps_platform_boards_out_of_snapshot(plugin, monkeypatch):
-    """平台细分榜只服务订阅，不写入榜单快照。"""
+    """平台推荐条数为 0 时，平台细分榜只服务订阅，不写入榜单快照。"""
     captured = {}
 
     def fetch(movie_url, tv_urls, web_movie_url, num=10):
@@ -698,6 +744,35 @@ def test_refresh_keeps_platform_boards_out_of_snapshot(plugin, monkeypatch):
     platform = [item for item in captured["tv_urls"] if not item[3]]
     assert len(platform) == 1 and "platformType=3" in platform[0][0]
     assert platform[0][1] == platform[0][2] == 3
+
+
+def test_refresh_puts_platform_boards_into_snapshot(plugin, monkeypatch):
+    """平台推荐条数 > 0 时平台榜写入快照，剧集与综艺两个系列都覆盖。"""
+    captured = {}
+
+    def fetch(movie_url, tv_urls, web_movie_url, num=10):
+        captured["tv_urls"] = tv_urls
+        return [], [], [], []
+
+    plugin._type = ["web-all", "zongyi"]
+    plugin._tv_sub_num, plugin._tv_rec_num = 5, 20
+    plugin._zongyi_sub_num, plugin._zongyi_rec_num = 10, 0
+    plugin._tx_sub_num, plugin._tx_rec_num = 3, 15
+    plugin._iqy_rec_num = plugin._mg_rec_num = plugin._yk_rec_num = 0
+    plugin.get_data = lambda key: [] if key == "history" else None
+    plugin.save_data = lambda key, value: None
+    monkeypatch.setattr(plugin, "_MaoyanPro__get_url_info", fetch)
+
+    plugin._MaoyanPro__refresh_maoyan()
+
+    urls = {item[0]: (item[1], item[2], item[3]) for item in captured["tv_urls"]}
+    # 剧集综合榜与综艺榜各带一条腾讯平台榜：抓取条数 = max(订阅 3, 推荐 15) = 15，入快照
+    tx = [url for url in urls if "platformType=3" in url]
+    assert len(tx) == 2
+    for url in tx:
+        assert urls[url] == (15, 3, True)
+    # 其它平台订阅/推荐条数都为 0，完全不抓取
+    assert not any(f"platformType={t}" in url for url in urls for t in (2, 7, 1))
 
 
 def test_board_type_from_url_detects_combined_board(plugin):
