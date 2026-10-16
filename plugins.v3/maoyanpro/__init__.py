@@ -827,19 +827,6 @@ class MaoyanPro(_PluginBase):
                     self.__num_col('zongyi_rec_num', '综艺榜单推荐条数', recommend=True),
                 ],
             },
-            # 平台细分榜：订阅条数只影响自动订阅，推荐条数决定是否进推荐页/榜单接口
-            {
-                'component': 'VRow',
-                'content': [
-                    self.__form_col('VAlert', {
-                        'type': 'info',
-                        'variant': 'tonal',
-                        'text': '下方为各视频平台榜单的订阅/推荐条数：订阅条数只影响自动订阅，'
-                                '推荐条数决定推荐页与榜单接口是否展示该平台榜单；'
-                                '两者都为 0 则该平台榜不抓取。',
-                    }, md=12),
-                ],
-            },
             # 平台细分榜：每平台一行，左列订阅条数、右列推荐条数
             {
                 'component': 'VRow',
