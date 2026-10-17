@@ -1857,10 +1857,11 @@ class MaoyanPro(_PluginBase):
                 for t, entry in cached.items():
                     if not isinstance(t, str) or not t or not isinstance(entry, dict):
                         continue
-                    # 「release_date」键是补上映日期能力加入后才有的：旧缓存条目视为过期，
-                    # 重识别一轮把日期补进 identity（一次性的收敛成本，识别链自身有缓存）
-                    if entry.get("media_source") and entry.get("poster") and "release_date" in entry:
-                        self._resolved_identity[t] = entry
+                    if entry.get("media_source") and entry.get("poster"):
+                        # 「release_date」键是补上映日期能力加入后才有的：缺键的旧条目视为
+                        # 过期（不回内存），本轮重识别补上日期——一次性收敛成本
+                        if "release_date" in entry:
+                            self._resolved_identity[t] = entry
                     elif now_ts - float(entry.get("ts") or 0) < self._IDENTITY_TTL_FALLBACK:
                         self._resolved_identity[t] = entry
         except Exception as e:
