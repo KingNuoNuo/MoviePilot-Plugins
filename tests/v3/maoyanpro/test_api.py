@@ -80,7 +80,8 @@ def snapshot_boards():
                 {"rank": 1, "title": "生化危机：爆发夜", "board_type": "movie",
                  "type_name": "电影票房", "platformDesc": "院线", "releaseInfo": "上映11天",
                  "board": "电影票房榜单", "show_date": "2026-10-15",
-                 "box_office": "161.93万", "heat": "28.1%",
+                 "box_office": "161.93万", "total_box_office": "1.87亿", "heat": "28.1%",
+                 "title_cn": "",
                  "media_source": "themoviedb", "media_id": "1586199",
                  "poster": "https://image.tmdb.org/t/p/w500/a.jpg",
                  "overview": "简介", "year": "2026"},
@@ -130,6 +131,8 @@ def test_rank_endpoint_returns_snapshot_with_metrics(plugin):
     assert (first.rank, first.title, first.box_office, first.heat) == (
         1, "生化危机：爆发夜", "161.93万", "28.1%",
     )
+    assert first.total_box_office == "1.87亿"
+    assert first.title_cn == ""
     assert (first.media_source, first.media_id) == ("themoviedb", "1586199")
     # 上榜但未识别到媒体的条目仍要保留，只是身份为空
     assert result.data.boards[0].items[1].title == "神探之痕迹"
@@ -530,10 +533,11 @@ def test_rank_metrics_reads_current_maoyan_fields(plugin):
     """量值解析覆盖现网字段：票房用 boxSplitUnit，热度用 currHeatDesc。"""
     metrics = plugin._MaoyanPro__rank_metrics(
         {"boxSplitUnit": {"num": "161.93", "unit": "万"}, "boxRate": "28.1%",
-         "showCount": 98919},
+         "sumBoxDesc": "3.30亿", "showCount": 98919},
         {"releaseInfo": "上映11天", "platformDesc": "院线"},
     )
     assert metrics["box_office"] == "161.93万"
+    assert metrics["total_box_office"] == "3.30亿"
     assert metrics["heat"] == "28.1%"
     assert metrics["release_info"] == "上映11天"
 
@@ -541,9 +545,10 @@ def test_rank_metrics_reads_current_maoyan_fields(plugin):
         {"currHeatDesc": "9820", "barValue": "9820"}, {"platformDesc": "腾讯视频"})
     assert heat["heat"] == "9820"
     assert heat["platform"] == "腾讯视频"
+    assert heat["total_box_office"] == ""
 
     empty = plugin._MaoyanPro__rank_metrics({}, {})
-    assert (empty["box_office"], empty["heat"]) == ("", "")
+    assert (empty["box_office"], empty["total_box_office"], empty["heat"]) == ("", "", "")
 
 
 def test_parse_rank_items_keeps_rank_and_board(plugin):
@@ -564,6 +569,236 @@ def test_parse_rank_items_keeps_rank_and_board(plugin):
     assert items[0]["board"] == "电影票房榜单"
     assert items[0]["board_type"] == "movie"
     assert items[0]["releaseInfo"] == "上映3天"
+
+
+TOTAL_BOARD_HTML = """
+<ul class="row" data-com="hrefTo,href:'/movie/3446690'">
+    <li class="col0">1</li>
+    <li class="col1">
+        <p class="first-line">哪吒之魔童闹海</p>
+        <p class="second-line">2025-01-29 上映</p>
+    </li>
+    <li class="col2 tr">1544614</li>
+    <li class="col3 tr">47.639984</li>
+    <li class="col4 tr">24</li>
+</ul>
+<ul class="row" data-com="hrefTo,href:'/movie/1200471'">
+    <li class="col0">2</li>
+    <li class="col1">
+        <p class="first-line">长津湖</p>
+        <p class="second-line">2021-09-30 上映</p>
+    </li>
+    <li class="col2 tr">577534</li>
+    <li class="col3 tr">46.383892</li>
+    <li class="col4 tr">22</li>
+</ul>
+<ul class="row" data-com="hrefTo,href:'/movie/0'">
+    <li class="col0">3</li>
+    <li class="col1"><p class="first-line"></p></li>
+    <li class="col2 tr">100</li>
+</ul>
+"""
+
+GLOBAL_BOARD_HTML = """
+<tr>
+    <th>Rank</th><th>Release Group</th><th>Worldwide</th>
+    <th>Domestic</th><th>%</th><th>Foreign</th><th>%</th>
+</tr>
+<tr>
+    <td class="a-text-right mojo-field-type-rank">1</td>
+    <td class="a-text-left mojo-field-type-release">
+        <a href="/release/rl1234/">Spider-Man: Brand New Day</a></td>
+    <td class="a-text-right mojo-field-type-money">$2,513,503,453</td>
+    <td class="a-text-right mojo-field-type-money">$957,590,528</td>
+    <td class="a-text-right mojo-field-type-percent">38.1%</td>
+    <td class="a-text-right mojo-field-type-money">$1,555,912,925</td>
+    <td class="a-text-right mojo-field-type-percent">61.9%</td>
+</tr>
+<tr>
+    <td class="a-text-right mojo-field-type-rank">2</td>
+    <td class="a-text-left mojo-field-type-release"><a href="/release/rl5678/">The Odyssey</a></td>
+    <td class="a-text-right mojo-field-type-money">$1,783,073,069</td>
+    <td class="a-text-right mojo-field-type-money">$624,348,825</td>
+    <td class="a-text-right mojo-field-type-percent">35%</td>
+    <td class="a-text-right mojo-field-type-money">$1,158,724,244</td>
+    <td class="a-text-right mojo-field-type-percent">65%</td>
+</tr>
+<tr>
+    <td class="a-text-right mojo-field-type-rank">3</td>
+    <td class="a-text-left mojo-field-type-release"></td>
+    <td class="a-text-right mojo-field-type-money">n/a</td>
+</tr>
+"""
+
+
+def test_format_wan_amount():
+    """猫眼票房数值（万元）按量级转成亿/万文本，非法值返回空串。"""
+    fmt = MaoyanPro._MaoyanPro__format_wan_amount
+    assert fmt("1544614") == "154.46亿"
+    assert fmt("577534") == "57.75亿"
+    assert fmt("9999") == "9999万"
+    assert fmt("") == ""
+    assert fmt("abc") == ""
+
+
+def test_format_usd_amount():
+    """Box Office Mojo 美元数值按量级转成亿美元/万美元文本，非法值返回空串。"""
+    fmt = MaoyanPro._MaoyanPro__format_usd_amount
+    assert fmt("$2,513,503,453") == "25.14亿美元"
+    assert fmt("$1,783,073,069") == "17.83亿美元"
+    assert fmt("$95,759") == "9.6万美元"
+    assert fmt("$999") == "999美元"
+    assert fmt("") == ""
+    assert fmt("n/a") == ""
+
+
+def test_fetch_global_board_parses_ssr_html(plugin, monkeypatch):
+    """全球年度票房榜解析 Box Office Mojo SSR 表格：英文片名与美元票房，坏条目跳过。"""
+    monkeypatch.setattr(maoyanpro, "RequestUtils", lambda *a, **k: SimpleNamespace(
+        get_res=lambda *a, **k: SimpleNamespace(
+            text=GLOBAL_BOARD_HTML, raise_for_status=lambda: None)))
+
+    board = plugin._MaoyanPro__fetch_global_board()
+
+    assert board["type"] == "global"
+    assert board["type_name"] == "全球年度票房"
+    assert board["count"] == 2
+    first = board["items"][0]
+    assert (first["rank"], first["title"]) == (1, "Spider-Man: Brand New Day")
+    # releaseInfo 放榜单年份，供媒体识别做年份线索
+    assert first["releaseInfo"] == str(datetime.datetime.now().year)
+    assert first["box_office"] == "25.14亿美元"
+    assert first["total_box_office"] == "25.14亿美元"
+    assert board["items"][1]["title"] == "The Odyssey"
+    assert board["items"][1]["box_office"] == "17.83亿美元"
+
+
+def test_global_board_flows_to_recommend_source_and_rank_list(plugin, monkeypatch):
+    """勾选全球年度票房榜后：推荐页注册独立源，rank-list 可按 board_type=global 取数。"""
+    monkeypatch.setattr(maoyanpro, "RequestUtils", lambda *a, **k: SimpleNamespace(
+        get_res=lambda *a, **k: SimpleNamespace(
+            text=GLOBAL_BOARD_HTML, raise_for_status=lambda: None)))
+    board = plugin._MaoyanPro__fetch_global_board()
+    plugin.save_data("snapshot", {
+        "updated_at": "2026-10-17 08:00:00", "total": 1, "boards": [board],
+    })
+    plugin._type = ["movie", "global"]
+
+    event_data = RecommendSourceEventData()
+    plugin.recommend_source(SimpleNamespace(event_data=event_data))
+    global_source = next(
+        s for s in event_data.extra_sources if s.name == "全球年度票房")
+    assert global_source.api_path == "plugin/MaoyanPro/rank-list?board_type=global"
+    assert global_source.type == "电影"
+
+    resp = plugin.rank_list(board_type="global")
+    assert resp.success is True
+    assert [media.title for media in resp.data] == [
+        "Spider-Man: Brand New Day", "The Odyssey"]
+
+
+def test_fetch_year_board_uses_year_param(plugin, monkeypatch):
+    """国内年度票房榜与影史榜共用解析，按 ?year= 当前年份抓取。"""
+    captured = {}
+
+    def fake_utils(*args, **kwargs):
+        return SimpleNamespace(get_res=lambda url, **kw: (
+            captured.setdefault("url", url),
+            SimpleNamespace(text=TOTAL_BOARD_HTML, raise_for_status=lambda: None),
+        )[1])
+
+    monkeypatch.setattr(maoyanpro, "RequestUtils", fake_utils)
+
+    board = plugin._MaoyanPro__fetch_total_board("2026-10-17", "year")
+
+    assert board["type"] == "year"
+    assert board["type_name"] == "国内年度票房"
+    assert captured["url"].startswith("https://piaofang.maoyan.com/rankings/year?year=")
+    assert captured["url"].endswith(str(datetime.datetime.now().year))
+    assert board["items"][0]["title"] == "哪吒之魔童闹海"
+
+
+def test_recognized_items_carry_chinese_title(plugin, monkeypatch):
+    """识别链路把 TMDB 中文名写进快照条目，rank-list 优先展示中文名。"""
+    recognize = Mock(return_value=SimpleNamespace(
+        title="蜘蛛侠：崭新一日", year="2026", type=MediaType.MOVIE,
+        media_source=SimpleNamespace(value="themoviedb"), media_id="1",
+        get_poster_image=lambda: "http://img/poster.jpg", overview="简介"))
+    plugin.chain = SimpleNamespace(recognize_media=recognize)
+
+    plugin._MaoyanPro__resolve_board_identities([
+        {"type": "global", "items": [
+            {"title": "Spider-Man: Brand New Day", "releaseInfo": "2026",
+             "board_type": "global"},
+        ]},
+    ])
+
+    identity = plugin._MaoyanPro__resolve_board_identities  # noqa: F841
+    snapshot_items = [{"title": "Spider-Man: Brand New Day", "releaseInfo": "2026",
+                       "board_type": "global", "rank": 1}]
+    # 从 _resolved_identity 取身份写入快照的路径与 __save_snapshot 一致
+    identity_map = plugin._resolved_identity
+    row = snapshot_items[0]
+    info = identity_map.get(row["title"]) or {}
+    row.update({
+        "media_source": info.get("media_source", ""),
+        "media_id": info.get("media_id", ""),
+        "title_cn": info.get("title_cn", ""),
+    })
+    assert row["title_cn"] == "蜘蛛侠：崭新一日"
+
+    plugin.save_data("snapshot", {
+        "updated_at": "2026-10-17 08:00:00", "total": 1,
+        "boards": [{"board": "全球年度票房榜单", "type": "global",
+                    "type_name": "全球年度票房", "platform": "", "platform_type": "",
+                    "show_date": "2026-10-17", "url": "u", "count": 1,
+                    "updated_at": "2026-10-17 08:00:00", "items": [row]}],
+    })
+    resp = plugin.rank_list(board_type="global")
+    assert [media.title for media in resp.data] == ["蜘蛛侠：崭新一日"]
+
+
+def test_fetch_total_board_parses_ssr_html(plugin, monkeypatch):
+    """影史总票房榜解析 SSR 直出页面：片名、上映日期与票房量值，坏条目跳过。"""
+    monkeypatch.setattr(maoyanpro, "RequestUtils", lambda *a, **k: SimpleNamespace(
+        get_res=lambda *a, **k: SimpleNamespace(
+            text=TOTAL_BOARD_HTML, raise_for_status=lambda: None)))
+
+    board = plugin._MaoyanPro__fetch_total_board("2026-10-17")
+
+    assert board["type"] == "total"
+    assert board["type_name"] == "影史总票房"
+    assert board["count"] == 2
+    first = board["items"][0]
+    assert (first["rank"], first["title"], first["releaseInfo"]) == (
+        1, "哪吒之魔童闹海", "2025-01-29 上映")
+    assert first["box_office"] == "154.46亿"
+    assert first["total_box_office"] == "154.46亿"
+    assert board["items"][1]["box_office"] == "57.75亿"
+    assert board["items"][1]["heat"] == ""
+
+
+def test_total_board_flows_to_recommend_source_and_rank_list(plugin, monkeypatch):
+    """勾选影史总票房榜后：推荐页注册独立源，rank-list 可按 board_type=total 取数。"""
+    monkeypatch.setattr(maoyanpro, "RequestUtils", lambda *a, **k: SimpleNamespace(
+        get_res=lambda *a, **k: SimpleNamespace(
+            text=TOTAL_BOARD_HTML, raise_for_status=lambda: None)))
+    board = plugin._MaoyanPro__fetch_total_board("2026-10-17")
+    plugin.save_data("snapshot", {
+        "updated_at": "2026-10-17 08:00:00", "total": 2, "boards": [board],
+    })
+    plugin._type = ["movie", "total"]
+
+    event_data = RecommendSourceEventData()
+    plugin.recommend_source(SimpleNamespace(event_data=event_data))
+    total_source = next(
+        s for s in event_data.extra_sources if s.name == "猫眼影史总票房")
+    assert total_source.api_path == "plugin/MaoyanPro/rank-list?board_type=total"
+    assert total_source.type == "电影"
+
+    resp = plugin.rank_list(board_type="total")
+    assert resp.success is True
+    assert [media.title for media in resp.data] == ["哪吒之魔童闹海", "长津湖"]
 
 
 @pytest.mark.parametrize("series_type,expected", [
@@ -634,7 +869,10 @@ def test_form_separates_movie_and_tv_subscription_types(plugin):
     fields, defaults = _form_fields(plugin)
 
     assert fields["type_movie"]["label"] == "电影订阅类型"
-    assert [item["value"] for item in fields["type_movie"]["items"]] == ["movie", "web-movie"]
+    assert [item["value"] for item in fields["type_movie"]["items"]] == [
+        "movie", "web-movie", "total", "year", "global"]
+    assert [item["title"] for item in fields["type_movie"]["items"]] == [
+        "电影票房榜单", "网络电影榜单", "影史总票房榜", "国内年度票房榜", "全球年度票房榜"]
     assert fields["type_tv"]["label"] == "剧集订阅类型"
     assert [item["value"] for item in fields["type_tv"]["items"]] == ["web-all", "zongyi"]
     # 剧集不再拆电视剧/网剧单榜；综艺并入剧集下拉后不再单列
@@ -643,16 +881,18 @@ def test_form_separates_movie_and_tv_subscription_types(plugin):
         "剧集综合榜单（电视剧+网剧）", "综艺热度榜单",
     ]
 
-    # 三组「订阅条数 + 推荐条数」，订阅条数可选 0（不订阅）、推荐条数可选 0（不展示）
+    # 三组「订阅条数 + 推荐开关」：订阅条数可选 0（不订阅）、推荐为开关（v1.2.2 起）
     for model in ("movie_sub_num", "tv_sub_num", "zongyi_sub_num"):
         assert fields[model]["items"][0] == {"title": "0", "value": 0}
-    for model in ("movie_rec_num", "tv_rec_num", "zongyi_rec_num"):
-        assert fields[model]["items"][0] == {"title": "0", "value": 0}
-    # 平台榜保留订阅条数，并新增推荐条数（>0 时平台榜进推荐页/榜单接口）
-    for model in ("tx_sub_num", "iqy_sub_num", "mg_sub_num", "yk_sub_num",
-                  "tx_rec_num", "iqy_rec_num", "mg_rec_num", "yk_rec_num"):
+    # 平台榜保留订阅条数；推荐统一为开关，不再有数量下拉
+    for model in ("tx_sub_num", "iqy_sub_num", "mg_sub_num", "yk_sub_num"):
         assert model in fields
         assert fields[model]["items"][0]["value"] == 0
+    for model in ("movie_rec_enabled", "tv_rec_enabled", "zongyi_rec_enabled",
+                  "tx_rec_enabled", "iqy_rec_enabled", "mg_rec_enabled",
+                  "yk_rec_enabled"):
+        assert model in fields
+    assert not any(model.endswith("_rec_num") for model in fields)
 
     # 旧的合并 type 字段与五个平台/全网开关均已移除
     assert "type" not in fields
@@ -663,7 +903,8 @@ def test_form_separates_movie_and_tv_subscription_types(plugin):
     assert defaults["type_tv"] == ["web-all", "zongyi"]
     assert "type_zongyi" not in defaults
     assert defaults["tx_sub_num"] == 0
-    assert defaults["tx_rec_num"] == 0
+    assert defaults["tx_rec_enabled"] is False
+    assert defaults["movie_rec_enabled"] is True
 
 
 def test_legacy_types_merge_into_combined_tv_board():
@@ -697,20 +938,39 @@ def test_config_groups_types_and_numbers():
         "type_movie": ["movie"],
         "type_tv": ["web-all"],
         "type_zongyi": [],
-        "movie_sub_num": 5, "movie_rec_num": 30,
-        "tv_sub_num": 0, "tv_rec_num": 20,
-        "zongyi_sub_num": 0, "zongyi_rec_num": 0,
+        "movie_sub_num": 5, "movie_rec_enabled": True,
+        "tv_sub_num": 0, "tv_rec_enabled": True,
+        "zongyi_sub_num": 0, "zongyi_rec_enabled": False,
         "tx_sub_num": 3, "iqy_sub_num": 0, "mg_sub_num": 7, "yk_sub_num": 0,
-        "tx_rec_num": 10, "iqy_rec_num": 0, "mg_rec_num": 15, "yk_rec_num": 0,
+        "tx_rec_enabled": True, "iqy_rec_enabled": False,
+        "mg_rec_enabled": True, "yk_rec_enabled": False,
     })
 
     assert instance._type == ["movie", "web-all"]
-    assert (instance._movie_sub_num, instance._movie_rec_num) == (5, 30)
-    assert (instance._tv_sub_num, instance._tv_rec_num) == (0, 20)
+    assert (instance._movie_sub_num, instance._movie_rec_enabled) == (5, True)
+    # 推荐开关打开按满榜 10 条派生，关闭为 0
+    assert (instance._movie_rec_num, instance._tv_rec_num,
+            instance._zongyi_rec_num) == (10, 10, 0)
     assert (instance._tx_sub_num, instance._mg_sub_num) == (3, 7)
     assert (instance._iqy_sub_num, instance._yk_sub_num) == (0, 0)
-    assert (instance._tx_rec_num, instance._mg_rec_num) == (10, 15)
+    assert (instance._tx_rec_num, instance._mg_rec_num) == (10, 10)
     assert (instance._iqy_rec_num, instance._yk_rec_num) == (0, 0)
+
+
+def test_legacy_rec_nums_migrate_to_switches():
+    """旧版数值推荐条数 > 0 迁移为推荐开关打开。"""
+    instance = object.__new__(MaoyanPro)
+    instance._MaoyanPro__load_type_config({
+        "movie_rec_num": 30,
+        "tv_rec_num": 0,
+        "tx_rec_num": 5,
+        "yk_rec_num": 0,
+    })
+
+    assert instance._movie_rec_enabled is True
+    assert instance._tv_rec_enabled is False
+    assert instance._tx_rec_enabled is True
+    assert instance._yk_rec_enabled is False
 
 
 def test_legacy_config_migrates_to_split_groups():
@@ -727,7 +987,9 @@ def test_legacy_config_migrates_to_split_groups():
     assert instance._movie_sub_num == 3
     assert instance._tv_sub_num == 5
     assert instance._zongyi_sub_num == 5
-    assert instance._movie_rec_num == instance._tv_rec_num == instance._zongyi_rec_num == 30
+    # 旧 recommend_num=30 > 0 → 三组推荐开关都打开，按满榜 10 条派生
+    assert instance._movie_rec_num == instance._tv_rec_num == instance._zongyi_rec_num == 10
+    assert instance._movie_rec_enabled is True
     assert instance._tx_sub_num == 7
     # 旧开关关闭的平台视为不订阅
     assert instance._iqy_sub_num == 0

@@ -49,7 +49,9 @@ class MaoyanProItem(BaseModel):
     release_info: str = Field("", description="上线信息，如「上映 11 天」")
     show_date: str = Field("", description="榜单日期，格式 YYYY-MM-DD")
     board: str = Field("", description="榜单名称")
+    title_cn: str = Field("", description="中文片名（识别结果，英文榜单条目专供展示）")
     box_office: str = Field("", description="当日票房或热度值等榜单量值")
+    total_box_office: str = Field("", description="累计票房（总票房），仅电影票房榜提供")
     heat: str = Field("", description="热度/票房占比等榜单热度描述")
     media_source: str = Field("", description="主媒体来源，未识别时为空")
     media_id: str = Field("", description="主媒体 ID，未识别时为空")
@@ -121,7 +123,9 @@ def _safe_board_payload(board: dict, rows: List[Any]) -> Dict[str, Any]:
             "release_info": str(row.get("releaseInfo") or ""),
             "show_date": _board_text(row, "show_date", board),
             "board": str(row.get("board") or board.get("board") or ""),
+            "title_cn": str(row.get("title_cn") or ""),
             "box_office": str(row.get("box_office") or ""),
+            "total_box_office": str(row.get("total_box_office") or ""),
             "heat": str(row.get("heat") or ""),
             "media_source": str(row.get("media_source") or ""),
             "media_id": str(row.get("media_id") or ""),
@@ -170,7 +174,7 @@ class MaoyanPro(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan-v2.png"
     # 插件版本
-    plugin_version = "1.2.1"
+    plugin_version = "1.2.2"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -205,20 +209,28 @@ class MaoyanPro(_PluginBase):
     # 实际抓取的榜单类型（由上方两组配置合并而来）
     _type = ['movie', 'web-movie', 'web-all', 'zongyi']
 
-    # 各组「订阅条数」与「推荐条数」：订阅条数为 0 表示不订阅该榜（仍抓取供推荐页），
-    # 推荐条数为 0 表示推荐页与榜单接口不展示该榜，两者都为 0 则该榜完全不抓取。
+    # 各组「订阅条数」与「推荐开关」：订阅条数为 0 表示不订阅该榜（仍抓取供推荐页），
+    # 推荐开关关闭表示推荐页与榜单接口不展示该榜；配置加载后派生出
+    # _xxx_rec_num（开=满榜 10 条，关=0），抓取与展示逻辑统一读派生值。
     _movie_sub_num = 10
-    _movie_rec_num = 20
+    _movie_rec_enabled = True
+    _movie_rec_num = 10
     _tv_sub_num = 10
-    _tv_rec_num = 20
+    _tv_rec_enabled = True
+    _tv_rec_num = 10
     _zongyi_sub_num = 10
-    _zongyi_rec_num = 20
+    _zongyi_rec_enabled = True
+    _zongyi_rec_num = 10
     # 平台细分榜只服务自动订阅（不写入榜单快照/推荐页），条数为 0 表示不订阅该平台
     _tx_sub_num = 0
     _iqy_sub_num = 0
     _mg_sub_num = 0
     _yk_sub_num = 0
-    # 平台细分榜「推荐条数」：>0 时该平台榜写入榜单快照/推荐页，0 表示不展示
+    # 平台细分榜「推荐开关」：开启时该平台榜写入榜单快照/推荐页
+    _tx_rec_enabled = False
+    _iqy_rec_enabled = False
+    _mg_rec_enabled = False
+    _yk_rec_enabled = False
     _tx_rec_num = 0
     _iqy_rec_num = 0
     _mg_rec_num = 0
@@ -231,6 +243,9 @@ class MaoyanPro(_PluginBase):
     # 榜单类型 -> 中文名；用于对外接口与推荐源的展示名称
     _TYPE_NAMES = {
         'movie': '电影票房',
+        'total': '影史总票房',
+        'year': '国内年度票房',
+        'global': '全球年度票房',
         'web-movie': '网络电影',
         'web-all': '剧集综合',
         'zongyi': '综艺热度',
@@ -239,6 +254,9 @@ class MaoyanPro(_PluginBase):
     # 榜单类型 -> 推荐页分类，取值与宿主前端 recommend.category* 的文案保持一致
     _RECOMMEND_TYPES = {
         'movie': '电影',
+        'total': '电影',
+        'year': '电影',
+        'global': '电影',
         'web-movie': '电影',
         'web-all': '电视剧',
         'zongyi': '电视剧',
@@ -247,13 +265,21 @@ class MaoyanPro(_PluginBase):
     # 榜单类型 -> 识别媒体时使用的类型（电影榜按电影识别，热度榜按剧集识别）
     _BOARD_MEDIA_TYPES = {
         'movie': MediaType.MOVIE,
+        'total': MediaType.MOVIE,
+        'year': MediaType.MOVIE,
+        'global': MediaType.MOVIE,
         'web-movie': MediaType.MOVIE,
         'web-all': MediaType.TV,
         'zongyi': MediaType.TV,
     }
 
-    # 单次刷新最多识别的条目数：平台细分榜会让待识别条目变多，超出的留待下次刷新补齐
+    # 单次刷新最多识别的条目数：平台细分榜会让待识别条目变多，超出的留待下次刷新补齐。
+    # 识别结果会持久化（identity_cache），因此限额只影响「新条目」的收敛速度，
+    # 老条目跨轮复用缓存，不会每轮从零识别（v3 每次调度都重建插件实例，内存缓存必丢）。
     _RESOLVE_LIMIT = 80
+    # 识别缓存 TTL：已识别到媒体且拿到海报的条目长期有效；
+    # 只拿到兜底海报（或啥都没有）的条目过期后重试 —— 新节目可能随后上架 TMDB
+    _IDENTITY_TTL_FALLBACK = 2 * 86400
 
     # 猫眼热度接口的 platformType -> 平台名；空值代表全网
     _PLATFORM_NAMES = {
@@ -272,8 +298,12 @@ class MaoyanPro(_PluginBase):
 
     # 「订阅条数」候选项：0 表示不订阅该榜（仍抓取供推荐页展示）
     _SUB_NUM_ITEMS = [{'title': str(num), 'value': num} for num in (0, 1, 2, 3, 5, 7, 10)]
-    # 「推荐条数」候选项：0 表示推荐页与榜单接口不展示该榜
-    _REC_NUM_ITEMS = [{'title': str(num), 'value': num} for num in (0, 5, 10, 15, 20, 30, 50)]
+    # 推荐已改为开关：猫眼单个榜单最多 10 条，开关打开即按满榜抓取与展示
+    _REC_BOARD_MAX = 10
+    # 影史总票房榜 / 国内年度票房榜为静态总榜，无订阅语义，固定抓取条数
+    _TOTAL_BOARD_FETCH_NUM = 30
+    # 全球年度票房榜（Box Office Mojo 年度全球榜）为静态总榜，无订阅语义，固定抓取条数
+    _GLOBAL_BOARD_FETCH_NUM = 30
     # 平台细分榜配置：(新配置键, 旧的条数键, 旧的开关键)
     _PLATFORM_CONFIG_KEYS = (
         ('tx_sub_num', 'tx_num', 'tx_enabled'),
@@ -571,6 +601,24 @@ class MaoyanPro(_PluginBase):
                 api_path=f"plugin/{self.__class__.__name__}/rank-list?board_type=movie",
                 type=self._RECOMMEND_TYPES['movie'],
             ))
+        if 'total' in (self._type or []):
+            sources.append(schemas.RecommendMediaSource(
+                name="猫眼影史总票房",
+                api_path=f"plugin/{self.__class__.__name__}/rank-list?board_type=total",
+                type=self._RECOMMEND_TYPES['total'],
+            ))
+        if 'year' in (self._type or []):
+            sources.append(schemas.RecommendMediaSource(
+                name="国内年度票房",
+                api_path=f"plugin/{self.__class__.__name__}/rank-list?board_type=year",
+                type=self._RECOMMEND_TYPES['year'],
+            ))
+        if 'global' in (self._type or []):
+            sources.append(schemas.RecommendMediaSource(
+                name="全球年度票房",
+                api_path=f"plugin/{self.__class__.__name__}/rank-list?board_type=global",
+                type=self._RECOMMEND_TYPES['global'],
+            ))
         for board_type, board_label in (
                 ('web-all', '猫眼剧集综合热度'),
                 ('zongyi', '猫眼综艺热度')):
@@ -641,7 +689,8 @@ class MaoyanPro(_PluginBase):
                 media_source=row.get("media_source"),
                 media_id=row.get("media_id"),
             )
-            title = str(row.get("title") or "")
+            # 英文榜单条目优先用识别出的中文片名展示
+            title = str(row.get("title_cn") or "") or str(row.get("title") or "")
             # 平台页的标题带平台后缀，扁平列表里也能一眼区分来自哪个平台；
             # 显式指定 platform 的调用方拿原始标题即可
             if platform is None and platform_name and title:
@@ -704,18 +753,26 @@ class MaoyanPro(_PluginBase):
             item for item in merged_tv if item in ('web-all', 'zongyi')))
         self._type_movie = list(dict.fromkeys(
             item for item in (type_movie if type_movie is not None else self._type_movie)
-            if item in ('movie', 'web-movie')))
+            if item in ('movie', 'web-movie', 'total', 'year', 'global')))
         # 派生视图：仅供旧版字段回写，综艺类型已归属剧集
         self._type_zongyi = [item for item in self._type_tv if item == 'zongyi']
         self._type = [*self._type_movie, *self._type_tv]
 
         legacy_rec = config.get("recommend_num")
+        # 推荐已改为开关（v1.2.2）：开关打开按满榜（10 条）抓取与展示。
+        # 兼容旧配置：未出现开关键时按旧的数值字段 > 0 判定。
+        for name, legacy_default in (('movie', 20), ('tv', 20), ('zongyi', 20)):
+            enabled = config.get(f"{name}_rec_enabled")
+            if enabled is None:
+                enabled = self.__safe_num(
+                    config.get(f"{name}_rec_num", legacy_rec), legacy_default) > 0
+            enabled = bool(enabled)
+            setattr(self, f"_{name}_rec_enabled", enabled)
+            setattr(self, f"_{name}_rec_num",
+                    self._REC_BOARD_MAX if enabled else 0)
         self._movie_sub_num = self.__safe_num(config.get("movie_sub_num", config.get("num")), 10)
-        self._movie_rec_num = self.__safe_num(config.get("movie_rec_num", legacy_rec), 20)
         self._tv_sub_num = self.__safe_num(config.get("tv_sub_num", config.get("all_num")), 10)
-        self._tv_rec_num = self.__safe_num(config.get("tv_rec_num", legacy_rec), 20)
         self._zongyi_sub_num = self.__safe_num(config.get("zongyi_sub_num", config.get("all_num")), 10)
-        self._zongyi_rec_num = self.__safe_num(config.get("zongyi_rec_num", legacy_rec), 20)
         for new_key, num_key, enabled_key in self._PLATFORM_CONFIG_KEYS:
             if new_key in config:
                 num = self.__safe_num(config.get(new_key), 0)
@@ -726,7 +783,14 @@ class MaoyanPro(_PluginBase):
                 num = 0
             setattr(self, f"_{new_key}", num)
         for platform_type, (_, rec_key) in self._PLATFORM_NUM_KEYS.items():
-            setattr(self, f"_{rec_key}", self.__safe_num(config.get(rec_key), 0))
+            name = rec_key[:-8]  # 'tx_rec_num' -> 'tx'
+            rec_enabled = config.get(f"{name}_rec_enabled")
+            if rec_enabled is None:
+                rec_enabled = self.__safe_num(config.get(rec_key), 0) > 0
+            rec_enabled = bool(rec_enabled)
+            setattr(self, f"_{name}_rec_enabled", rec_enabled)
+            setattr(self, f"_{rec_key}",
+                    self._REC_BOARD_MAX if rec_enabled else 0)
 
     @staticmethod
     def __form_col(component: str, props: dict, md: int = 6) -> dict:
@@ -737,14 +801,14 @@ class MaoyanPro(_PluginBase):
             'content': [{'component': component, 'props': props}],
         }
 
-    def __num_col(self, model: str, label: str, recommend: bool = False) -> dict:
-        """构造条数选择列：订阅条数可选 0（不订阅），推荐条数可选 0（不展示）。"""
+    def __num_col(self, model: str, label: str) -> dict:
+        """构造订阅条数选择列：0 表示不订阅该榜（仍抓取供推荐页展示）。"""
         return self.__form_col('VSelect', {
             'chips': True,
             'multiple': False,
             'model': model,
             'label': label,
-            'items': self._REC_NUM_ITEMS if recommend else self._SUB_NUM_ITEMS,
+            'items': self._SUB_NUM_ITEMS,
         })
 
     def __type_col(self, model: str, label: str, items: List[dict]) -> dict:
@@ -758,7 +822,7 @@ class MaoyanPro(_PluginBase):
         })
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """提供订阅类型、订阅/推荐条数、平台订阅/推荐条数与执行周期配置。"""
+        """提供订阅类型、订阅条数、推荐开关、平台订阅/推荐配置与执行周期。"""
         rows = [
             # 基础开关与执行周期
             {
@@ -787,6 +851,9 @@ class MaoyanPro(_PluginBase):
                     self.__type_col('type_movie', '电影订阅类型', [
                         {'title': '电影票房榜单', 'value': 'movie'},
                         {'title': '网络电影榜单', 'value': 'web-movie'},
+                        {'title': '影史总票房榜', 'value': 'total'},
+                        {'title': '国内年度票房榜', 'value': 'year'},
+                        {'title': '全球年度票房榜', 'value': 'global'},
                     ]),
                     self.__type_col('type_tv', '剧集订阅类型', [
                         {'title': '剧集综合榜单（电视剧+网剧）', 'value': 'web-all'},
@@ -801,43 +868,47 @@ class MaoyanPro(_PluginBase):
                         'type': 'info',
                         'variant': 'tonal',
                         'text': '订阅类型决定抓取与展示哪些榜单；订阅条数为 0 表示不订阅该榜'
-                                '（仍会抓取供推荐页使用），推荐条数为 0 表示推荐页与榜单接口不展示该榜，'
-                                '两者都为 0 则该榜完全不抓取。',
+                                '（仍会抓取供推荐页使用），推荐开关关闭表示推荐页与榜单接口不展示该榜，'
+                                '订阅条数为 0 且推荐开关关闭则该榜完全不抓取。推荐按满榜展示'
+                                '（猫眼单个榜单最多 10 条）。',
                     }, md=12),
                 ],
             },
-            # 各组条数：订阅条数只影响自动订阅，推荐条数只影响推荐页/榜单接口
+            # 各组配置：左列订阅条数（只影响自动订阅），右列推荐开关（只影响推荐页/榜单接口）
             {
                 'component': 'VRow',
                 'content': [
                     self.__num_col('movie_sub_num', '电影榜单订阅条数'),
-                    self.__num_col('movie_rec_num', '电影榜单推荐条数', recommend=True),
+                    self.__form_col('VSwitch', {'model': 'movie_rec_enabled',
+                                                'label': '电影榜单推荐'}),
                 ],
             },
             {
                 'component': 'VRow',
                 'content': [
                     self.__num_col('tv_sub_num', '剧集榜单订阅条数'),
-                    self.__num_col('tv_rec_num', '剧集榜单推荐条数', recommend=True),
+                    self.__form_col('VSwitch', {'model': 'tv_rec_enabled',
+                                                'label': '剧集榜单推荐'}),
                 ],
             },
             {
                 'component': 'VRow',
                 'content': [
                     self.__num_col('zongyi_sub_num', '综艺榜单订阅条数'),
-                    self.__num_col('zongyi_rec_num', '综艺榜单推荐条数', recommend=True),
+                    self.__form_col('VSwitch', {'model': 'zongyi_rec_enabled',
+                                                'label': '综艺榜单推荐'}),
                 ],
             },
-            # 平台细分榜：每平台一行，左列订阅条数、右列推荐条数
+            # 平台细分榜：每平台一行，左列订阅条数、右列推荐开关
             {
                 'component': 'VRow',
                 'content': [
                     self.__form_col('VAlert', {
                         'type': 'info',
                         'variant': 'tonal',
-                        'text': '下方为各视频平台榜单的订阅/推荐条数（左订阅、右推荐）：'
-                                '订阅条数只影响自动订阅，推荐条数决定推荐页与榜单接口是否展示该平台榜单；'
-                                '两者都为 0 则该平台榜不抓取。',
+                        'text': '下方为各视频平台榜单的订阅条数与推荐开关（左订阅、右推荐）：'
+                                '订阅条数只影响自动订阅，推荐开关决定推荐页与榜单接口是否展示该平台榜单；'
+                                '订阅条数为 0 且推荐开关关闭则该平台榜不抓取。',
                     }, md=12),
                 ],
             },
@@ -845,28 +916,32 @@ class MaoyanPro(_PluginBase):
                 'component': 'VRow',
                 'content': [
                     self.__num_col('tx_sub_num', '腾讯视频订阅条数'),
-                    self.__num_col('tx_rec_num', '腾讯视频推荐条数', recommend=True),
+                    self.__form_col('VSwitch', {'model': 'tx_rec_enabled',
+                                                'label': '腾讯视频推荐'}),
                 ],
             },
             {
                 'component': 'VRow',
                 'content': [
                     self.__num_col('iqy_sub_num', '爱奇艺订阅条数'),
-                    self.__num_col('iqy_rec_num', '爱奇艺推荐条数', recommend=True),
+                    self.__form_col('VSwitch', {'model': 'iqy_rec_enabled',
+                                                'label': '爱奇艺推荐'}),
                 ],
             },
             {
                 'component': 'VRow',
                 'content': [
                     self.__num_col('mg_sub_num', '芒果TV订阅条数'),
-                    self.__num_col('mg_rec_num', '芒果TV推荐条数', recommend=True),
+                    self.__form_col('VSwitch', {'model': 'mg_rec_enabled',
+                                                'label': '芒果TV推荐'}),
                 ],
             },
             {
                 'component': 'VRow',
                 'content': [
                     self.__num_col('yk_sub_num', '优酷订阅条数'),
-                    self.__num_col('yk_rec_num', '优酷推荐条数', recommend=True),
+                    self.__form_col('VSwitch', {'model': 'yk_rec_enabled',
+                                                'label': '优酷推荐'}),
                 ],
             },
             # 对外接口与推荐页数据源
@@ -889,19 +964,19 @@ class MaoyanPro(_PluginBase):
             "type_movie": ['movie', 'web-movie'],
             "type_tv": ['web-all', 'zongyi'],
             "movie_sub_num": 10,
-            "movie_rec_num": 20,
+            "movie_rec_enabled": True,
             "tv_sub_num": 10,
-            "tv_rec_num": 20,
+            "tv_rec_enabled": True,
             "zongyi_sub_num": 10,
-            "zongyi_rec_num": 20,
+            "zongyi_rec_enabled": True,
             "tx_sub_num": 0,
             "iqy_sub_num": 0,
             "mg_sub_num": 0,
             "yk_sub_num": 0,
-            "tx_rec_num": 0,
-            "iqy_rec_num": 0,
-            "mg_rec_num": 0,
-            "yk_rec_num": 0,
+            "tx_rec_enabled": False,
+            "iqy_rec_enabled": False,
+            "mg_rec_enabled": False,
+            "yk_rec_enabled": False,
             "api_enabled": True,
             "recommend_enabled": False,
         }
@@ -1205,19 +1280,19 @@ class MaoyanPro(_PluginBase):
             # 仅作兼容回写：综艺类型已并入 type_tv，此字段是它的派生视图
             "type_zongyi": self._type_zongyi,
             "movie_sub_num": self._movie_sub_num,
-            "movie_rec_num": self._movie_rec_num,
+            "movie_rec_enabled": self._movie_rec_enabled,
             "tv_sub_num": self._tv_sub_num,
-            "tv_rec_num": self._tv_rec_num,
+            "tv_rec_enabled": self._tv_rec_enabled,
             "zongyi_sub_num": self._zongyi_sub_num,
-            "zongyi_rec_num": self._zongyi_rec_num,
+            "zongyi_rec_enabled": self._zongyi_rec_enabled,
             "tx_sub_num": self._tx_sub_num,
             "iqy_sub_num": self._iqy_sub_num,
             "mg_sub_num": self._mg_sub_num,
             "yk_sub_num": self._yk_sub_num,
-            "tx_rec_num": self._tx_rec_num,
-            "iqy_rec_num": self._iqy_rec_num,
-            "mg_rec_num": self._mg_rec_num,
-            "yk_rec_num": self._yk_rec_num,
+            "tx_rec_enabled": self._tx_rec_enabled,
+            "iqy_rec_enabled": self._iqy_rec_enabled,
+            "mg_rec_enabled": self._mg_rec_enabled,
+            "yk_rec_enabled": self._yk_rec_enabled,
             "api_enabled": self._api_enabled,
             "recommend_enabled": self._recommend_enabled,
         })
@@ -1311,6 +1386,23 @@ class MaoyanPro(_PluginBase):
             logger.error(f"获取猫眼榜单失败：{e}")
         # __get_url_info 会在内部重置榜单列表，抓取失败时此处回退为空列表
         last_boards = self._last_boards if isinstance(self._last_boards, list) else []
+        # 影史总票房榜是独立 SSR 页面，与 dashboard 接口分开发抓取；
+        # 只进快照/推荐页展示，不参与订阅
+        if 'total' in self._type:
+            total_board = self.__fetch_total_board(show_date, 'total')
+            if total_board is not None:
+                last_boards.append(total_board)
+        # 国内年度票房榜与影史榜共用同一页面（?year= 区分口径）
+        if 'year' in self._type:
+            year_board = self.__fetch_total_board(show_date, 'year')
+            if year_board is not None:
+                last_boards.append(year_board)
+        # 全球年度票房榜（Box Office Mojo）同样是独立站点，与猫眼 dashboard 分开发抓取；
+        # 只进快照/推荐页展示，不参与订阅
+        if 'global' in self._type:
+            global_board = self.__fetch_global_board()
+            if global_board is not None:
+                last_boards.append(global_board)
         # 先为榜单快照识别媒体身份与海报：推荐页/对外接口不依赖订阅开关，
         # 订阅流程随后复用这里的识别结果，不再重复请求识别链。
         self.__resolve_board_identities(last_boards)
@@ -1337,17 +1429,48 @@ class MaoyanPro(_PluginBase):
 
         同时写入逐条识别出的媒体身份，让接口返回的条目可直接用于订阅与跳转；
         抓取全失败时保留上一次快照，避免接口在异常时段返回空数据。
+        本轮没轮到识别的条目（识别限额截断）从上一份快照回填媒体身份与海报，
+        否则整份覆盖会让已补到的图「得而复失」。
         """
         resolved = getattr(self, "_resolved_identity", {}) or {}
+        # 上一份快照按标题建索引，用于回填本轮未识别条目
+        prev_map: dict = {}
+        try:
+            prev = self.get_data("snapshot") or {}
+            if isinstance(prev, dict):
+                for pb in prev.get("boards") or []:
+                    for pit in pb.get("items") or []:
+                        t = pit.get("title")
+                        if isinstance(t, str) and t and (pit.get("poster") or pit.get("media_id")):
+                            prev_map[t] = pit
+        except Exception as e:
+            logger.warning(f"读取上一份榜单快照失败，跳过海报回填：{e}")
         try:
             for board in boards:
                 for item in board.get("items", []):
-                    identity = resolved.get(item.get("title")) or {}
-                    item["media_source"] = identity.get("media_source", "")
-                    item["media_id"] = identity.get("media_id", "")
-                    item["poster"] = identity.get("poster", "")
-                    item["overview"] = identity.get("overview", "")
-                    item["year"] = identity.get("year", "")
+                    title = item.get("title")
+                    identity = resolved.get(title) if isinstance(title, str) else None
+                    if identity:
+                        item["media_source"] = identity.get("media_source", "")
+                        item["media_id"] = identity.get("media_id", "")
+                        item["poster"] = identity.get("poster", "")
+                        item["overview"] = identity.get("overview", "")
+                        item["year"] = identity.get("year", "")
+                        item["title_cn"] = identity.get("title_cn", "")
+                    elif title in prev_map:
+                        # 本轮限额截断没轮到识别：沿用上一份快照的身份，海报不丢
+                        p = prev_map[title]
+                        item["media_source"] = p.get("media_source", "")
+                        item["media_id"] = p.get("media_id", "")
+                        item["poster"] = p.get("poster", "")
+                        item["overview"] = p.get("overview", "")
+                        item["year"] = p.get("year", "")
+                        item["title_cn"] = p.get("title_cn", "")
+                    else:
+                        item["poster"] = ""
+                        item["media_source"] = ""
+                        item["media_id"] = ""
+                        item["title_cn"] = ""
                     item["type_name"] = self._TYPE_NAMES.get(item.get("board_type", ""), item.get("board_type", ""))
         except Exception as e:
             logger.error(f"猫眼榜单快照整理失败，仍按原始条目保存：{e}")
@@ -1369,10 +1492,33 @@ class MaoyanPro(_PluginBase):
 
         推荐页与对外接口在订阅关闭时同样需要海报与媒体身份，因此在抓取后统一识别一次：
         同一标题只识别一次，结果同时供快照补全与订阅流程复用。
+
+        识别结果持久化到 identity_cache（v3 每次调度重建插件实例，内存必丢）：
+        - 已识别到媒体且拿到海报的条目跨轮长期复用，不再请求识别链；
+        - 只有兜底海报（或全空）的条目 2 天后过期重试，新节目可能随后上架 TMDB；
+        - 限额 [_RESOLVE_LIMIT] 只数本轮真正发起识别的新条目，缓存命中的直接放行。
         """
         if not boards:
             return
+        if not hasattr(self, "_resolved_identity"):
+            self._resolved_identity = {}
+        if not hasattr(self, "_resolved_mediainfo"):
+            self._resolved_mediainfo = {}
         current_time = datetime.datetime.now()
+        # 恢复持久缓存：识别成功的长期有效，兜底/空结果按 TTL 过期后重试
+        try:
+            cached = self.get_data("identity_cache") or {}
+            if isinstance(cached, dict):
+                now_ts = current_time.timestamp()
+                for t, entry in cached.items():
+                    if not isinstance(t, str) or not t or not isinstance(entry, dict):
+                        continue
+                    if entry.get("media_source") and entry.get("poster"):
+                        self._resolved_identity[t] = entry
+                    elif now_ts - float(entry.get("ts") or 0) < self._IDENTITY_TTL_FALLBACK:
+                        self._resolved_identity[t] = entry
+        except Exception as e:
+            logger.warning(f"读取识别缓存失败，本轮从零识别：{e}")
         resolved = 0
         truncated = False
         for board in boards:
@@ -1390,10 +1536,16 @@ class MaoyanPro(_PluginBase):
                     title, item.get("releaseInfo"), mtype, current_time)
                 resolved += 1
                 if identity:
+                    identity["ts"] = current_time.timestamp()
                     self._resolved_identity[title] = identity
         if truncated:
             logger.warning(f"本次待识别条目超过 {self._RESOLVE_LIMIT} 条，"
-                           f"其余条目留待下次刷新补齐（宿主识别缓存会加速重复识别）")
+                           f"其余条目留待下次刷新补齐（识别结果已持久化，几轮内收敛）")
+        # 回写持久缓存（只存身份字典，MediaInfo 对象不序列化）
+        try:
+            self.save_data("identity_cache", self._resolved_identity)
+        except Exception as e:
+            logger.warning(f"保存识别缓存失败：{e}")
 
     def __recognize_board_item(self, title: str, release_info, mtype: MediaType,
                                current_time: datetime.datetime) -> dict:
@@ -1420,6 +1572,8 @@ class MaoyanPro(_PluginBase):
                 if attempt_year is None:
                     logger.info(f"猫眼条目 {title} 去掉年份后识别成功：{mediainfo.title_year}")
                 self._resolved_mediainfo[title] = mediainfo
+                # 英文榜单（如全球年度票房）需要中文名展示；与原标题一致时留空
+                cn_title = (mediainfo.title or "").strip()
                 return {
                     "media_source": mediainfo.media_source.value,
                     "media_id": str(mediainfo.media_id),
@@ -1427,9 +1581,10 @@ class MaoyanPro(_PluginBase):
                     "overview": mediainfo.overview or "",
                     "year": str(mediainfo.year or ""),
                     "type": mediainfo.type.value,
+                    "title_cn": cn_title if cn_title and cn_title != title else "",
                 }
         logger.warning(f"未识别到媒体信息，标题：{title}，年份：{year}")
-        poster = self.__douban_poster(title, mtype)
+        poster, cn_title = self.__douban_poster(title, mtype)
         if poster:
             logger.info(f"猫眼条目 {title} 未识别到媒体信息，已用豆瓣检索补齐海报")
         return {
@@ -1439,14 +1594,17 @@ class MaoyanPro(_PluginBase):
             "overview": "",
             "year": str(year or ""),
             "type": mtype.value,
+            "title_cn": cn_title if cn_title and cn_title != title else "",
         }
 
-    def __douban_poster(self, title: str, mtype: MediaType) -> str:
+    def __douban_poster(self, title: str, mtype: MediaType) -> tuple:
         """
         识别失败时用豆瓣检索兜底补一张海报（只补图，不提供媒体身份）。
 
         豆瓣图片有防盗链（无 Referer 返回 418），App 直连时同样需要补 Referer，
-        宿主图片代理则会自行带上，因此这里只负责给出可用的图片地址。
+        宿主图片代理则会自行带上，因此这里只负责给出可用的图片地址；
+        同时带回豆瓣词条标题（多为中文），供英文榜单条目转中文展示。
+        返回 (poster_url, cn_title)，检索失败时两者为空串。
         """
         try:
             candidates = RequestUtils(
@@ -1456,9 +1614,9 @@ class MaoyanPro(_PluginBase):
             ).get_json("https://movie.douban.com/j/subject_suggest", params={"q": title})
         except Exception as e:
             logger.debug(f"猫眼条目 {title} 豆瓣补图请求失败：{e}")
-            return ""
+            return "", ""
         if not isinstance(candidates, list):
-            return ""
+            return "", ""
         # 优先同名词条；剧集优先带集数（豆瓣 suggestion 用 episode 标记剧集）
         same_title = [c for c in candidates if isinstance(c, dict) and c.get("title") == title]
         pool = same_title or [c for c in candidates if isinstance(c, dict)]
@@ -1468,8 +1626,9 @@ class MaoyanPro(_PluginBase):
             img = candidate.get("img")
             if isinstance(img, str) and img.startswith("http"):
                 # 缩略图换中等尺寸，避免 App 里糊掉
-                return img.replace("/s_ratio_poster/", "/m_ratio_poster/")
-        return ""
+                return (img.replace("/s_ratio_poster/", "/m_ratio_poster/"),
+                        str(candidate.get("title") or "").strip())
+        return "", ""
 
     def set_sub(self, addr_list, history, mtype):
         """
@@ -1565,6 +1724,9 @@ class MaoyanPro(_PluginBase):
         except (ValueError, OverflowError):
             # 上游可能包含非法日期或异常大的天数，不应阻断媒体识别。
             return None
+        # 纯年份（全球年度票房榜等来源只提供年份线索）
+        if re.fullmatch(r"(?:19|20)\d{2}", release_info):
+            return int(release_info)
         return None
 
     @staticmethod
@@ -1887,6 +2049,9 @@ class MaoyanPro(_PluginBase):
             if box_office:
                 break
 
+        # 累计票房（总票房）：票房榜原始条目自带 sumBoxDesc，如「3.30亿」；其余榜单无此字段
+        total_box_office = str(item.get('sumBoxDesc') or "").strip()
+
         heat = ""
         for key in ('currHeatDesc', 'heatDesc', 'boxRate', 'barValue', 'viewCountDesc'):
             raw = item.get(key)
@@ -1896,6 +2061,7 @@ class MaoyanPro(_PluginBase):
 
         return {
             "box_office": box_office,
+            "total_box_office": total_box_office,
             "heat": heat,
             "show_count": str(item.get('showCount') or "").strip(),
             "release_info": str(info.get('releaseInfo') or "").strip(),
@@ -1929,12 +2095,220 @@ class MaoyanPro(_PluginBase):
                     "board_url": meta.get("board_url", ""),
                     "show_date": meta.get("show_date", ""),
                     "box_office": metrics["box_office"],
+                    "total_box_office": metrics["total_box_office"],
                     "heat": metrics["heat"],
                     "show_count": metrics["show_count"],
                 })
             except (TypeError, ValueError) as err:
                 logger.warning(f"猫眼{source}第 {rank} 条数据无效，跳过该条目：{err}")
         return items
+
+    @staticmethod
+    def __format_wan_amount(wan_value) -> str:
+        """把猫眼票房数值（单位：万元）拼成可读文本，如 1544614 -> 154.46亿。"""
+        try:
+            wan = int(str(wan_value).strip())
+        except (TypeError, ValueError):
+            return ""
+        if wan < 0:
+            return ""
+        if wan >= 10000:
+            return f"{wan / 10000:.2f}亿"
+        return f"{wan}万"
+
+    @classmethod
+    def __parse_total_board(cls, html: str, limit: int, source: str, meta: dict) -> List[dict]:
+        """
+        解析影史总票房榜（SSR 直出页面，无需签名）。
+
+        页面结构为 ul.row 列表：col0 名次、col1 片名+上映日期、col2 票房（万元）、
+        col3 平均票价、col4 场均人次。这里只取榜单需要的字段，解析失败跳过该行，
+        不影响其余条目。
+        """
+        meta = meta or {}
+        items = []
+        for rank, row in enumerate(
+                re.findall(r"<ul class=\"row\"[^>]*>(.*?)</ul>", html or "", re.S)[:limit],
+                start=1):
+            if 'first-line' not in row:
+                continue  # 表头行（排名/片名/票房…）没有条目内容，静默跳过
+            try:
+                cells = [re.sub(r"<[^>]+>", " ", cell).strip()
+                         for cell in re.findall(r"<li class=\"col[^\"]*\">(.*?)</li>", row, re.S)]
+                if len(cells) < 3:
+                    raise ValueError("缺少有效单元格")
+                # col1 同时装着片名与上映日期两个 <p>，但标签剥离后已合在一起；
+                # 直接从原始行里分别取 first-line / second-line
+                title_m = re.search(r"class=\"first-line\">(.*?)</p>", row, re.S)
+                release_m = re.search(r"class=\"second-line\">(.*?)</p>", row, re.S)
+                title = re.sub(r"\s+", " ", title_m.group(1)).strip() if title_m else ""
+                release = re.sub(r"\s+", " ", release_m.group(1)).strip() if release_m else ""
+                if not title:
+                    raise ValueError("缺少有效标题")
+                page_rank = cls.__safe_int(cells[0]) or rank
+                items.append({
+                    "title": title,
+                    "releaseInfo": release,
+                    "platformDesc": "",
+                    "rank": page_rank,
+                    "board": meta.get("board", source),
+                    "board_type": meta.get("board_type", ""),
+                    "board_url": meta.get("board_url", ""),
+                    "show_date": meta.get("show_date", ""),
+                    "box_office": cls.__format_wan_amount(cells[2]),
+                    "total_box_office": cls.__format_wan_amount(cells[2]),
+                    "heat": "",
+                    "show_count": "",
+                })
+            except (TypeError, ValueError) as err:
+                logger.warning(f"猫眼{source}第 {rank} 条数据无效，跳过该条目：{err}")
+        return items
+
+    def __fetch_total_board(self, show_date: str, board_type: str = "total") -> dict | None:
+        """
+        抓取国内总票房榜（https://piaofang.maoyan.com/rankings/year）。
+
+        board_type='total' 为影史总票房榜（不带年份参数），'year' 为国内年度票房榜
+        （带当前年份参数，猫眼按 ?year=YYYY 返回对应年度榜）。该页面为服务端直出
+        HTML，无需浏览器会话与签名校验；失败时返回 None，快照保留其余榜单数据。
+        """
+        year = datetime.datetime.now().year
+        board_name = '影史总票房榜单' if board_type == 'total' else '国内年度票房榜单'
+        url = 'https://piaofang.maoyan.com/rankings/year'
+        if board_type == 'year':
+            url = f'{url}?year={year}'
+        source = f"{board_name}（{url}）"
+        meta = self.__board_meta(url, board_name, board_type, show_date)
+        try:
+            response = RequestUtils(ua=self.get_random_user_agent()).get_res(url)
+            if response is None:
+                raise ValueError("未收到有效响应")
+            response.raise_for_status()
+            items = self.__parse_total_board(
+                response.text, self._TOTAL_BOARD_FETCH_NUM, source, meta)
+        except Exception as err:
+            logger.error(f"猫眼{source}获取失败，跳过该榜单：{err}")
+            return None
+        if not items:
+            logger.warning(f"猫眼{source}未解析到有效条目，跳过该榜单")
+            return None
+        logger.info(f"猫眼{source}获取到 {len(items)} 条有效记录")
+        return {
+            "board": meta["board"],
+            "type": meta["board_type"],
+            "type_name": meta["type_name"],
+            "platform": meta["platform"],
+            "platform_type": meta.get("platform_type", ""),
+            "show_date": meta["show_date"],
+            "url": meta["board_url"],
+            "count": len(items),
+            "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "items": items,
+        }
+
+    @staticmethod
+    def __format_usd_amount(raw_value) -> str:
+        """把 Box Office Mojo 票房数值（美元）拼成可读文本，如 2513503453 -> 25.14亿美元。"""
+        try:
+            usd = int(str(raw_value).replace("$", "").replace(",", "").strip())
+        except (TypeError, ValueError):
+            return ""
+        if usd <= 0:
+            return ""
+        if usd >= 100000000:
+            return f"{usd / 100000000:.2f}亿美元"
+        if usd >= 10000:
+            return f"{usd / 10000:.1f}万美元"
+        return f"{usd}美元"
+
+    @classmethod
+    def __parse_global_board(cls, html: str, limit: int, source: str, meta: dict) -> List[dict]:
+        """
+        解析全球年度票房榜（Box Office Mojo /year/world/{year}/，SSR 直出表格）。
+
+        每行 7 列：名次、片名、全球票房、北美票房、北美占比、海外票房、海外占比。
+        首行为表头（无 td），静默跳过；解析失败的行跳过，不影响其余条目。
+        条目语言为英文原名片名，媒体识别走 TMDB 原生支持，海报可正常补全。
+        """
+        meta = meta or {}
+        items = []
+        for rank, row in enumerate(
+                re.findall(r"<tr>(.*?)</tr>", html or "", re.S), start=1):
+            if "<td" not in row:
+                continue  # 表头行，静默跳过
+            try:
+                cells = [re.sub(r"<[^>]+>", " ", cell).strip()
+                         for cell in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+                if len(cells) < 3:
+                    raise ValueError("缺少有效单元格")
+                title = re.sub(r"\s+", " ", cells[1]).strip()
+                if not title:
+                    raise ValueError("缺少有效标题")
+                # releaseInfo 只用于媒体识别的年份线索，放榜单年份即可
+                release = str(meta.get("show_year") or "")
+                page_rank = cls.__safe_int(cells[0]) or rank
+                worldwide = cls.__format_usd_amount(cells[2])
+                items.append({
+                    "title": title,
+                    "releaseInfo": release,
+                    "platformDesc": "",
+                    "rank": page_rank,
+                    "board": meta.get("board", source),
+                    "board_type": meta.get("board_type", ""),
+                    "board_url": meta.get("board_url", ""),
+                    "show_date": meta.get("show_date", ""),
+                    "box_office": worldwide,
+                    "total_box_office": worldwide,
+                    "heat": "",
+                    "show_count": "",
+                })
+            except (TypeError, ValueError) as err:
+                logger.warning(f"{source}第 {rank} 行数据无效，跳过该条目：{err}")
+        return items
+
+    def __fetch_global_board(self) -> dict | None:
+        """
+        抓取全球年度票房榜（https://www.boxofficemojo.com/year/world/{年份}/）。
+
+        猫眼网页端无全球票房数据（专业版 App 独有、接口需 H5guard 签名），改用
+        IMDb 系 Box Office Mojo 的年度全球榜，SSR 直出无需签名；失败时返回 None，
+        快照保留其余榜单数据。
+        """
+        year = datetime.datetime.now().year
+        url = f"https://www.boxofficemojo.com/year/world/{year}/"
+        source = f"全球年度票房榜（{url}）"
+        meta = self.__board_meta(url, '全球年度票房榜单', 'global',
+                                 datetime.datetime.now().strftime("%Y-%m-%d"))
+        meta["show_year"] = year
+        try:
+            response = RequestUtils(
+                ua=self.get_random_user_agent(),
+                headers={"Accept-Language": "en-US,en;q=0.9"},
+            ).get_res(url)
+            if response is None:
+                raise ValueError("未收到有效响应")
+            response.raise_for_status()
+            items = self.__parse_global_board(
+                response.text, self._GLOBAL_BOARD_FETCH_NUM, source, meta)
+        except Exception as err:
+            logger.error(f"{source}获取失败，跳过该榜单：{err}")
+            return None
+        if not items:
+            logger.warning(f"{source}未解析到有效条目，跳过该榜单")
+            return None
+        logger.info(f"{source}获取到 {len(items)} 条有效记录")
+        return {
+            "board": meta["board"],
+            "type": meta["board_type"],
+            "type_name": meta["type_name"],
+            "platform": meta["platform"],
+            "platform_type": meta.get("platform_type", ""),
+            "show_date": meta["show_date"],
+            "url": meta["board_url"],
+            "count": len(items),
+            "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "items": items,
+        }
 
     @staticmethod
     def get_random_user_agent():

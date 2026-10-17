@@ -28,7 +28,7 @@
 | 插件 | 版本 | 简介 | 说明 |
 | --- | --- | --- | --- |
 | **[TgtoDrive STRM 同步](plugins/tgtodrivesync/README.md)**<br><sub>`TgtoDriveSync` · `plugins/tgtodrivesync`</sub> | v1.7.1 | 整理入库后自动调用 TgtoDrive OpenAPI 生成网盘 STRM，完成后刷新全部已配置媒体服务器并发送通知。 | [→ 插件说明](plugins/tgtodrivesync/README.md) |
-| **[猫眼榜单](plugins.v3/maoyanpro/README.md)**<br><sub>`MaoyanPro` · `plugins.v3/maoyanpro`</sub> | v1.2.1 | 猫眼榜单显示和订阅功能：抓取电影票房、剧集综合榜（电视剧+网剧）与综艺热度榜单并自动订阅（电影/剧集分开配置，订阅与推荐页数据源相互独立，爱优腾芒平台榜可单独配置订阅/推荐条数）；提供 `/rank`、`/rank-list`、`/refresh` 对外接口，可作为宿主推荐页数据源。 | [→ 插件说明](plugins.v3/maoyanpro/README.md) |
+| **[猫眼榜单](plugins.v3/maoyanpro/README.md)**<br><sub>`MaoyanPro` · `plugins.v3/maoyanpro`</sub> | v1.2.2 | 猫眼榜单显示和订阅功能：抓取电影票房、影史总票房、国内年度票房、全球年度票房（Box Office Mojo）、剧集综合榜（电视剧+网剧）与综艺热度榜单并自动订阅（电影/剧集分开配置，订阅与推荐页数据源相互独立，爱优腾芒平台榜可单独配置订阅条数与推荐开关）；提供 `/rank`、`/rank-list`、`/refresh` 对外接口，可作为宿主推荐页数据源。 | [→ 插件说明](plugins.v3/maoyanpro/README.md) |
 
 > **来源说明**：`猫眼榜单` **Fork 自 [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins)**
 > 的「猫眼榜单订阅」插件（原作者 [逗猫 @baozaodetudou](https://github.com/baozaodetudou)），基于上游 v4.1.4 改造为
@@ -127,7 +127,7 @@ Add `https://github.com/KingNuoNuo/MoviePilot-Plugins` as a custom market source
 | Plugin | Version | What it does | Docs |
 | --- | --- | --- | --- |
 | **TgtoDrive STRM Sync** (`TgtoDriveSync`) | v1.7.1 | Calls the official TgtoDrive OpenAPI when MoviePilot finishes transferring files (`TransferComplete`) to generate cloud-drive STRM links, waits for the sync, then refreshes every configured media server and sends a notification. | [→ Docs](plugins/tgtodrivesync/README.md) |
-| **MaoyanPro** (`MaoyanPro`) | v1.2.1 | Maoyan board display and subscription: scrapes box-office, combined TV+web-drama and variety popularity boards and auto-subscribes (per-platform Tencent/iQiyi/Mango/Youku sub-boards configurable for subscription and recommendation separately); exposes `/rank`, `/rank-list` and `/refresh` endpoints and can register itself as a host recommendation source. | [→ Docs](plugins.v3/maoyanpro/README.md) |
+| **MaoyanPro** (`MaoyanPro`) | v1.2.2 | Maoyan board display and subscription: scrapes box-office, combined TV+web-drama and variety popularity boards and auto-subscribes (per-platform Tencent/iQiyi/Mango/Youku sub-boards configurable per board (subscription count + recommendation switch)); exposes `/rank`, `/rank-list` and `/refresh` endpoints and can register itself as a host recommendation source. | [→ Docs](plugins.v3/maoyanpro/README.md) |
 
 > **Origin**: `MaoyanPro` is forked from [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins)
 > (original author [@baozaodetudou](https://github.com/baozaodetudou)), re-released as an
