@@ -174,7 +174,7 @@ class MaoyanPro(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan-v2.png"
     # 插件版本
-    plugin_version = "1.2.3"
+    plugin_version = "1.2.4"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -1780,7 +1780,9 @@ class MaoyanPro(_PluginBase):
                 for item in board.get("items", []):
                     title = item.get("title")
                     identity = resolved.get(title) if isinstance(title, str) else None
+                    release_date = ""
                     if identity:
+                        release_date = identity.get("release_date", "")
                         item["media_source"] = identity.get("media_source", "")
                         item["media_id"] = identity.get("media_id", "")
                         item["poster"] = identity.get("poster", "")
@@ -1790,6 +1792,12 @@ class MaoyanPro(_PluginBase):
                     elif title in prev_map:
                         # 本轮限额截断没轮到识别：沿用上一份快照的身份，海报不丢
                         p = prev_map[title]
+                        release_date = p.get("release_date", "")
+                        if not release_date:
+                            # 上一份快照条目里已是完整日期的（此前轮次补全过），直接继承
+                            p_rel = str(p.get("releaseInfo") or "").strip()
+                            if re.match(r"^\d{4}[-年/.]", p_rel):
+                                release_date = p_rel[:10]
                         item["media_source"] = p.get("media_source", "")
                         item["media_id"] = p.get("media_id", "")
                         item["poster"] = p.get("poster", "")
@@ -1801,6 +1809,12 @@ class MaoyanPro(_PluginBase):
                         item["media_source"] = ""
                         item["media_id"] = ""
                         item["title_cn"] = ""
+                    # 全球榜数据源（Box Office Mojo）不带上映日期，条目里只有榜单年份；
+                    # 识别到 TMDB 发行日期后补成与国内榜一致的「YYYY-MM-DD 上映」。
+                    # 已是完整日期的（国内榜猫眼原生数据）原样保留
+                    rel_now = str(item.get("releaseInfo") or "").strip()
+                    if release_date and not re.match(r"^\d{4}[-年/.]", rel_now):
+                        item["releaseInfo"] = f"{release_date} 上映"
                     item["type_name"] = self._TYPE_NAMES.get(item.get("board_type", ""), item.get("board_type", ""))
         except Exception as e:
             logger.error(f"猫眼榜单快照整理失败，仍按原始条目保存：{e}")
@@ -1843,7 +1857,9 @@ class MaoyanPro(_PluginBase):
                 for t, entry in cached.items():
                     if not isinstance(t, str) or not t or not isinstance(entry, dict):
                         continue
-                    if entry.get("media_source") and entry.get("poster"):
+                    # 「release_date」键是补上映日期能力加入后才有的：旧缓存条目视为过期，
+                    # 重识别一轮把日期补进 identity（一次性的收敛成本，识别链自身有缓存）
+                    if entry.get("media_source") and entry.get("poster") and "release_date" in entry:
                         self._resolved_identity[t] = entry
                     elif now_ts - float(entry.get("ts") or 0) < self._IDENTITY_TTL_FALLBACK:
                         self._resolved_identity[t] = entry
@@ -1904,6 +1920,12 @@ class MaoyanPro(_PluginBase):
                 self._resolved_mediainfo[title] = mediainfo
                 # 英文榜单（如全球年度票房）需要中文名展示；与原标题一致时留空
                 cn_title = (mediainfo.title or "").strip()
+                # TMDB 原始发行日期（电影 release_date / 剧集 first_air_date），
+                # 供全球榜条目把「只有年份」的上映信息补成完整日期（App 端直接渲染）
+                raw_info = getattr(mediainfo, "tmdb_info", None) or {}
+                rel_date = str(raw_info.get("release_date")
+                               or raw_info.get("first_air_date")
+                               or getattr(mediainfo, "release_date", None) or "").strip()[:10]
                 return {
                     "media_source": mediainfo.media_source.value,
                     "media_id": str(mediainfo.media_id),
@@ -1912,6 +1934,7 @@ class MaoyanPro(_PluginBase):
                     "year": str(mediainfo.year or ""),
                     "type": mediainfo.type.value,
                     "title_cn": cn_title if cn_title and cn_title != title else "",
+                    "release_date": rel_date,
                 }
         logger.warning(f"未识别到媒体信息，标题：{title}，年份：{year}")
         poster, cn_title = self.__douban_poster(title, mtype)
@@ -1925,6 +1948,7 @@ class MaoyanPro(_PluginBase):
             "year": str(year or ""),
             "type": mtype.value,
             "title_cn": cn_title if cn_title and cn_title != title else "",
+            "release_date": "",
         }
 
     def __douban_poster(self, title: str, mtype: MediaType) -> tuple:
