@@ -2,6 +2,7 @@ import datetime
 import json
 import random
 import re
+import time
 from threading import Event
 from typing import Tuple, List, Dict, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -174,7 +175,7 @@ class MaoyanPro(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan-v2.png"
     # 插件版本
-    plugin_version = "1.2.4"
+    plugin_version = "1.2.5"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -291,6 +292,16 @@ class MaoyanPro(_PluginBase):
     # 识别结果会持久化（identity_cache），因此限额只影响「新条目」的收敛速度，
     # 老条目跨轮复用缓存，不会每轮从零识别（v3 每次调度都重建插件实例，内存缓存必丢）。
     _RESOLVE_LIMIT = 80
+    # 积压时临时抬高的上限：待识别条目超过 _RESOLVE_LIMIT 说明有整批新条目（或缓存
+    # 整体过期），按常规限额要好几轮才轮到排在最后的全球年度票房榜 —— 实测那里新进榜
+    # 条目会长期空海报（Obsession 就是），所以积压时一轮多识别一些。
+    _RESOLVE_LIMIT_BACKLOG = 240
+    # 单轮识别的时间预算（秒）：识别一条要请求 TMDB，条数再多也不能把整轮刷新拖死；
+    # 超时就收工，没轮到的条目靠「缺图优先」排序在下一轮排到最前面。
+    _RESOLVE_TIME_BUDGET = 180.0
+    # 被限额/超时截断、且上一份快照里本来也没图的条目，用豆瓣 suggest 补一张兜底图
+    # （单次 HTTP、不走识别链，很便宜），避免「新进榜条目空一个灰洞」。
+    _POSTER_FALLBACK_LIMIT = 60
     # 识别缓存 TTL：已识别到媒体且拿到海报的条目长期有效；
     # 只拿到兜底海报（或啥都没有）的条目过期后重试 —— 新节目可能随后上架 TMDB
     _IDENTITY_TTL_FALLBACK = 2 * 86400
@@ -1840,7 +1851,12 @@ class MaoyanPro(_PluginBase):
         识别结果持久化到 identity_cache（v3 每次调度重建插件实例，内存必丢）：
         - 已识别到媒体且拿到海报的条目跨轮长期复用，不再请求识别链；
         - 只有兜底海报（或全空）的条目 2 天后过期重试，新节目可能随后上架 TMDB；
-        - 限额 [_RESOLVE_LIMIT] 只数本轮真正发起识别的新条目，缓存命中的直接放行。
+        - 限额只数本轮真正发起识别的新条目，缓存命中的直接放行。
+
+        ⚠️ 队列不再按榜单固定顺序走，而是「缺图 / 缺日期优先 + 连续失败次数少的优先」：
+        以前按 board 顺序识别，全球年度票房榜排在 4 个电影榜最后，攒够 400 条待识别条目时
+        它每一轮都被 80 条限额截断 —— 结果该榜新进榜条目长期没有海报（如 Obsession），
+        上映日期也永远补不上（日期只能靠 TMDB 识别拿）。按缺失程度排序后，新条目最多等一轮。
         """
         if not boards:
             return
@@ -1849,10 +1865,12 @@ class MaoyanPro(_PluginBase):
         if not hasattr(self, "_resolved_mediainfo"):
             self._resolved_mediainfo = {}
         current_time = datetime.datetime.now()
+        raw_cache: dict = {}
         # 恢复持久缓存：识别成功的长期有效，兜底/空结果按 TTL 过期后重试
         try:
             cached = self.get_data("identity_cache") or {}
             if isinstance(cached, dict):
+                raw_cache = cached
                 now_ts = current_time.timestamp()
                 for t, entry in cached.items():
                     if not isinstance(t, str) or not t or not isinstance(entry, dict):
@@ -1866,33 +1884,114 @@ class MaoyanPro(_PluginBase):
                         self._resolved_identity[t] = entry
         except Exception as e:
             logger.warning(f"读取识别缓存失败，本轮从零识别：{e}")
-        resolved = 0
-        truncated = False
+
+        # 上一份快照按标题建索引：判断「这条现在在页面上有没有图」，决定识别优先级
+        prev_map = self.__prev_snapshot_map()
+
+        # 收集待识别条目并排序：连续失败多的沉到最后，避免「认不出来的条目」每轮占满预算
+        pending: List[tuple] = []
+        order = 0
         for board in boards:
             mtype = self._BOARD_MEDIA_TYPES.get(board.get("type"), MediaType.TV)
             for item in board.get("items", []):
                 title = item.get("title")
+                order += 1
                 if not isinstance(title, str) or not title.strip():
                     continue
                 if title in self._resolved_identity:
                     continue
-                if resolved >= self._RESOLVE_LIMIT:
-                    truncated = True
-                    continue
-                identity = self.__recognize_board_item(
-                    title, item.get("releaseInfo"), mtype, current_time)
-                resolved += 1
-                if identity:
-                    identity["ts"] = current_time.timestamp()
-                    self._resolved_identity[title] = identity
-        if truncated:
-            logger.warning(f"本次待识别条目超过 {self._RESOLVE_LIMIT} 条，"
-                           f"其余条目留待下次刷新补齐（识别结果已持久化，几轮内收敛）")
+                prev = prev_map.get(title) or {}
+                need_poster = not str(prev.get("poster") or "").strip()
+                # releaseInfo 只有年份（全球榜的 Box Office Mojo 就是这种）也算「缺日期」
+                need_date = not re.match(
+                    r"^\d{4}[-年/.]", str(item.get("releaseInfo") or "").strip())
+                miss = int((raw_cache.get(title) or {}).get("miss") or 0)
+                pending.append((
+                    miss,                                   # 连续失败次数少的先来
+                    0 if (need_poster or need_date) else 1,  # 缺图/缺日期的先来
+                    order,                                  # 同优先级保持榜单原顺序
+                    title, item.get("releaseInfo"), mtype,
+                ))
+        pending.sort(key=lambda p: (p[0], p[1], p[2]))
+
+        # 积压多时抬高一轮的上限，配合时间预算避免刷新被拖死
+        limit = (self._RESOLVE_LIMIT_BACKLOG
+                 if len(pending) > self._RESOLVE_LIMIT else self._RESOLVE_LIMIT)
+        started = time.monotonic()
+        resolved = 0
+        timed_out = False
+        for miss, _prio, _order, title, release_info, mtype in pending:
+            if resolved >= limit:
+                break
+            if resolved and time.monotonic() - started > self._RESOLVE_TIME_BUDGET:
+                timed_out = True
+                break
+            identity = self.__recognize_board_item(
+                title, release_info, mtype, current_time) or {}
+            resolved += 1
+            # 没识别到媒体身份 = 这条「认不出来」，累计失败次数让它在后续轮次沉底
+            identity["miss"] = 0 if identity.get("media_source") else miss + 1
+            identity["ts"] = current_time.timestamp()
+            self._resolved_identity[title] = identity
+
+        # B：被限额/超时截断、且上一份快照里也没图的条目，至少补一张兜底海报。
+        # 它们正是 App 里会显示成灰洞的那批（新进榜 + 排在最后），不补的话要等好几轮。
+        fallback = 0
+        for miss, _prio, _order, title, release_info, mtype in pending[resolved:]:
+            if fallback >= self._POSTER_FALLBACK_LIMIT:
+                break
+            if title in self._resolved_identity:
+                continue
+            if not (prev_map.get(title) or {}).get("poster"):
+                poster, cn_title = self.__douban_poster(title, mtype)
+                fallback += 1
+                year = self.__release_year(release_info, current_time)
+                self._resolved_identity[title] = {
+                    "media_source": "",
+                    "media_id": "",
+                    "poster": poster,
+                    "overview": "",
+                    "year": str(year or ""),
+                    "type": mtype.value,
+                    "title_cn": cn_title if cn_title and cn_title != title else "",
+                    "release_date": "",
+                    "ts": current_time.timestamp(),
+                    # 兜底也没补到图：累计失败次数，下一轮沉到后面，别反复占用兜底额度
+                    "miss": miss if poster else miss + 1,
+                }
+                if poster:
+                    logger.info(f"猫眼条目 {title} 本轮未轮到识别，已用豆瓣检索补齐海报")
+            else:
+                # 上一份快照有图：__save_snapshot 会按标题回填，不必再请求
+                continue
+
+        left = len(pending) - resolved
+        if left > 0:
+            logger.warning(
+                f"本次待识别 {len(pending)} 条，已识别 {resolved} 条"
+                f"{'（超出时间预算 %ds）' % int(self._RESOLVE_TIME_BUDGET) if timed_out else ''}，"
+                f"剩余 {left} 条下一轮优先处理（缺图/缺日期的排最前）")
         # 回写持久缓存（只存身份字典，MediaInfo 对象不序列化）
         try:
             self.save_data("identity_cache", self._resolved_identity)
         except Exception as e:
             logger.warning(f"保存识别缓存失败：{e}")
+
+    def __prev_snapshot_map(self) -> dict:
+        """上一份榜单快照按标题建索引（幂等，读不到就返回空表）。"""
+        try:
+            prev = self.get_data("snapshot") or {}
+        except Exception as e:
+            logger.debug(f"读取上一份榜单快照失败，按全新条目处理：{e}")
+            return {}
+        result: dict = {}
+        if isinstance(prev, dict):
+            for board in prev.get("boards") or []:
+                for item in board.get("items") or []:
+                    title = item.get("title")
+                    if isinstance(title, str) and title:
+                        result[title] = item
+        return result
 
     def __recognize_board_item(self, title: str, release_info, mtype: MediaType,
                                current_time: datetime.datetime) -> dict:
@@ -1924,6 +2023,10 @@ class MaoyanPro(_PluginBase):
                 # TMDB 原始发行日期（电影 release_date / 剧集 first_air_date），
                 # 供全球榜条目把「只有年份」的上映信息补成完整日期（App 端直接渲染）
                 raw_info = getattr(mediainfo, "tmdb_info", None) or {}
+                # tmdb_info 理论上就是 dict；万一宿主换实现成了对象，这里直接 .get 会抛
+                # AttributeError 把整轮刷新掀翻，所以先做类型兜底
+                if not isinstance(raw_info, dict):
+                    raw_info = {}
                 rel_date = str(raw_info.get("release_date")
                                or raw_info.get("first_air_date")
                                or getattr(mediainfo, "release_date", None) or "").strip()[:10]
