@@ -52,7 +52,7 @@ class GlobalRankPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/globalrank.png")
     # 插件版本
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -209,10 +209,9 @@ class GlobalRankPro(_PluginBase):
                 'maoyan_iqy_sub_num': maoyan._iqy_sub_num,
                 'maoyan_mg_sub_num': maoyan._mg_sub_num,
                 'maoyan_yk_sub_num': maoyan._yk_sub_num,
-                'maoyan_tx_rec_enabled': maoyan._tx_rec_enabled,
-                'maoyan_iqy_rec_enabled': maoyan._iqy_rec_enabled,
-                'maoyan_mg_rec_enabled': maoyan._mg_rec_enabled,
-                'maoyan_yk_rec_enabled': maoyan._yk_rec_enabled,
+                # 平台细分榜展示开关收敛成一个多选（值 = 平台代码）
+                'maoyan_platforms': [name for name in maoyan._PLATFORM_CODES
+                                     if getattr(maoyan, f"_{name}_rec_enabled", False)],
             })
         netflix = self.sources.get(SOURCE_NETFLIX)
         if netflix is not None:

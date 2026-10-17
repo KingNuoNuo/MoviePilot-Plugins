@@ -487,7 +487,8 @@ def test_get_form_contains_both_sources(plugin):
     assert any("VForm" in blob for blob in blobs)
     form_blob = "".join(blobs)
     for label in ("启用插件", "立即运行一次", "执行周期", "推荐页取数授权",
-                  "接入推荐页", "清理插件数据", "自动订阅条数", "榜单地区"):
+                  "接入推荐页", "清理插件数据", "自动全网订阅", "自动平台榜订阅",
+                  "榜单地区"):
         assert label in form_blob
     # 猫眼配置
     assert "猫眼榜单" in form_blob
@@ -497,7 +498,12 @@ def test_get_form_contains_both_sources(plugin):
     for label in ("猫眼全网电影榜", "猫眼全网剧集榜", "猫眼全网综艺榜"):
         assert label in form_blob
     assert "全球年度" in form_blob
-    # 没有消费方的遗留开关不再出现在表单上，避免「开了没反应」
+    # 平台细分榜：多选决定抓哪些平台并写进快照，条数只管订阅
+    for label in ("平台专项榜", "腾讯视频", "爱奇艺", "芒果TV", "优酷"):
+        assert label in form_blob
+    assert "maoyan_platforms" in form_blob
+    # 零散开关不再出现在表单上，避免「开了没反应」
+    # （主榜抓不抓由「榜单类型」多选控制，*_rec_enabled 同样冗余）
     for dead in ("maoyan_sub_enabled", "maoyan_movie_rec_enabled",
                  "maoyan_tx_rec_enabled"):
         assert dead not in form_blob
@@ -508,7 +514,7 @@ def test_get_form_contains_both_sources(plugin):
 
     assert defaults["maoyan_type_movie"] == ["movie"]
     assert defaults["netflix_regions"] == ["global", "hk"]
-    assert defaults["maoyan_movie_rec_enabled"] is True
+    assert defaults["maoyan_platforms"] == []  # 旧配置无 platforms 键 → 全不勾
 
 
 def test_get_form_reflects_saved_config(plugin):
@@ -524,152 +530,95 @@ def test_get_form_reflects_saved_config(plugin):
     assert defaults["netflix_regions"] == ["tw"]
 
 
-def test_get_page_renders_both_sources(plugin):
-    """详情页同时渲染两个数据源的榜单分区。"""
+def test_platform_multiselect_roundtrip(plugin):
+    """platforms 多选 ↔ 各平台展示开关的双向转换，含旧开关配置的兼容读。"""
+    from app.plugins.globalrankpro.base import SOURCE_MAOYAN
+
+    picked = make_plugin({'maoyan_platforms': ['tx', 'mg']}, with_snapshots=False)
+    maoyan = picked.sources[SOURCE_MAOYAN]
+    assert maoyan._tx_rec_enabled is True and maoyan._tx_rec_num == 10
+    assert maoyan._iqy_rec_enabled is False and maoyan._yk_rec_enabled is False
+    # 表单回显勾选结果
+    _, defaults = picked.get_form()
+    assert defaults["maoyan_platforms"] == ["tx", "mg"]
+    # 序列化只回传多选键，不再输出零散开关
+    assert picked.serialize_config()["maoyan_platforms"] == ["tx", "mg"]
+    assert "maoyan_tx_rec_enabled" not in picked.serialize_config()
+
+    # 旧配置（无 platforms 键）按 *_rec_enabled 迁移
+    legacy = make_plugin({'maoyan_tx_rec_enabled': True,
+                          'maoyan_yk_rec_enabled': True}, with_snapshots=False)
+    legacy_maoyan = legacy.sources[SOURCE_MAOYAN]
+    assert legacy_maoyan._tx_rec_enabled is True
+    assert legacy_maoyan._iqy_rec_enabled is False
+    _, legacy_defaults = legacy.get_form()
+    assert legacy_defaults["maoyan_platforms"] == ["tx", "yk"]
+
+
+def test_get_page_shows_subscription_only(plugin):
+    """详情页 = App 推荐 + 两源概览 + 订阅记录，不再平铺榜单条目。"""
     nodes = plugin.get_page()
     blob = json.dumps(nodes, ensure_ascii=False)
 
-    assert "MoviePilotApp" in blob
-    assert "猫眼榜单" in blob
-    assert "Netflix 榜单" in blob
-    # 两源各自的刷新按钮，params 带 source
-    assert "\"source\": \"maoyan\"" in blob
-    assert "\"source\": \"netflix\"" in blob
-    # 猫眼条目与量值
-    assert "生化危机：爆发夜" in blob
-    assert "161.93万" in blob
-    # Netflix 条目、中文片名与观看量
-    assert "炸弹追缉令" in blob
-    assert "4150 万小时" in blob
-    assert "2490 万次观看" in blob
-    # 订阅历史区（猫眼专有）
-    assert "订阅历史" in blob
+    # 顶部就是 App 推荐卡
+    assert "MoviePilotApp" in json.dumps(nodes[0], ensure_ascii=False)
+    # 概览保留两源统计与独立刷新入口
+    assert "猫眼榜单" in blob and "Netflix 榜单" in blob
+    assert '"source": "maoyan"' in blob and '"source": "netflix"' in blob
+    # 榜单条目不再上页面（数据走 /rank、/rank-list 供推荐页与 App）
+    assert "生化危机：爆发夜" not in blob
+    assert "161.93万" not in blob
+    assert "炸弹追缉令" not in blob
+    # 订阅记录卡存在；测试夹具没有订阅数据，显示空态
+    assert "自动订阅记录" in blob
+    assert "暂无订阅记录" in blob
 
 
-def test_get_page_platform_boards_show_main_board_only(plugin):
-    """同一 type 有多份平台细分榜时，详情页只展示全网主榜。"""
-    snapshot = maoyan_snapshot()
-    platform_board = json.loads(json.dumps(snapshot["boards"][1]))
-    platform_board["board"] = "剧集综合榜单（腾讯视频）"
-    platform_board["platform"] = "腾讯视频"
-    platform_board["platform_type"] = "3"
-    snapshot["boards"].append(platform_board)
-    plugin.sources[SOURCE_MAOYAN].save_data("snapshot", snapshot)
+def test_get_page_history_table(plugin):
+    """订阅记录表格渲染标题、平台、时间与 TMDB 跳转。"""
+    plugin.sources[SOURCE_MAOYAN].save_data("history", [{
+        "title": "许我耀眼", "type": "电视剧", "platformDesc": "腾讯视频",
+        "releaseInfo": "上线3天", "time": "2026-10-17 08:00:00",
+        "media_source": "themoviedb", "media_id": "241561",
+        "poster": "https://image.tmdb.org/t/p/w500/a.jpg",
+    }])
 
     blob = json.dumps(plugin.get_page(), ensure_ascii=False)
 
-    assert blob.count("剧集综合") == 1 + blob.count("platform_type")
-    assert "剧集综合榜单（腾讯视频）" not in blob
+    assert "许我耀眼" in blob
+    assert "腾讯视频" in blob
+    assert "themoviedb.org" in blob  # 标题带 TMDB 链接
+    assert "1 条" in blob
 
 
 def test_get_page_warns_when_source_disabled(plugin):
-    """关掉的数据源在详情页给出启用提示而不是空白。"""
+    """关掉的数据源在概览卡标「未启用」，且不给刷新按钮。"""
     plugin._GlobalRankPro__apply_config({
         'maoyan_enabled': True, 'netflix_enabled': False})
 
     blob = json.dumps(plugin.get_page(), ensure_ascii=False)
 
-    assert "Netflix 榜单数据源未启用" in blob
-    assert "Netflix 全球 · 电影（英语）" not in blob
+    assert "Netflix 榜单" in blob
+    assert "未启用" in blob
+    assert "在设置里启用" in blob
 
 
 def test_get_page_without_snapshot_shows_hint():
-    """无快照时给出刷新提示，不炸。"""
+    """无快照时概览标「暂无快照」，页面不炸。"""
     blob = json.dumps(make_plugin(with_snapshots=False).get_page(),
                       ensure_ascii=False)
-    assert "暂无榜单快照" in blob
+    assert "暂无快照" in blob
     assert "刷新" in blob
 
 
-def test_get_page_rank_badge_uses_node_text(plugin):
-    """名次角标必须把数字放在节点 text 上。
-
-    放进 props 时宿主不认（当成未知属性丢掉），海报左上角只剩一个空色块。
-    """
-    def walk(node):
-        if isinstance(node, list):
-            for item in node:
-                yield from walk(item)
-        elif isinstance(node, dict):
-            yield node
-            yield from walk(node.get("content") or [])
-
-    badges = [
-        node for node in walk(plugin.get_page())
-        if node.get("component") == "span"
-        and (node.get("props") or {}).get("style", {}).get("position") == "absolute"
-        and "border-radius" in (node.get("props") or {}).get("style", {})
-    ]
-
-    assert badges, "详情页应渲染名次角标"
-    for badge in badges:
-        assert "text" not in badge["props"], "text 不能放在 props 里"
-        assert str(badge.get("text") or "").strip(), "角标缺名次数字"
-
-
-def test_get_page_netflix_board_titles_use_board_name(plugin):
-    """Netflix 分区标题取榜单名，不能只按地区+类型拼（全球榜会重名）。"""
-    snapshot = netflix_snapshot()
-    second = json.loads(json.dumps(snapshot["boards"][0]))
-    second["board"] = "Netflix 全球 · 电影（非英语）"
-    second["category"] = "Films (Non-English)"
-    second["category_name"] = "电影（非英语）"
-    snapshot["boards"].append(second)
-    plugin.sources[SOURCE_NETFLIX].save_data("snapshot", snapshot)
-
-    blob = json.dumps(plugin.get_page(), ensure_ascii=False)
-
-    assert "全球 · 电影（英语）" in blob
-    assert "全球 · 电影（非英语）" in blob
-    # 旧写法会把两份都渲染成「全球电影」
-    assert "全球电影" not in blob
-
-
-def test_page_boards_are_accordion_panels(plugin):
-    """每个榜单是一个折叠面板，一次只展开一个。
-
-    宿主 JSON 页面渲染器没有 v-model，横排 VTabs 切不动窗口内容，只能用
-    VExpansionPanels（官方 JSON 模式插件的做法）。这条用例把结构固定下来，
-    避免以后退回「所有榜单平铺、靠滚动翻页」。
-    """
-    def walk(node):
-        if isinstance(node, list):
-            for item in node:
-                yield from walk(item)
-        elif isinstance(node, dict):
-            yield node
-            yield from walk(node.get("content") or [])
-
-    nodes = list(walk(plugin.get_page()))
-    groups = [n for n in nodes if n.get("component") == "VExpansionPanels"]
-    titles = [n for n in nodes if n.get("component") == "VExpansionPanelTitle"]
-
-    # 猫眼 + Netflix 各一组，订阅历史一组
-    assert len(groups) == 3
-    assert all(g["props"]["multiple"] is False for g in groups)
-    assert all(g["props"]["variant"] == "accordion" for g in groups)
-    # 猫眼 2 个榜 + Netflix 2 个榜 + 订阅历史 1 个
-    assert len(titles) == 5
-    # 标题行必须带条数徽标，否则收起后只剩名字、看不到数据量
-    assert sum(
-        1 for t in titles
-        for child in (t.get("content") or [])
-        for chip in ((child.get("content") or []) if isinstance(child, dict) else [])
-        if isinstance(chip, dict) and chip.get("component") == "VChip"
-    ) == 5
-
-
 def test_page_overview_shows_source_stats(plugin):
-    """页面顶部概览卡给出两源的榜数与条数，不用展开就能看清体量。"""
-    blob = json.dumps(plugin.get_page()[:1], ensure_ascii=False)
+    """概览卡（App 推荐卡之后）给出两源的榜数与条数。"""
+    blob = json.dumps(plugin.get_page()[1], ensure_ascii=False)
 
     assert "猫眼榜单" in blob
     assert "Netflix 榜单" in blob
     assert "个榜" in blob
     assert "更新于" in blob
-    # 两源各自的刷新入口都在概览卡里
-    assert "\"source\": \"maoyan\"" in blob
-    assert "\"source\": \"netflix\"" in blob
 
 
 def test_netflix_region_choices_include_us(plugin):

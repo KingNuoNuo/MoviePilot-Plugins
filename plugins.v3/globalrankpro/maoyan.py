@@ -244,6 +244,11 @@ class MaoyanSource(RankSource):
         ('mg_sub_num', 'mg_num', 'mg_enabled'),
         ('yk_sub_num', 'yk_num', 'yk_enabled'),
     )
+    # 平台代码 -> 展示名（设置页 platforms 多选与详情页共用）
+    _PLATFORM_CODES = ('tx', 'iqy', 'mg', 'yk')
+    _PLATFORM_LABELS = {
+        'tx': '腾讯视频', 'iqy': '爱奇艺', 'mg': '芒果TV', 'yk': '优酷',
+    }
     # 猫眼 platformType -> (订阅条数字段, 推荐条数字段)；抓取与推荐源注册共用
     _PLATFORM_NUM_KEYS = {
         3: ('tx_sub_num', 'tx_rec_num'),
@@ -515,15 +520,24 @@ class MaoyanSource(RankSource):
             else:
                 num = 0
             setattr(self, f"_{new_key}", num)
-        for platform_type, (_, rec_key) in self._PLATFORM_NUM_KEYS.items():
-            name = rec_key[:-8]  # 'tx_rec_num' -> 'tx'
-            rec_enabled = config.get(f"{name}_rec_enabled")
-            if rec_enabled is None:
-                rec_enabled = self.__safe_num(config.get(rec_key), 0) > 0
-            rec_enabled = bool(rec_enabled)
-            setattr(self, f"_{name}_rec_enabled", rec_enabled)
-            setattr(self, f"_{rec_key}",
-                    self._REC_BOARD_MAX if rec_enabled else 0)
+        # 平台细分榜（v1.0.4 起）：platforms 多选决定抓哪些平台并写入榜单快照；
+        # 未出现 platforms 键的旧配置回退到各平台 *_rec_enabled 开关，平滑迁移。
+        if "platforms" in config:
+            chosen = {str(c) for c in (config.get("platforms") or [])}
+        else:
+            # 旧配置：优先布尔开关，缺失时按旧数值条数 > 0 判定
+            chosen = set()
+            for name in self._PLATFORM_CODES:
+                flag = config.get(f"{name}_rec_enabled")
+                if flag is None:
+                    flag = self.__safe_num(config.get(f"{name}_rec_num"), 0) > 0
+                if flag:
+                    chosen.add(name)
+        for name in self._PLATFORM_CODES:
+            enabled = name in chosen
+            setattr(self, f"_{name}_rec_enabled", enabled)
+            setattr(self, f"_{name}_rec_num",
+                    self._REC_BOARD_MAX if enabled else 0)
 
     def __refresh_maoyan(self):
         """
