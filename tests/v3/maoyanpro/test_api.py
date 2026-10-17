@@ -1110,3 +1110,194 @@ def test_release_year_parsing_unchanged(release_info, year):
 def test_recommend_event_enum_is_host_value(plugin):
     """推荐源注册使用宿主的 RecommendSource 事件。"""
     assert ChainEventType.RecommendSource.value == "recommend.source"
+
+
+# ==================== 详情页 get_page ====================
+
+def walk_page(nodes):
+    """递归展开页面节点（文档序），收集全部文本与 props，便于断言。"""
+    texts, props = [], []
+
+    def visit(node):
+        if not isinstance(node, dict):
+            return
+        if node.get("text"):
+            texts.append(str(node["text"]))
+        node_props = node.get("props") or {}
+        props.append(node_props)
+        # VAlert 等组件把文案放在 props.text 里
+        if isinstance(node_props.get("text"), str):
+            texts.append(node_props["text"])
+        events = node.get("events") or {}
+        for handler in events.values():
+            if isinstance(handler, dict):
+                texts.append(str(handler.get("api") or ""))
+        for child in node.get("content") or []:
+            visit(child)
+
+    for item in nodes or []:
+        visit(item)
+    return texts, props
+
+
+def page_texts(page):
+    return walk_page(page)[0]
+
+
+def year_board(count: int = 12):
+    """国内年度票房榜样本：默认超出详情页单榜展示上限。"""
+    return {
+        "board": "国内年度票房榜单", "type": "year", "type_name": "国内年度票房",
+        "platform": "", "platform_type": "", "show_date": "2026-10-15",
+        "url": "https://piaofang.maoyan.com/rankings/year",
+        "count": count, "updated_at": "2026-10-15 12:00:00",
+        "items": [
+            {"rank": index, "title": "年度影片%d" % index, "board_type": "year",
+             "type_name": "国内年度票房", "platformDesc": "院线",
+             "releaseInfo": "2026-08-11 上映", "board": "国内年度票房榜单",
+             "show_date": "2026-10-15", "box_office": "%d.0亿" % (30 - index),
+             "total_box_office": "%d.0亿" % (30 - index), "heat": "",
+             "media_source": "", "media_id": "", "poster": "",
+             "overview": "", "year": "2026"}
+            for index in range(1, count + 1)
+        ],
+    }
+
+
+def test_get_page_renders_board_sections_history_and_promo(plugin):
+    """详情页渲染榜单分区、订阅历史统计与 App 推荐卡。"""
+    plugin.save_data("snapshot", {
+        "updated_at": "2026-10-15 12:00:00", "total": 3,
+        "boards": snapshot_boards() + [year_board()],
+    })
+    plugin.save_data("history", [
+        {"type": "电视剧", "title": "沉默的荣耀", "platformDesc": "腾讯视频",
+         "releaseInfo": "上线28天", "time": "2026-10-15 12:30:00",
+         "poster": "https://image.tmdb.org/t/p/w500/b.jpg",
+         "media_source": "themoviedb", "media_id": "219920"},
+    ])
+
+    page = plugin.get_page()
+    texts, props = walk_page(page)
+    hrefs = [str(p.get("href") or "") for p in props if p.get("href")]
+
+    # 榜单区头部：标题、快照时间、刷新按钮（事件指向插件 refresh 接口）
+    assert "实时榜单" in texts
+    assert any("快照更新于 2026-10-15 12:00:00" in t for t in texts)
+    assert "刷新榜单" in texts
+    assert "plugin/MaoyanPro/refresh" in texts
+
+    # 分区顺序：电影票房 -> 国内年度票房 -> 剧集综合（web-all 主榜优先）
+    movie_at = texts.index("电影票房")
+    year_at = texts.index("国内年度票房")
+    web_all_at = texts.index("剧集综合")
+    assert movie_at < year_at < web_all_at
+
+    # 电影榜卡片：名次角标（前三主色）、当日+累计票房、标题外链
+    assert "当日票房" in texts and "161.93万" in texts
+    assert "累计票房" in texts and "1.87亿" in texts
+    badge_styles = [p.get("style") or {} for p in props
+                    if isinstance(p.get("style"), dict)
+                    and p["style"].get("background") == "#8D51F9"]
+    assert badge_styles, "前三名应有主色名次角标"
+    assert "https://www.themoviedb.org/movie/1586199" in hrefs
+
+    # 剧集榜：展示上线信息，不展示 PUA 加密的热度值
+    assert "上线28天" in texts
+    assert "9820" not in texts
+
+    # 年度榜超上限：只展示前 10 条并给出提示
+    assert "共 12 条，展示前 10 条，完整数据见推荐页" in texts
+    assert "年度影片11" not in texts
+
+    # 订阅历史统计保持原有版式
+    assert "订阅记录" in texts and "1 条" in texts
+    assert "电视剧" in texts and "腾讯视频" in texts
+
+    # App 推荐卡：名称、描述、仓库地址与外链按钮
+    assert "MoviePilotApp" in texts
+    assert "Jetpack Compose · Material 3 安卓客户端" in texts
+    assert "github.com/KingNuoNuo/MoviePilotApp" in texts
+    assert "GitHub 仓库" in texts
+    assert "https://github.com/KingNuoNuo/MoviePilotApp" in hrefs
+
+    # 未启用影史总票房时给出开启提示
+    assert "影史总票房榜未启用" in "".join(texts)
+
+
+def test_get_page_global_board_prefers_chinese_title(plugin):
+    """全球年度榜识别出中文片名时中文优先、原名作副标题。"""
+    plugin.save_data("snapshot", {
+        "updated_at": "2026-10-15 12:00:00",
+        "boards": [{
+            "board": "全球年度票房榜单", "type": "global", "type_name": "全球年度票房",
+            "platform": "", "platform_type": "", "show_date": "2026-10-15",
+            "url": "https://www.boxofficemojo.com/year/world/2026/",
+            "count": 1, "updated_at": "2026-10-15 12:00:00",
+            "items": [
+                {"rank": 1, "title": "Spider-Man: Brand New Day",
+                 "board_type": "global", "type_name": "全球年度票房",
+                 "platformDesc": "", "releaseInfo": "2026",
+                 "board": "全球年度票房榜单", "show_date": "2026-10-15",
+                 "title_cn": "蜘蛛侠：崭新之日", "box_office": "25.14亿美元",
+                 "total_box_office": "25.14亿美元", "heat": "",
+                 "media_source": "themoviedb", "media_id": "123",
+                 "poster": "https://image.tmdb.org/t/p/w500/s.jpg",
+                 "overview": "", "year": "2026"},
+            ],
+        }],
+    })
+    plugin.save_data("history", [])
+
+    texts, _ = walk_page(plugin.get_page())
+
+    assert "蜘蛛侠：崭新之日" in texts
+    assert "Spider-Man: Brand New Day" in texts
+    assert "年度票房" in texts and "25.14亿美元" in texts
+    # 没有历史记录时保留榜单区与推荐卡，只提示历史为空
+    assert "暂无订阅历史" in texts
+    assert "MoviePilotApp" in texts
+
+
+def test_get_page_without_snapshot_shows_hint(plugin):
+    """快照缺失时给出刷新提示，推荐卡仍然展示。"""
+    plugin.save_data("history", [])
+
+    texts, props = walk_page(plugin.get_page())
+    hrefs = [str(p.get("href") or "") for p in props if p.get("href")]
+
+    assert "实时榜单" in texts
+    assert "暂无榜单快照" in "".join(texts)
+    assert "刷新榜单" in texts
+    assert "MoviePilotApp" in texts
+    assert "https://github.com/KingNuoNuo/MoviePilotApp" in hrefs
+
+
+def test_get_page_platform_boards_show_main_board_only(plugin):
+    """平台细分榜不重复占分区：剧集综合只展示主榜。"""
+    boards = snapshot_boards()
+    boards.append({
+        "board": "剧集综合榜单（爱奇艺）", "type": "web-all", "type_name": "剧集综合",
+        "platform": "爱奇艺", "platform_type": "2", "show_date": "2026-10-15",
+        "url": "u", "count": 1, "updated_at": "2026-10-15 12:00:00",
+        "items": [
+            {"rank": 1, "title": "把黑夜点燃", "board_type": "web-all",
+             "type_name": "剧集综合", "platformDesc": "爱奇艺",
+             "releaseInfo": "上线3天", "board": "剧集综合榜单（爱奇艺）",
+             "show_date": "2026-10-15", "box_office": "", "heat": "9527",
+             "media_source": "", "media_id": "", "poster": "",
+             "overview": "", "year": ""},
+        ],
+    })
+    plugin.save_data("snapshot", {
+        "updated_at": "2026-10-15 12:00:00", "boards": boards,
+    })
+    plugin.save_data("history", [])
+
+    texts, _ = walk_page(plugin.get_page())
+
+    # 主榜（腾讯视频）条目出现，细分榜（爱奇艺）条目不占分区
+    assert "沉默的荣耀" in texts
+    assert "把黑夜点燃" not in texts
+    # 分区计数按主榜条目数，不叠加平台榜
+    assert "1 条" in texts
