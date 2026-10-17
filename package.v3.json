@@ -40,5 +40,20 @@
       "v1.0.1": "修复 Tudum TSV 抓取的编码缺陷：数据文件本身是 UTF-8 但响应不带 charset，原先直接取 response.text 靠 requests 嗅探编码，九成内容是 ASCII 的大文件常被误判为 latin-1 系，弯引号、破折号等非 ASCII 字符全部变成「â」式乱码并导致 TMDB 识别失败；改为按字节取回后显式按 UTF-8 解码。",
       "v1.0.0": "Netflix 官方 Tudum Top 10 榜单插件：数据源为 Netflix 官方静态 TSV 文件（全球榜 all-weeks-global.tsv 附周观看小时数/观看次数/片长/在榜周数，四类目 Films/TV × English/Non-English 各 10 条；国家地区榜 all-weeks-countries.tsv 覆盖约 90 个国家/地区，含中国香港、中国台湾、日本、韩国、新加坡，仅名次与在榜周数，Netflix 未进入中国大陆）。插件默认抓取全球榜 + 中国香港 + 中国台湾，地区可在配置里多选；抓取后走宿主识别链补全中文片名、海报、年份与发行日期，识别结果按「类型|标题」持久化复用。对外提供 /rank（榜单快照，按 board_type 地区与 kind 内容类型过滤）、/rank-list（媒体信息列表，供宿主推荐页与 App）、/refresh（立即抓取）三个接口，统一 bear 认证与 schemas.Response 信封；推荐页按「地区 × 电影/剧集」注册数据源；插件详情页实时展示各分区榜单（名次角标、中文片名优先、观看量格式化）并提供刷新按钮。"
     }
+  },
+  "GlobalRankPro": {
+    "name": "全球影视榜单",
+    "description": "整合猫眼与 Netflix 榜单，提供统一的榜单接口与推荐页数据源。",
+    "labels": "榜单",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/globalrank.png",
+    "author": "KingNuoNuo",
+    "author_url": "https://github.com/KingNuoNuo",
+    "level": 0,
+    "release": false,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v1.0.0": "把猫眼榜单（MaoyanPro）与 Netflix 榜单（NetflixPro）合并为一个插件，对外只暴露一套接口：/rank（统一榜单快照，source=maoyan/netflix/all，两源字段取并集，board_type 按源语义过滤）、/rank-list（统一媒体信息列表）、/refresh（按 source 抓取并汇总结果），全部走 bear 认证与 schemas.Response 信封。两个数据源在插件内部各自独立（数据键带 maoyan_/netflix_ 前缀），可分别开关、分别抓取；设置页把两套配置放在同一表单，详情页同时展示两源榜单分区与猫眼订阅历史，各分区带独立的刷新按钮。推荐页数据源按两源合并注册。"
+    }
   }
 }
