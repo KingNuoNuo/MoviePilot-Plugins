@@ -256,6 +256,8 @@ class MaoyanSource(RankSource):
         7: ('mg_sub_num', 'mg_rec_num'),
         1: ('yk_sub_num', 'yk_rec_num'),
     }
+    # 平台代码 -> 猫眼 platformType（推荐源注册时用，与 _PLATFORM_NUM_KEYS 的 key 一致）
+    _PLATFORM_TYPE_BY_CODE = {'tx': 3, 'iqy': 2, 'mg': 7, 'yk': 1}
 
     # 本次抓取到的榜单元数据，供对外接口落快照（不持久化，失败时为上层回退到历史）
     _last_boards: List[dict] = []
@@ -369,13 +371,27 @@ class MaoyanSource(RankSource):
                 ('zongyi', '猫眼综艺热度')):
             if board_type not in (self._type or []):
                 continue
-            # 只注册全网榜保持推荐页主界面简洁；平台细分榜不单独挂源，
-            # 由 rank-list 的分页编组在「更多」页里依次展示（标题带平台后缀）
             sources.append(schemas.RecommendMediaSource(
                 name=board_label,
                 api_path=(f"plugin/GlobalRankPro/rank-list?"
                           f"source={self.source_id}&board_type={board_type}"),
                 type=self._RECOMMEND_TYPES[board_type],
+            ))
+        # 勾选了的平台细分榜各注册一个独立推荐源（「发现 → 推荐」直接出现平台入口）。
+        # 平台榜以剧集综合榜为主榜；综艺细分继续由全网综艺源的分页编组承载，保持主界面简洁。
+        for code in self._PLATFORM_CODES:
+            if not getattr(self, f"_{code}_rec_enabled", False):
+                continue
+            platform_type = self._PLATFORM_TYPE_BY_CODE.get(code)
+            if platform_type is None:
+                continue
+            label = self._PLATFORM_LABELS.get(code, code)
+            sources.append(schemas.RecommendMediaSource(
+                name=f"猫眼{label}剧集榜",
+                api_path=(f"plugin/GlobalRankPro/rank-list?"
+                          f"source={self.source_id}&board_type=web-all"
+                          f"&platform={platform_type}"),
+                type=self._RECOMMEND_TYPES['web-all'],
             ))
         return sources
 

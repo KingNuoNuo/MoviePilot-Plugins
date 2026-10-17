@@ -294,9 +294,32 @@ def test_recommend_sources_register_configured_boards(plugin):
     assert movie_source.type == "电影"
 
 
-def test_recommend_sources_keep_platform_boards_off_main_page(plugin):
-    """平台推荐条数 > 0 也不注册平台源，主页面只保留全网源保持简洁。"""
+def test_recommend_sources_register_selected_platform_boards(plugin):
+    """勾选了的平台细分榜各注册一个独立推荐源（主页面直接出现平台入口）。"""
+    plugin._tx_rec_enabled = True
+    plugin._mg_rec_enabled = True
     plugin._tx_rec_num = 10
+    plugin._mg_rec_num = 10
+
+    sources = plugin.recommend_sources()
+
+    names = [source.name for source in sources]
+    for expected in ["猫眼电影票房", "猫眼剧集综合热度", "猫眼综艺热度",
+                     "猫眼腾讯视频剧集榜", "猫眼芒果TV剧集榜"]:
+        assert expected in names
+    # 未勾选的平台不注册
+    assert "爱奇艺" not in names and "优酷" not in names
+    # 平台源 api_path 带 platform 参数，且映射到「电视剧」分类
+    tx = next(s for s in sources if s.name == "猫眼腾讯视频剧集榜")
+    assert tx.api_path.endswith("board_type=web-all&platform=3")
+    assert tx.type == "电视剧"
+    mg = next(s for s in sources if s.name == "猫眼芒果TV剧集榜")
+    assert mg.api_path.endswith("board_type=web-all&platform=7")
+
+
+def test_recommend_sources_keep_unselected_platforms_off_main_page(plugin):
+    """未勾选平台时不注册任何平台源，主页面只保留全网源。"""
+    plugin._tx_rec_num = 10  # 仅推荐条数 > 0 但未勾选，不注册
 
     sources = plugin.recommend_sources()
 
