@@ -72,10 +72,13 @@ TOTAL_ZIP_ORDER = (
     "package.v3.json",
     "README.md",
     "icons/maoyan-v2.png",
+    "icons/netflix.png",
     "plugins/tgtodrivesync/__init__.py",
     "plugins/tgtodrivesync/README.md",
     "plugins.v3/maoyanpro/__init__.py",
     "plugins.v3/maoyanpro/README.md",
+    "plugins.v3/netflixpro/__init__.py",
+    "plugins.v3/netflixpro/README.md",
 )
 
 TOTAL_ZIP_NAME = "MoviePilot-Plugins.zip"
@@ -195,10 +198,14 @@ def rebuild_dist() -> None:
                 continue
             zf.write(p, f"{prefix}/{p.relative_to(src_dir).as_posix()}")
 
-    out = DIST_DIR / f"{PLUGIN_ID}.zip"
-    out.unlink(missing_ok=True)
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-        add_dir(zf, LOCAL_DIR, PLUGIN_ID)
+    # 每个 v3 插件各自打一个单插件 zip（供手动下载安装）
+    for plugin_dir in sorted((REPO / "plugins.v3").iterdir()):
+        if not plugin_dir.is_dir() or plugin_dir.name.startswith("_"):
+            continue
+        out = DIST_DIR / f"{plugin_dir.name}.zip"
+        out.unlink(missing_ok=True)
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+            add_dir(zf, plugin_dir, plugin_dir.name)
 
     out = DIST_DIR / TOTAL_ZIP_NAME
     out.unlink(missing_ok=True)
@@ -207,7 +214,7 @@ def rebuild_dist() -> None:
             path = REPO / rel
             if path.exists():
                 zf.write(path, f"MoviePilot-Plugins/{rel}")
-    log(f"  dist/ 已重建：{PLUGIN_ID}.zip、{TOTAL_ZIP_NAME}")
+    log(f"  dist/ 已重建：各插件 zip 与 {TOTAL_ZIP_NAME}")
 
 
 def write_baseline(upstream: dict, upstream_version: str) -> None:

@@ -2,7 +2,7 @@
 
 # MoviePilot 插件仓库
 
-**自建 MoviePilot v3 插件市场源** —— 整理入库自动生成网盘 STRM 并刷新媒体库；猫眼榜单显示与订阅、榜单对外接口。
+**自建 MoviePilot v3 插件市场源** —— 整理入库自动生成网盘 STRM 并刷新媒体库；猫眼榜单显示与订阅、Netflix 官方 Top 10 榜单，均提供榜单对外接口。
 
 [![Stars](https://img.shields.io/github/stars/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/stargazers)
 [![Forks](https://img.shields.io/github/forks/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/network/members)
@@ -28,7 +28,8 @@
 | 插件 | 版本 | 简介 | 说明 |
 | --- | --- | --- | --- |
 | **[TgtoDrive STRM 同步](plugins/tgtodrivesync/README.md)**<br><sub>`TgtoDriveSync` · `plugins/tgtodrivesync`</sub> | v1.7.1 | 整理入库后自动调用 TgtoDrive OpenAPI 生成网盘 STRM，完成后刷新全部已配置媒体服务器并发送通知。 | [→ 插件说明](plugins/tgtodrivesync/README.md) |
-| **[猫眼榜单](plugins.v3/maoyanpro/README.md)**<br><sub>`MaoyanPro` · `plugins.v3/maoyanpro`</sub> | v1.2.2 | 猫眼榜单显示和订阅功能：抓取电影票房、影史总票房、国内年度票房、全球年度票房（Box Office Mojo）、剧集综合榜（电视剧+网剧）与综艺热度榜单并自动订阅（电影/剧集分开配置，订阅与推荐页数据源相互独立，爱优腾芒平台榜可单独配置订阅条数与推荐开关）；提供 `/rank`、`/rank-list`、`/refresh` 对外接口，可作为宿主推荐页数据源。 | [→ 插件说明](plugins.v3/maoyanpro/README.md) |
+| **[猫眼榜单](plugins.v3/maoyanpro/README.md)**<br><sub>`MaoyanPro` · `plugins.v3/maoyanpro`</sub> | v1.2.7 | 猫眼榜单显示和订阅功能：抓取电影票房、影史总票房、国内年度票房、全球年度票房（Box Office Mojo）、剧集综合榜（电视剧+网剧）与综艺热度榜单并自动订阅（电影/剧集分开配置，订阅与推荐页数据源相互独立，爱优腾芒平台榜可单独配置订阅条数与推荐开关）；提供 `/rank`、`/rank-list`、`/refresh` 对外接口，可作为宿主推荐页数据源。 | [→ 插件说明](plugins.v3/maoyanpro/README.md) |
+ | **[Netflix榜单](plugins.v3/netflixpro/README.md)**<br><sub>`NetflixPro` · `plugins.v3/netflixpro`</sub> | v1.0.0 | Netflix 官方 Tudum Top 10 榜单显示：数据源为 Netflix 官方静态 TSV（全球榜附周观看小时数/观看次数/片长/在榜周数，四类目各 10 条；约 90 个国家/地区榜含中国香港、中国台湾，Netflix 未进入中国大陆）；默认抓取全球+香港+台湾，地区可多选；走宿主识别链补全中文片名、海报、年份与发行日期；提供 `/rank`、`/rank-list`、`/refresh` 对外接口，可按地区 × 电影/剧集注册推荐页数据源。 | [→ 插件说明](plugins.v3/netflixpro/README.md) |
 
 > **来源说明**：`猫眼榜单` **Fork 自 [jxxghp/moviepilot-plugins](https://github.com/jxxghp/moviepilot-plugins)**
 > 的「猫眼榜单订阅」插件（原作者 [逗猫 @baozaodetudou](https://github.com/baozaodetudou)），基于上游 v4.1.4 改造为
@@ -51,13 +52,14 @@
    https://github.com/KingNuoNuo/MoviePilot-Plugins
    ```
 
-2. 保存后，在市场里搜索插件名（如「**TgtoDrive STRM 同步**」「**猫眼榜单**」）并安装、启用。
+2. 保存后，在市场里搜索插件名（如「**TgtoDrive STRM 同步**」「**猫眼榜单**」「**Netflix榜单**」）并安装、启用。
 
 本地部署也可把插件目录整个拷贝到 MoviePilot 的插件目录（容器内通常为 `/app/app/plugins/`，
 以你的实际部署为准），重启 MoviePilot 容器即可在插件列表看到：
 
 - TgtoDrive → `plugins/tgtodrivesync`
 - 猫眼榜单 → `plugins.v3/maoyanpro`
+- Netflix榜单 → `plugins.v3/netflixpro`
 
 ## 仓库结构
 
@@ -70,8 +72,11 @@ MoviePilot-Plugins/
 │       ├── __init__.py          # 插件主体（类名 TgtoDriveSync）
 │       └── README.md            # 插件说明
 ├── plugins.v3/                  # v3 代插件目录
-│   └── maoyanpro/
-│       ├── __init__.py          # 插件主体（类名 MaoyanPro）
+│   ├── maoyanpro/
+│   │   ├── __init__.py          # 插件主体（类名 MaoyanPro）
+│   │   └── README.md            # 插件说明
+│   └── netflixpro/
+│       ├── __init__.py          # 插件主体（类名 NetflixPro）
 │       └── README.md            # 插件说明
 ├── tests/                       # 插件测试（按 tests/v3/<插件id>/ 组织）
 └── dist/                        # 打包产物
