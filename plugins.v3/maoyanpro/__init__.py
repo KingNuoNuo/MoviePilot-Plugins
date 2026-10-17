@@ -2232,10 +2232,10 @@ class MaoyanPro(_PluginBase):
         """
         meta = meta or {}
         items = []
-        for rank, row in enumerate(
-                re.findall(r"<tr>(.*?)</tr>", html or "", re.S), start=1):
-            if "<td" not in row:
-                continue  # 表头行，静默跳过
+        # 先过滤表头行（无 td）再截断，避免表头占用抓取名额
+        rows = [row for row in re.findall(r"<tr>(.*?)</tr>", html or "", re.S)
+                if "<td" in row]
+        for rank, row in enumerate(rows[:limit], start=1):
             try:
                 cells = [re.sub(r"<[^>]+>", " ", cell).strip()
                          for cell in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]

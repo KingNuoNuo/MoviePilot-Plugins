@@ -697,6 +697,15 @@ def test_global_board_flows_to_recommend_source_and_rank_list(plugin, monkeypatc
         "Spider-Man: Brand New Day", "The Odyssey"]
 
 
+def test_parse_global_board_respects_limit():
+    """全球榜解析按 limit 截断，避免 SSR 全表 200 条挤占快照与识别额度。"""
+    meta = {"board": "全球年度票房榜单", "board_type": "global", "board_url": "u",
+            "show_date": "2026-10-17", "show_year": 2026}
+    items = MaoyanPro._MaoyanPro__parse_global_board(
+        GLOBAL_BOARD_HTML, 2, "全球年度票房榜", meta)
+    assert len(items) == 2
+
+
 def test_fetch_year_board_uses_year_param(plugin, monkeypatch):
     """国内年度票房榜与影史榜共用解析，按 ?year= 当前年份抓取。"""
     captured = {}
