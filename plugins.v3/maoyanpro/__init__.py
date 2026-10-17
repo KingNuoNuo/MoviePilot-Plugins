@@ -175,7 +175,7 @@ class MaoyanPro(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan-v2.png"
     # 插件版本
-    plugin_version = "1.2.6"
+    plugin_version = "1.2.7"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -1942,6 +1942,21 @@ class MaoyanPro(_PluginBase):
             # 没识别到媒体身份 = 这条「认不出来」，累计失败次数让它在后续轮次沉底
             identity["miss"] = 0 if identity.get("media_source") else miss + 1
             identity["ts"] = current_time.timestamp()
+            # 新结果没图/没中文名时，保住之前修好的那份（缓存或上一份快照）：
+            # 重新识别是为了补上映日期，不能顺手把已经补好的海报又抹成灰洞
+            # （Obsession 就踩过：补到「痴迷」后下一轮重识别拿日期，图又没了）
+            old = raw_cache.get(title) or {}
+            prev_item = prev_map.get(title) or {}
+            if not identity.get("poster"):
+                for kept in (old.get("poster"), prev_item.get("poster")):
+                    if isinstance(kept, str) and kept.startswith("http"):
+                        identity["poster"] = kept
+                        break
+            if not identity.get("title_cn"):
+                for kept in (old.get("title_cn"), prev_item.get("title_cn")):
+                    if isinstance(kept, str) and kept.strip():
+                        identity["title_cn"] = kept.strip()
+                        break
             self._resolved_identity[title] = identity
 
         # B：兜底补图。会显示成灰洞的有三类条目，都走一次豆瓣检索（单次 HTTP，
