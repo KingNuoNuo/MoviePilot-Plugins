@@ -27,103 +27,175 @@ APP_PROMO = {
 PAGE_BOARD_LIMIT = 10
 
 
+# 宿主的 @core 样式把 ``.v-switch.v-input`` 的 --v-input-control-height 改成了
+# auto，开关高度塌缩成文字行高，视觉高度溢出到下一行，与下方控件叠在一起
+# （截图里「电影榜」压着开关、「自动订阅条数」压着下拉框）。插件改不了宿主 CSS，
+# 用内联样式把固定高度还原——内联优先级高于那条类选择器。
+SWITCH_FIX = {'--v-input-control-height': '40px'}
+
+# 自动订阅条数可选档位
+SUB_NUM_CHOICES = (0, 1, 2, 3, 5, 7, 10)
+
+
 def form_col(component: str, props: dict, md: int = 6) -> dict:
     """构造宿主表单的一列（栅格：窄屏占满整行，宽屏按 md 分栏）。"""
+    return form_col_nodes([{'component': component, 'props': props}], md)
+
+
+def form_col_nodes(nodes: List[dict], md: int = 6) -> dict:
+    """一列里放多个节点（例如开关 + 文字）。"""
+    return {'component': 'VCol', 'props': {'cols': 12, 'md': md}, 'content': nodes}
+
+
+def form_row(cols: List[dict], cls: str = 'align-center') -> dict:
+    """一行：栅格间距用 compact，避免默认 12px gutter 把行拉高。"""
     return {
-        'component': 'VCol',
-        'props': {'cols': 12, 'md': md},
-        'content': [{'component': component, 'props': props}],
+        'component': 'VRow',
+        'props': {'class': cls, 'density': 'compact'},
+        'content': cols,
     }
 
 
-def num_col(model: str, label: str, md: int = 4) -> dict:
-    """构造「条数」下拉列（紧凑排版，不带 hint）。"""
-    return form_col('VSelect', {
+def switch_col(model: str, label: str, md: int = 6) -> dict:
+    """开关列。
+
+    开关自带的 label 在 compact 密度下会比轨道高几个像素，但比「开关 + 外部
+    文字」稳：后者在宿主的 flex 布局里 .v-input 宽度会塌成 0，文字直接压到
+    轨道上。这里保留 label，只把宿主压塌的高度用内联变量还原。
+    """
+    return form_col('VSwitch', {
         'model': model,
         'label': label,
-        'items': [{'title': str(n), 'value': n} for n in (0, 1, 2, 3, 5, 7, 10)],
+        'color': 'primary',
         'density': 'compact',
-        'variant': 'outlined',
         'hide-details': True,
+        'style': dict(SWITCH_FIX),
     }, md=md)
 
 
-def type_col(model: str, label: str, items: List[dict]) -> dict:
-    """构造「榜单类型」多选列。"""
+def num_select(model: str, width: int = 84) -> dict:
+    """自动订阅条数：限宽的小下拉，避免一个数字撑出一个大方框。"""
+    return {
+        'component': 'VSelect',
+        'props': {
+            'model': model,
+            'items': [{'title': str(n), 'value': n} for n in SUB_NUM_CHOICES],
+            'density': 'compact',
+            'variant': 'outlined',
+            'hide-details': True,
+            'style': {'width': '{0}px'.format(width)},
+        },
+    }
+
+
+def num_group(title: str, items: List[Tuple[str, str]]) -> dict:
+    """一行「组名 + 榜名 + 条数框」，窄屏时用 flex-wrap 自动折行。"""
+    content: List[dict] = [{
+        'component': 'span',
+        'props': {'class': 'text-body-2', 'style': {'min-width': '96px'}},
+        'text': title,
+    }]
+    for label, model in items:
+        content.append({
+            'component': 'div',
+            'props': {'class': 'd-flex align-center ga-2',
+                      'style': {'margin-right': '24px'}},
+            'content': [
+                {'component': 'span',
+                 'props': {'class': 'text-body-2'},
+                 'text': label},
+                num_select(model),
+            ],
+        })
+    return {'component': 'div',
+            'props': {'class': 'd-flex flex-wrap align-center py-1'},
+            'content': content}
+
+
+def type_select(model: str, label: str, items: List[dict], md: int = 6) -> dict:
+    """榜单类型多选（chip 可点掉，比再点一次列表更直观）。"""
     return form_col('VSelect', {
         'model': model,
         'label': label,
         'items': items,
         'chips': True,
         'multiple': True,
+        'closable-chips': False,
+        'chip-props': {'color': 'primary', 'variant': 'tonal', 'size': 'small'},
         'density': 'compact',
         'variant': 'outlined',
         'hide-details': True,
-    })
+    }, md=md)
 
 
-def section_hint(title: str, text: str) -> dict:
-    """构造分组标题行：宿主表单没有分组组件，用信息条分隔两个数据源。"""
+def setting_card(title: str, desc: str, rows: List[dict]) -> dict:
+    """一张设置卡：卡片标题 + 灰色说明 + 若干行。
+
+    宿主表单没有分组组件，用 outlined 卡片替代原来刺眼的蓝色 VAlert 信息条，
+    视觉上把「运行 / 猫眼 / Netflix」切成三块。
+    """
+    head: List[dict] = [{
+        'component': 'div',
+        'props': {'class': 'text-subtitle-2 font-weight-bold'},
+        'text': title,
+    }]
+    if desc:
+        head.append({
+            'component': 'div',
+            'props': {'class': 'text-caption text-medium-emphasis mt-1',
+                      'style': {'line-height': '1.55'}},
+            'text': desc,
+        })
     return {
-        'component': 'VRow',
+        'component': 'VCard',
+        'props': {'variant': 'outlined', 'class': 'mb-3'},
         'content': [{
-            'component': 'VCol',
-            'props': {'cols': 12},
-            'content': [{
-                'component': 'VAlert',
-                'props': {
-                    'type': 'info',
-                    'variant': 'tonal',
-                    'density': 'compact',
-                    'title': title,
-                    'text': text,
-                },
-            }],
+            'component': 'VCardText',
+            'props': {'class': 'pa-4 pt-3'},
+            'content': head + [{'component': 'div',
+                                'props': {'class': 'mb-2'}}] + rows,
         }],
     }
 
 
 def promo_card() -> dict:
-    """构造 MoviePilotApp 推荐卡：数据页与设置页共用，均置于页面顶部。"""
+    """构造 MoviePilotApp 推荐卡：数据页与设置页共用，均置于页面顶部。
+
+    只保留两行文字（名称 + 一句话说明），避免在设置页顶部吃掉一百多像素。
+    """
     promo = APP_PROMO
     return {
         'component': 'VCard',
-        'props': {'variant': 'outlined', 'class': 'mt-2'},
+        'props': {'variant': 'outlined', 'class': 'mb-3'},
         'content': [{
             'component': 'div',
-            'props': {'class': 'd-flex align-center flex-wrap ga-4',
-                      'style': {'padding': '16px'}},
+            'props': {'class': 'd-flex align-center flex-wrap ga-3',
+                      'style': {'padding': '12px 16px'}},
             'content': [
                 {'component': 'div',
                  'props': {'class': 'd-flex align-center '
                                    'justify-center flex-shrink-0',
-                           'style': {'width': '48px', 'height': '48px',
-                                     'border-radius': '12px',
+                           'style': {'width': '40px', 'height': '40px',
+                                     'border-radius': '10px',
                                      'background': '#8D51F9'}},
                  'content': [{'component': 'VIcon',
                               'props': {'icon': 'mdi-android',
-                                        'size': 28, 'color': 'white'}}]},
+                                        'size': 24, 'color': 'white'}}]},
                 {'component': 'div',
                  'props': {'class': 'min-w-0 flex-grow-1'},
                  'content': [
                      {'component': 'div',
-                      'props': {'class': 'text-subtitle-1 font-weight-bold'},
+                      'props': {'class': 'text-body-1 font-weight-bold'},
                       'text': promo['name']},
                      {'component': 'div',
-                      'props': {'class': 'text-body-2 text-medium-emphasis'},
-                      'text': promo['subtitle']},
-                     {'component': 'div',
                       'props': {'class': 'text-caption text-medium-emphasis'},
-                      'text': promo['desc']},
-                     {'component': 'div',
-                      'props': {'class': 'text-caption text-medium-emphasis'},
-                      'text': promo['repo'].replace('https://', '')},
+                      'text': promo['subtitle'] + ' · 榜单接口与宿主插件共用'},
                  ]},
                 {'component': 'VBtn',
                  'props': {'href': promo['repo'], 'target': '_blank',
                            'color': 'primary', 'variant': 'tonal',
-                           'prepend-icon': 'mdi-github'},
-                 'text': 'GitHub 仓库'},
+                           'size': 'small', 'prepend-icon': 'mdi-github'},
+                 'text': 'GitHub'},
             ],
         }],
     }
@@ -136,164 +208,86 @@ def promo_card() -> dict:
 def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
     """拼装合并插件的设置表单与默认配置。
 
-    合并插件要在同一张表单里放下两套配置，逐项写说明会把页面拉得很长，因此
-    排版走「一行多列 + 字段不带 hint」：解释统一收进分区提示条，字段只留名字；
-    每个榜单的「是否抓取」与「自动订阅条数」压进同一列，行数减半。
+    排版按「三张卡 + 一行多项」组织：运行 / 猫眼榜单 / Netflix 榜单各一张卡，
+    卡内每行放 1~3 个同类字段，说明统一收进卡片描述，字段只留名字——原来每个
+    字段都拖一行 hint，行高参差且页面被拉得很长。
+
+    每个榜单的「抓取开关」与「订阅条数」不再上下堆叠：宿主的 switch 高度会塌缩，
+    堆叠时必然压住下面的下拉框；订阅条数改成一行并排的小号下拉。
     """
     netflix = host.sources.get(SOURCE_NETFLIX)
     regions = list(getattr(netflix, "_regions", ['global', 'hk', 'tw']))
+    region_names = getattr(netflix, "_REGION_NAMES", {}) or {}
     region_items = [{'title': name, 'value': code}
-                    for code, name in (getattr(netflix, "_REGION_NAMES", {}) or {}).items()]
-
-    def switch(model: str, label: str, md: int = 4,
-               hint: str = "", persistent: bool = False) -> dict:
-        """开关列。给了 hint 才展开详情区，否则压平以省高度。"""
-        props: Dict[str, Any] = {
-            'model': model, 'label': label, 'color': 'primary',
-            'density': 'compact', 'hide-details': not hint,
-        }
-        if hint:
-            props['hint'] = hint
-            props['persistent-hint'] = persistent
-        return form_col('VSwitch', props, md)
-
-    def rank_group(enabled_model: str, label: str, num_model: str, md: int) -> dict:
-        """一个榜单 = 抓取开关 + 该榜自动订阅条数，两项压在同一列里。"""
-        return {
-            'component': 'VCol',
-            'props': {'cols': 12, 'md': md},
-            'content': [
-                {'component': 'VSwitch',
-                 'props': {'model': enabled_model, 'label': label,
-                           'color': 'primary', 'density': 'compact',
-                           'hide-details': True}},
-                {'component': 'VSelect',
-                 'props': {'model': num_model, 'label': '自动订阅条数',
-                           'items': [{'title': str(n), 'value': n}
-                                     for n in (0, 1, 2, 3, 5, 7, 10)],
-                           'density': 'compact', 'variant': 'outlined',
-                           'hide-details': True}},
-            ],
-        }
+                    for code, name in region_names.items()]
 
     rows: List[dict] = [
-        section_hint(
-            '使用说明',
-            '勾选后按执行周期抓取已启用的数据源；「立即运行一次」只在保存后跑一次，'
-            '跑完自动取消；「清理插件数据」会清空两源快照、识别缓存与订阅历史且不可恢复。'
-            '榜单接口与 App 首页榜单不受插件开关影响，随时可读。',
+        setting_card(
+            '运行',
+            '按执行周期抓取已启用数据源。「立即运行一次」保存后跑一次并自动取消；'
+            '「清理插件数据」清空快照、识别缓存与订阅历史，不可恢复；'
+            '「推荐页取数授权」关闭后宿主推荐页取不到榜单。',
+            [
+                form_row([
+                    switch_col('enabled', '启用插件', 4),
+                    switch_col('onlyonce', '立即运行一次', 4),
+                    switch_col('clear', '清理插件数据', 4),
+                ]),
+                form_row([
+                    form_col('VCronField', {
+                        'model': 'cron',
+                        'label': '执行周期',
+                        'placeholder': '0 9 * * *',
+                    }, 5),
+                    switch_col('api_enabled', '推荐页取数授权', 4),
+                    switch_col('recommend_enabled', '接入推荐页', 3),
+                ]),
+            ],
         ),
-        # ---- 通用 ----
-        {
-            'component': 'VRow',
-            'content': [
-                switch('enabled', '启用插件'),
-                switch('onlyonce', '立即运行一次'),
-                switch('clear', '清理插件数据'),
-            ],
-        },
-        {
-            'component': 'VRow',
-            'content': [
-                form_col('VCronField', {
-                    'model': 'cron',
-                    'label': '执行周期',
-                    'placeholder': '0 9 * * *',
-                    'density': 'compact',
-                    'variant': 'outlined',
-                    'hide-details': True,
-                }, md=4),
-                switch('api_enabled', '推荐页取数授权', 4,
-                       '推荐页通过本插件接口取榜单，关闭后推荐页取不到数据'),
-                switch('recommend_enabled', '接入推荐页', 4,
-                       '在宿主推荐页注册两源榜单，需与左侧同时打开'),
-            ],
-        },
-        # ---- 猫眼 ----
-        section_hint(
+        setting_card(
             '猫眼榜单',
-            '电影、剧集、综艺三类榜单。每个榜单独开关：关掉后该榜不再抓取，'
-            '接口与推荐页也不会出现；「自动订阅条数」取该榜前 N 条提交订阅，'
-            '选 0 表示只抓榜、不订阅。',
-        ),
-        {
-            'component': 'VRow',
-            'content': [
-                switch('maoyan_enabled', '启用猫眼数据源', 6,
-                       '关闭后不抓取猫眼榜单，接口也不返回猫眼数据'),
-                switch('maoyan_sub_enabled', '自动订阅新上榜', 6,
-                       '关闭则只更新榜单，不提交任何订阅'),
-            ],
-        },
-        {
-            'component': 'VRow',
-            'content': [
-                type_col('maoyan_type_movie', '电影榜单类型', [
-                    {'title': '电影票房榜单', 'value': 'movie'},
-                    {'title': '网络电影榜单', 'value': 'web-movie'},
-                    {'title': '影史总票房榜', 'value': 'total'},
-                    {'title': '国内年度票房榜', 'value': 'year'},
-                    {'title': '全球年度票房榜', 'value': 'global'},
+            '勾选的榜单类型决定抓取哪些榜；「自动订阅条数」取该榜前 N 条提交订阅，'
+            '选 0 表示只抓榜、不订阅。平台专项榜只服务自动订阅，不写入首页快照。',
+            [
+                form_row([switch_col('maoyan_enabled', '启用猫眼数据源', 6)]),
+                form_row([
+                    type_select('maoyan_type_movie', '电影榜单', [
+                        {'title': '电影票房', 'value': 'movie'},
+                        {'title': '网络电影', 'value': 'web-movie'},
+                        {'title': '影史总票房', 'value': 'total'},
+                        {'title': '国内年度', 'value': 'year'},
+                        {'title': '全球年度', 'value': 'global'},
+                    ], 7),
+                    type_select('maoyan_type_tv', '剧集/综艺榜单', [
+                        {'title': '剧集综合（电视剧+网剧）', 'value': 'web-all'},
+                        {'title': '综艺热度', 'value': 'zongyi'},
+                    ], 5),
+                ], cls='align-start'),
+                num_group('自动订阅', [
+                    ('猫眼全网电影榜', 'maoyan_movie_sub_num'),
+                    ('猫眼全网剧集榜', 'maoyan_tv_sub_num'),
+                    ('猫眼全网综艺榜', 'maoyan_zongyi_sub_num'),
                 ]),
-                type_col('maoyan_type_tv', '剧集榜单类型', [
-                    {'title': '剧集综合榜单（电视剧+网剧）', 'value': 'web-all'},
-                    {'title': '综艺热度榜单', 'value': 'zongyi'},
+                num_group('平台专项榜', [
+                    ('腾讯视频', 'maoyan_tx_sub_num'),
+                    ('爱奇艺', 'maoyan_iqy_sub_num'),
+                    ('芒果TV', 'maoyan_mg_sub_num'),
+                    ('优酷', 'maoyan_yk_sub_num'),
                 ]),
             ],
-        },
-        {
-            'component': 'VRow',
-            'content': [
-                rank_group('maoyan_movie_rec_enabled', '电影榜',
-                           'maoyan_movie_sub_num', 4),
-                rank_group('maoyan_tv_rec_enabled', '剧集榜',
-                           'maoyan_tv_sub_num', 4),
-                rank_group('maoyan_zongyi_rec_enabled', '综艺榜',
-                           'maoyan_zongyi_sub_num', 4),
-            ],
-        },
-        section_hint(
-            '猫眼平台细分榜',
-            '各视频平台的专项榜单，同样「开关决定抓不抓、条数决定订不订」。'
-            '四个平台默认关闭，需要时再打开。',
         ),
-        {
-            'component': 'VRow',
-            'content': [
-                rank_group('maoyan_tx_rec_enabled', '腾讯视频',
-                           'maoyan_tx_sub_num', 3),
-                rank_group('maoyan_iqy_rec_enabled', '爱奇艺',
-                           'maoyan_iqy_sub_num', 3),
-                rank_group('maoyan_mg_rec_enabled', '芒果TV',
-                           'maoyan_mg_sub_num', 3),
-                rank_group('maoyan_yk_rec_enabled', '优酷',
-                           'maoyan_yk_sub_num', 3),
-            ],
-        },
-        # ---- Netflix ----
-        section_hint(
+        setting_card(
             'Netflix 榜单',
             'Netflix 官方 Tudum Top 10，每周二更新。全球榜带周观看量与在榜周数，'
             '地区榜只有名次；Netflix 未进入中国大陆，地区榜可选中国香港、中国台湾等。',
-        ),
-        {
-            'component': 'VRow',
-            'content': [
-                switch('netflix_enabled', '启用 Netflix 数据源', 4,
-                       '关闭后不抓取 Netflix 榜单，接口也不返回相关数据'),
-                form_col('VSelect', {
-                    'model': 'netflix_regions',
-                    'label': '榜单地区',
-                    'items': region_items,
-                    'chips': True,
-                    'multiple': True,
-                    'density': 'compact',
-                    'variant': 'outlined',
-                    'hint': '全球榜含观看量与在榜周数；地区榜只有名次',
-                    'persistent-hint': True,
-                }, md=8),
+            [
+                form_row([switch_col('netflix_enabled', '启用 Netflix 数据源', 6)]),
+                form_row([
+                    type_select('netflix_regions', '榜单地区',
+                                region_items, 12),
+                ]),
             ],
-        },
+        ),
     ]
 
     defaults = {
@@ -305,28 +299,21 @@ def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
         'recommend_enabled': False,
         # 猫眼
         'maoyan_enabled': True,
-        'maoyan_sub_enabled': False,
         'maoyan_type_movie': ['movie', 'web-movie'],
         'maoyan_type_tv': ['web-all', 'zongyi'],
         'maoyan_movie_sub_num': 0,
-        'maoyan_movie_rec_enabled': True,
         'maoyan_tv_sub_num': 0,
-        'maoyan_tv_rec_enabled': True,
         'maoyan_zongyi_sub_num': 0,
-        'maoyan_zongyi_rec_enabled': True,
         'maoyan_tx_sub_num': 0,
         'maoyan_iqy_sub_num': 0,
         'maoyan_mg_sub_num': 0,
         'maoyan_yk_sub_num': 0,
-        'maoyan_tx_rec_enabled': False,
-        'maoyan_iqy_rec_enabled': False,
-        'maoyan_mg_rec_enabled': False,
-        'maoyan_yk_rec_enabled': False,
         # Netflix
         'netflix_enabled': True,
         'netflix_regions': regions,
     }
-    # 用当前运行态覆盖默认值，让设置页回显已保存的配置
+    # 用当前运行态覆盖默认值，让设置页回显已保存的配置；
+    # 未渲染的死开关（*_rec_enabled 等）也一并带回，保存时不会丢字段。
     defaults.update(host.serialize_config())
     return [promo_card(), {'component': 'VForm', 'content': rows}], defaults
 
@@ -386,8 +373,10 @@ def _poster_box(poster: str, rank: int) -> dict:
     }
     image = {
         'component': 'VImg',
+        # 折叠面板是展开时才创建节点，加 eager 让图片立刻开始加载，
+        # 否则要等一次重排触发 IntersectionObserver，展开瞬间会先看到空框
         'props': {'src': poster, 'height': 132, 'width': 88,
-                  'aspect-ratio': '2/3', 'cover': True},
+                  'aspect-ratio': '2/3', 'cover': True, 'eager': True},
     } if poster else {
         'component': 'div',
         'props': {'class': 'd-flex align-center justify-center '
@@ -567,51 +556,76 @@ def _netflix_rank_card(row: dict) -> dict:
     }
 
 
-def _board_section(source_id: str, board: dict, title: str,
-                   subtitle: str = "") -> dict:
-    """单个榜单分区：标题 + 条数 + 可选副标题 + 条目网格。"""
+def _board_panel(source_id: str, board: dict, title: str, value: str,
+                 subtitle: str = "") -> dict:
+    """单个榜单 = 一个可折叠面板。
+
+    宿主的 JSON 页面渲染器只是 ``h()`` 静态展开，没有组件状态（拿不到
+    ``v-model``），横排 ``VTabs`` 切不动内容；折叠面板自带展开状态，外层用
+    accordion 保证一次只展开一个，交互上等价于「切换榜单」而非「往下翻页」。
+    """
     board_type = str(board.get("type") or "")
     items = [row for row in (board.get("items") or []) if isinstance(row, dict)]
     shown = items[:PAGE_BOARD_LIMIT]
 
-    header: List[dict] = [
+    # 标题行：榜单名（过长省略）+ 条数 + 日期；右侧留给宿主的展开箭头
+    head: List[dict] = [
         {'component': 'span',
-         'props': {'class': 'text-subtitle-2 font-weight-bold'},
+         'props': {'class': 'text-body-1 font-weight-medium '
+                            'text-truncate min-w-0'},
          'text': title},
         {'component': 'VChip',
-         'props': {'size': 'x-small', 'variant': 'tonal', 'color': 'primary'},
+         'props': {'size': 'x-small', 'variant': 'tonal', 'color': 'primary',
+                   'class': 'flex-shrink-0'},
          'text': f"{len(items)} 条"},
     ]
     if subtitle:
-        header.append({'component': 'span',
-                       'props': {'class': 'text-caption text-medium-emphasis'},
-                       'text': subtitle})
+        # 日期推到箭头左侧：没有这个占位时它会紧贴条数徽标，标题行中间留一大片空
+        head.append({'component': 'div', 'props': {'class': 'flex-grow-1'}})
+        head.append({'component': 'span',
+                     'props': {'class': 'text-caption text-medium-emphasis '
+                                        'flex-shrink-0'},
+                     'text': subtitle})
 
     build = ((lambda row: _maoyan_rank_card(row, board_type))
              if source_id == SOURCE_MAOYAN else _netflix_rank_card)
-    children = [
-        {'component': 'div',
-         'props': {'class': 'd-flex align-center flex-wrap ga-2 mb-3'},
-         'content': header},
-        {'component': 'div',
-         'props': {'class': 'grid gap-3 grid-info-card'},
-         'content': [build(row) for row in shown]},
-    ]
+    body: List[dict] = [{
+        'component': 'div',
+        'props': {'class': 'grid gap-3 grid-info-card'},
+        'content': [build(row) for row in shown],
+    }]
     if len(items) > PAGE_BOARD_LIMIT:
-        children.append({
+        body.append({
             'component': 'div',
-            'props': {'class': 'text-caption text-medium-emphasis mt-2'},
-            'text': f"共 {len(items)} 条，展示前 {PAGE_BOARD_LIMIT} 条，完整数据见推荐页",
+            'props': {'class': 'text-caption text-medium-emphasis mt-3'},
+            'text': f"共 {len(items)} 条，展示前 {PAGE_BOARD_LIMIT} 条，"
+                    f"完整数据见推荐页",
         })
-    return {'component': 'div', 'props': {'class': 'mb-6'}, 'content': children}
+
+    return {
+        'component': 'VExpansionPanel',
+        'props': {'value': value},
+        'content': [
+            {'component': 'VExpansionPanelTitle',
+             'content': [{
+                 'component': 'div',
+                 'props': {'class': 'd-flex align-center ga-3 '
+                                    'flex-grow-1 min-w-0'},
+                 'content': head,
+             }]},
+            {'component': 'VExpansionPanelText',
+             'props': {'class': 'pt-0'},
+             'content': body},
+        ],
+    }
 
 
-def _refresh_button(source_id: str) -> dict:
+def _refresh_button(source_id: str, variant: str = "tonal") -> dict:
     """数据源刷新按钮：只刷新本数据源，避免一次点击串行抓两边。"""
     return {
         'component': 'VBtn',
-        'props': {'color': 'primary', 'variant': 'tonal', 'size': 'small',
-                  'prepend-icon': 'mdi-refresh'},
+        'props': {'color': 'primary', 'variant': variant, 'size': 'small',
+                  'prepend-icon': 'mdi-refresh', 'class': 'flex-shrink-0'},
         'text': '刷新',
         'events': {'click': {'api': 'plugin/GlobalRankPro/refresh',
                              'method': 'GET',
@@ -619,38 +633,76 @@ def _refresh_button(source_id: str) -> dict:
     }
 
 
-def _source_section(host: Any, source: Any, title: str) -> List[dict]:
-    """构造一个数据源的榜单区块（标题栏 + 各榜单分区）。"""
-    boards = source.boards()
-    updated_at = str(source.snapshot_meta().get("updated_at") or "")
+def _overview_card(host: Any) -> dict:
+    """概览卡：两个数据源的榜数、条数、更新时间与独立刷新。"""
+    rows: List[dict] = []
+    for source_id, label, icon in (
+            (SOURCE_MAOYAN, '猫眼榜单', 'mdi-movie-open-outline'),
+            (SOURCE_NETFLIX, 'Netflix 榜单', 'mdi-television-classic')):
+        source = host.sources.get(source_id)
+        if source is None:
+            continue
+        enabled = bool(getattr(source, "enabled", False))
+        boards = source.boards() if enabled else []
+        total = sum(len(b.get("items") or []) for b in boards)
+        updated = _safe_text(source.snapshot_meta().get("updated_at")) if enabled else ""
 
-    header = {
-        'component': 'div',
-        'props': {'class': 'd-flex justify-space-between align-center '
-                           'flex-wrap ga-2 mb-4'},
-        'content': [
-            {'component': 'div', 'content': [
-                {'component': 'div',
-                 'props': {'class': 'text-h6'}, 'text': title},
-                {'component': 'div',
+        if not enabled:
+            detail = '未启用'
+        elif not boards:
+            detail = '暂无快照'
+        else:
+            detail = f"{len(boards)} 个榜 · {total} 条"
+            if updated:
+                detail = f"{detail} · 更新于 {updated}"
+
+        right: List[dict] = [
+            {'component': 'div', 'props': {'class': 'flex-grow-1'}},
+            ({'component': 'span',
+              'props': {'class': 'text-caption text-medium-emphasis'},
+              'text': '在设置里启用'} if not enabled
+             else _refresh_button(source_id)),
+        ]
+        rows.append({
+            'component': 'div',
+            'props': {'class': 'd-flex align-center flex-wrap ga-3 py-2'},
+            'content': [
+                {'component': 'VIcon',
+                 'props': {'icon': icon, 'size': 20,
+                           'color': 'primary' if enabled else 'disabled'}},
+                {'component': 'span',
+                 'props': {'class': 'text-body-1 font-weight-medium '
+                                    'flex-shrink-0'},
+                 'text': label},
+                {'component': 'span',
                  'props': {'class': 'text-caption text-medium-emphasis'},
-                 'text': (f"快照更新于 {_safe_text(updated_at, '未知时间')}"
-                          if updated_at else "暂无榜单快照")},
-            ]},
-            _refresh_button(source.source_id),
-        ],
+                 'text': detail},
+            ] + right,
+        })
+
+    content: List[dict] = []
+    for index, row in enumerate(rows):
+        if index:
+            content.append({'component': 'VDivider'})
+        content.append(row)
+    return {
+        'component': 'VCard',
+        'props': {'variant': 'outlined', 'class': 'mb-6'},
+        'content': [{
+            'component': 'div',
+            'props': {'style': {'padding': '6px 16px'}},
+            'content': content,
+        }],
     }
 
-    if not boards:
-        return [header, {
-            'component': 'VAlert',
-            'props': {'type': 'info', 'variant': 'tonal',
-                      'text': '暂无榜单快照，点击「刷新」或等待定时任务运行'},
-        }]
 
-    nodes: List[dict] = [header]
+def _source_panels(source: Any) -> List[dict]:
+    """把一个数据源的各榜单装进 accordion，一次只展开一个。"""
+    boards = source.boards()
+    panels: List[dict] = []
+
     if source.source_id == SOURCE_MAOYAN:
-        # 猫眼：同一类型可能有多份平台细分榜，分区只展示主榜（全网榜）
+        # 猫眼：同一类型可能有多份平台细分榜，只展示主榜（全网榜）
         grouped: Dict[str, List[dict]] = {}
         for board in boards:
             board_type = str(board.get("type") or "")
@@ -672,20 +724,22 @@ def _source_section(host: Any, source: Any, title: str) -> List[dict]:
             board = primary(grouped[board_type])
             label = (getattr(source, "_TYPE_NAMES", {}) or {}).get(
                 board_type, str(board.get("type_name") or board_type))
-            nodes.append(_board_section(
-                source.source_id, board, label,
+            panels.append(_board_panel(
+                source.source_id, board, label, board_type,
                 _safe_day(board.get("show_date"))))
     else:
-        # Netflix：按地区 × 内容类型逐榜展示
+        # Netflix：按地区 × 内容类型逐榜展示，顺序跟随设置里勾选的地区
         region_names = getattr(source, "_REGION_NAMES", {}) or {}
         kind_names = getattr(source, "_KIND_NAMES", {}) or {}
         order_regions = list(getattr(source, "_regions", []))
         order = {code: index for index, code in enumerate(order_regions)}
+        # 全球榜在快照里的 region 是空串（沿用原 NetflixPro 的历史约定），
+        # 直接取出来会落到默认序 99，把全球榜排到所有地区榜后面
         boards = sorted(
             boards,
-            key=lambda b: (order.get(str(b.get("region") or ""), 99),
+            key=lambda b: (order.get(str(b.get("region") or "") or "global", 99),
                            0 if str(b.get("kind") or "") == "film" else 1))
-        for board in boards:
+        for index, board in enumerate(boards):
             region = str(board.get("region") or "")
             kind = str(board.get("kind") or "")
             # 榜单名自带「地区 · 内容类型（语种）」，比按地区+类型拼更准：
@@ -696,25 +750,28 @@ def _source_section(host: Any, source: Any, title: str) -> List[dict]:
             if not label:
                 label = (f"{region_names.get(region, '全球' if not region else region)}"
                          f"{kind_names.get(kind, kind)}")
-            nodes.append(_board_section(
-                source.source_id, board, label,
+            panels.append(_board_panel(
+                source.source_id, board, label, f"netflix:{index}",
                 _safe_text(board.get("week"))))
-    return nodes
+
+    if not panels:
+        return []
+    return [{
+        'component': 'VExpansionPanels',
+        'props': {'variant': 'accordion', 'multiple': False,
+                  'flat': True, 'class': 'mb-6'},
+        'content': panels,
+    }]
 
 
-def _history_section(source: Any) -> List[dict]:
-    """猫眼订阅历史（Netflix 无订阅语义，不展示）。"""
+def _history_rows(source: Any) -> List[dict]:
+    """猫眼订阅历史转表格行。"""
     historys = source.get_data('history') or []
     if not isinstance(historys, list):
         historys = [historys]
     historys = sorted(
         [h for h in historys if isinstance(h, dict)],
         key=lambda x: x.get('time') or "", reverse=True)
-    if not historys:
-        return [{'component': 'div',
-                 'props': {'class': 'text-center pa-6 text-medium-emphasis'},
-                 'text': '暂无订阅历史'}]
-
     rows = []
     for index, history in enumerate(historys, start=1):
         media_type = _safe_text(history.get("type"), "未知")
@@ -732,28 +789,80 @@ def _history_section(source: Any) -> List[dict]:
                 if normalize_media_source(history.get("media_source")) == MediaSource.TMDB
                 else None),
         })
+    return rows
 
-    return [{
-        'component': 'VDataTable',
-        'props': {
-            'headers': [
-                {'title': '#', 'key': 'index', 'sortable': False},
-                {'title': '标题', 'key': 'title'},
-                {'title': '类型', 'key': 'type'},
-                {'title': '平台', 'key': 'platform'},
-                {'title': '上线信息', 'key': 'release_info'},
-                {'title': '时间', 'key': 'time'},
+
+def _history_panel(source: Any) -> dict:
+    """订阅历史包成一个折叠面板，默认收起，不占首屏。"""
+    rows = _history_rows(source)
+    if rows:
+        body: List[dict] = [{
+            'component': 'VDataTable',
+            'props': {
+                'headers': [
+                    {'title': '#', 'key': 'index', 'sortable': False},
+                    {'title': '标题', 'key': 'title'},
+                    {'title': '类型', 'key': 'type'},
+                    {'title': '平台', 'key': 'platform'},
+                    {'title': '上线信息', 'key': 'release_info'},
+                    {'title': '时间', 'key': 'time'},
+                ],
+                'items': rows,
+                'items-per-page': 10,
+                'density': 'compact',
+            },
+        }]
+    else:
+        body = [{'component': 'div',
+                 'props': {'class': 'text-center pa-4 text-medium-emphasis'},
+                 'text': '暂无订阅历史'}]
+
+    return {
+        'component': 'VExpansionPanels',
+        'props': {'variant': 'accordion', 'multiple': False, 'flat': True},
+        'content': [{
+            'component': 'VExpansionPanel',
+            'props': {'value': 'history'},
+            'content': [
+                {'component': 'VExpansionPanelTitle',
+                 'content': [{
+                     'component': 'div',
+                     'props': {'class': 'd-flex align-center ga-3 flex-grow-1'},
+                     'content': [
+                         {'component': 'span',
+                          'props': {'class': 'text-body-1 font-weight-medium'},
+                          'text': '自动订阅记录'},
+                         {'component': 'VChip',
+                          'props': {'size': 'x-small', 'variant': 'tonal',
+                                    'color': 'primary'},
+                          'text': f"{len(rows)} 条"},
+                     ],
+                 }]},
+                {'component': 'VExpansionPanelText',
+                 'props': {'class': 'pt-0'},
+                 'content': body},
             ],
-            'items': rows,
-            'items-per-page': 10,
-            'density': 'compact',
-        },
-    }]
+        }],
+    }
+
+
+def _section_title(title: str, hint: str = "") -> dict:
+    """数据源分区标题行。"""
+    content: List[dict] = [{'component': 'div',
+                            'props': {'class': 'text-h6'},
+                            'text': title}]
+    if hint:
+        content.append({'component': 'span',
+                        'props': {'class': 'text-caption text-medium-emphasis'},
+                        'text': hint})
+    return {'component': 'div',
+            'props': {'class': 'd-flex align-baseline flex-wrap ga-3 mb-2'},
+            'content': content}
 
 
 def build_page(host: Any) -> List[dict]:
-    """拼装插件详情页：App 推荐 + 各数据源榜单 + 猫眼订阅历史。"""
-    nodes: List[dict] = [promo_card()]
+    """拼装插件详情页：概览 → 两个数据源的可折叠榜单 → 订阅历史 → App 推荐。"""
+    nodes: List[dict] = [_overview_card(host)]
 
     for source_id, title, label in (
             (SOURCE_MAOYAN, '猫眼榜单', '猫眼'),
@@ -761,21 +870,33 @@ def build_page(host: Any) -> List[dict]:
         source = host.sources.get(source_id)
         if source is None:
             continue
+        nodes.append(_section_title(
+            title, '点击任意榜单展开，展开另一个时自动收起'))
         if not getattr(source, "enabled", False):
             # 提示文案里的配置项名与设置页保持一致（「启用猫眼数据源」等）
             nodes.append({
                 'component': 'VAlert',
                 'props': {'type': 'warning', 'variant': 'tonal',
+                          'class': 'mb-6',
                           'text': f"{title}数据源未启用：在插件设置里打开"
                                   f"「启用{label}数据源」"},
             })
             continue
-        nodes.extend(_source_section(host, source, title))
+        panels = _source_panels(source)
+        if not panels:
+            nodes.append({
+                'component': 'VAlert',
+                'props': {'type': 'info', 'variant': 'tonal',
+                          'class': 'mb-6',
+                          'text': '暂无榜单快照，点击上方「刷新」或等待定时任务运行'},
+            })
+            continue
+        nodes.extend(panels)
 
     maoyan = host.sources.get(SOURCE_MAOYAN)
     if maoyan is not None and getattr(maoyan, "enabled", False):
-        nodes.append({'component': 'div',
-                      'props': {'class': 'text-h6 mb-3'},
-                      'text': '订阅历史'})
-        nodes.extend(_history_section(maoyan))
+        nodes.append(_section_title('订阅历史'))
+        nodes.append(_history_panel(maoyan))
+
+    nodes.append(promo_card())
     return nodes

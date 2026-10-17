@@ -492,10 +492,15 @@ def test_get_form_contains_both_sources(plugin):
     # 猫眼配置
     assert "猫眼榜单" in form_blob
     assert "启用猫眼数据源" in form_blob
-    assert "自动订阅新上榜" in form_blob
-    assert "电影榜单类型" in form_blob
-    assert "剧集榜单类型" in form_blob
-    assert "全球年度票房榜" in form_blob
+    assert "电影榜单" in form_blob
+    assert "剧集/综艺榜单" in form_blob
+    for label in ("猫眼全网电影榜", "猫眼全网剧集榜", "猫眼全网综艺榜"):
+        assert label in form_blob
+    assert "全球年度" in form_blob
+    # 没有消费方的遗留开关不再出现在表单上，避免「开了没反应」
+    for dead in ("maoyan_sub_enabled", "maoyan_movie_rec_enabled",
+                 "maoyan_tx_rec_enabled"):
+        assert dead not in form_blob
     # Netflix 配置
     assert "Netflix 榜单" in form_blob
     assert "启用 Netflix 数据源" in form_blob
@@ -618,6 +623,63 @@ def test_get_page_netflix_board_titles_use_board_name(plugin):
     assert "全球 · 电影（非英语）" in blob
     # 旧写法会把两份都渲染成「全球电影」
     assert "全球电影" not in blob
+
+
+def test_page_boards_are_accordion_panels(plugin):
+    """每个榜单是一个折叠面板，一次只展开一个。
+
+    宿主 JSON 页面渲染器没有 v-model，横排 VTabs 切不动窗口内容，只能用
+    VExpansionPanels（官方 JSON 模式插件的做法）。这条用例把结构固定下来，
+    避免以后退回「所有榜单平铺、靠滚动翻页」。
+    """
+    def walk(node):
+        if isinstance(node, list):
+            for item in node:
+                yield from walk(item)
+        elif isinstance(node, dict):
+            yield node
+            yield from walk(node.get("content") or [])
+
+    nodes = list(walk(plugin.get_page()))
+    groups = [n for n in nodes if n.get("component") == "VExpansionPanels"]
+    titles = [n for n in nodes if n.get("component") == "VExpansionPanelTitle"]
+
+    # 猫眼 + Netflix 各一组，订阅历史一组
+    assert len(groups) == 3
+    assert all(g["props"]["multiple"] is False for g in groups)
+    assert all(g["props"]["variant"] == "accordion" for g in groups)
+    # 猫眼 2 个榜 + Netflix 2 个榜 + 订阅历史 1 个
+    assert len(titles) == 5
+    # 标题行必须带条数徽标，否则收起后只剩名字、看不到数据量
+    assert sum(
+        1 for t in titles
+        for child in (t.get("content") or [])
+        for chip in ((child.get("content") or []) if isinstance(child, dict) else [])
+        if isinstance(chip, dict) and chip.get("component") == "VChip"
+    ) == 5
+
+
+def test_page_overview_shows_source_stats(plugin):
+    """页面顶部概览卡给出两源的榜数与条数，不用展开就能看清体量。"""
+    blob = json.dumps(plugin.get_page()[:1], ensure_ascii=False)
+
+    assert "猫眼榜单" in blob
+    assert "Netflix 榜单" in blob
+    assert "个榜" in blob
+    assert "更新于" in blob
+    # 两源各自的刷新入口都在概览卡里
+    assert "\"source\": \"maoyan\"" in blob
+    assert "\"source\": \"netflix\"" in blob
+
+
+def test_netflix_region_choices_include_us(plugin):
+    """Netflix 地区白名单包含美国，设置页多选跟着出现。"""
+    netflix = plugin.sources[SOURCE_NETFLIX]
+    assert netflix._REGION_NAMES.get("us") == "美国"
+
+    form_blob = json.dumps(plugin.get_form()[0], ensure_ascii=False)
+    assert "\"title\": \"美国\"" in form_blob
+    assert "\"value\": \"us\"" in form_blob
 
 
 # ==================== 生命周期 ====================

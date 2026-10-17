@@ -9,11 +9,10 @@
 前缀，与 Netflix 数据源互不覆盖。
 """
 import datetime
-import json
 import random
 import re
 import time
-from typing import Tuple, List, Dict, Any
+from typing import List, Dict, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytz
@@ -31,7 +30,6 @@ from app.sdk.media import normalize_media_source, resolve_media_identity
 
 from .base import (
     RankBoard,
-    RankItem,
     RankSource,
     SOURCE_MAOYAN,
 )
@@ -538,9 +536,7 @@ class MaoyanSource(RankSource):
         参数 seriesType: 代表类型 0: 电视剧 1: 网络剧 2: 综艺；不传该参数时为电视剧+网络剧综合榜
         参数 platformType: 代表平台 0 全网 3 腾讯视频 2 爱奇艺 1 优酷 7 芒果 5 搜狐 4 乐视 6 PPTV
         """
-        logger.info(f"开始刷新猫眼榜单...")
-        # 获取当前日期时间
-        current_time = datetime.datetime.now()
+        logger.info("开始刷新猫眼榜单...")
         # 各组抓取条数取「订阅条数」与「推荐条数」的较大者：
         # 订阅只取前「订阅条数」条，快照/推荐页保留抓取到的全部条目。
         movie_nums = max(self._movie_sub_num, self._movie_rec_num)
@@ -646,7 +642,7 @@ class MaoyanSource(RankSource):
         self.save_data('history', history)
         # 保存榜单快照：接口读取的是一等公民的榜单数据，不再依赖订阅流水
         self.__save_snapshot(last_boards)
-        logger.info(f"猫眼订阅刷新完成")
+        logger.info("猫眼订阅刷新完成")
         return {
             "board_count": len(last_boards),
             "item_count": sum(board.get("count", 0) for board in last_boards),

@@ -23,7 +23,6 @@ Netflix 榜单数据源（v3）。
 import csv
 import datetime
 import io
-import time
 from typing import Tuple, List, Dict, Any
 
 import pytz
@@ -38,7 +37,6 @@ from app.schemas import MediaType
 
 from .base import (
     RankBoard,
-    RankItem,
     RankSource,
     SOURCE_NETFLIX,
 )
@@ -170,14 +168,16 @@ class NetflixSource(RankSource):
     source_id = SOURCE_NETFLIX
     source_name = "Netflix榜单"
 
-    # 抓取的地区：global 为全球榜，其余为对应国家/地区榜
-    _regions = ['global', 'hk', 'tw']
+    # 抓取的地区：global 为全球榜，其余为对应国家/地区榜。
+    # 顺序即 App 子榜单的展示顺序（全球 → 美国 → 日本 → 韩国 → 中国香港 → 中国台湾 → 新加坡）
+    _regions = ['global', 'us', 'jp', 'kr', 'hk', 'tw', 'sg']
 
     # 地区代码 -> 中文名（与宿主前端地域表述保持一致）
     _REGION_NAMES = {
         'global': '全球',
         'hk': '中国香港',
         'tw': '中国台湾',
+        'us': '美国',
         'jp': '日本',
         'kr': '韩国',
         'sg': '新加坡',
