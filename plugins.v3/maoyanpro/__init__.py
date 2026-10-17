@@ -175,7 +175,7 @@ class MaoyanPro(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan-v2.png"
     # 插件版本
-    plugin_version = "1.2.5"
+    plugin_version = "1.2.6"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -299,9 +299,14 @@ class MaoyanPro(_PluginBase):
     # 单轮识别的时间预算（秒）：识别一条要请求 TMDB，条数再多也不能把整轮刷新拖死；
     # 超时就收工，没轮到的条目靠「缺图优先」排序在下一轮排到最前面。
     _RESOLVE_TIME_BUDGET = 180.0
-    # 被限额/超时截断、且上一份快照里本来也没图的条目，用豆瓣 suggest 补一张兜底图
-    # （单次 HTTP、不走识别链，很便宜），避免「新进榜条目空一个灰洞」。
+    # 缺海报的条目用豆瓣 suggest 补兜底图的单轮额度（单次 HTTP、不走识别链，很便宜）。
+    # 覆盖三类：被限额/超时截断还没识别的、识别到身份但 TMDB 没给图的、压根认不出来的。
     _POSTER_FALLBACK_LIMIT = 60
+    # 同一条目连续补不到图的上限：豆瓣确实没有这条时不必每轮都再打一次
+    _POSTER_FALLBACK_MAX_MISS = 3
+    # 豆瓣 suggest 的请求间隔（秒）：连打会被拦（实测连续几次后直接返回空），
+    # 一旦某次请求抛异常就认定被限流，本轮立即停止补图（已补上的照常落库）
+    _POSTER_FALLBACK_INTERVAL = 0.4
     # 识别缓存 TTL：已识别到媒体且拿到海报的条目长期有效；
     # 只拿到兜底海报（或啥都没有）的条目过期后重试 —— 新节目可能随后上架 TMDB
     _IDENTITY_TTL_FALLBACK = 2 * 86400
@@ -1857,6 +1862,11 @@ class MaoyanPro(_PluginBase):
         以前按 board 顺序识别，全球年度票房榜排在 4 个电影榜最后，攒够 400 条待识别条目时
         它每一轮都被 80 条限额截断 —— 结果该榜新进榜条目长期没有海报（如 Obsession），
         上映日期也永远补不上（日期只能靠 TMDB 识别拿）。按缺失程度排序后，新条目最多等一轮。
+
+        ⚠️ 「识别到身份」不等于「有海报」：TMDB 有些记录压根没有 poster（Obsession 匹配到
+        tmdb/1436161 但图是空串）。这类条目以前被 TTL 分支当作有效缓存放回内存，既不重识别
+        也不补图，一空就是一整个 TTL。现在所有「缓存里没图且上一份快照也没图」的条目都会走
+        一次豆瓣兜底补图（见下面 B 段）。
         """
         if not boards:
             return
@@ -1934,36 +1944,91 @@ class MaoyanPro(_PluginBase):
             identity["ts"] = current_time.timestamp()
             self._resolved_identity[title] = identity
 
-        # B：被限额/超时截断、且上一份快照里也没图的条目，至少补一张兜底海报。
-        # 它们正是 App 里会显示成灰洞的那批（新进榜 + 排在最后），不补的话要等好几轮。
-        fallback = 0
-        for miss, _prio, _order, title, release_info, mtype in pending[resolved:]:
-            if fallback >= self._POSTER_FALLBACK_LIMIT:
-                break
-            if title in self._resolved_identity:
+        # B：兜底补图。会显示成灰洞的有三类条目，都走一次豆瓣检索（单次 HTTP，
+        # 不占识别额度）：
+        #   ① 本轮被限额/超时截断，还没轮到识别；
+        #   ② 识别到了媒体身份，但 TMDB 那条记录本身没有海报（Obsession 就是：身份拿到了
+        #      tmdb/1436161，poster 是空串）—— 这类以前被 TTL 分支当成「有效缓存」放回内存，
+        #      结果既不再识别、也不补图，一空就是一整轮 TTL（2 天）；
+        #   ③ 怎么也认不出来（空身份），兜底图也试一次。
+        mtype_by_title: dict = {}
+        for board in boards:
+            mt = self._BOARD_MEDIA_TYPES.get(board.get("type"), MediaType.TV)
+            for item in board.get("items", []):
+                t = item.get("title")
+                if isinstance(t, str) and t:
+                    mtype_by_title.setdefault(t, mt)
+
+        need_fallback: List[str] = []
+        seen_fallback = set()
+        cutoff_titles = {p[3] for p in pending[resolved:]}
+        release_info_by_title = {p[3]: p[4] for p in pending}
+        # ① 截断的、还没识别的
+        for _m, _p, _o, title, _ri, _mt in pending[resolved:]:
+            if title in self._resolved_identity or title in seen_fallback:
                 continue
-            if not (prev_map.get(title) or {}).get("poster"):
-                poster, cn_title = self.__douban_poster(title, mtype)
-                fallback += 1
-                year = self.__release_year(release_info, current_time)
-                self._resolved_identity[title] = {
+            if (prev_map.get(title) or {}).get("poster"):
+                continue  # 上一份快照有图，__save_snapshot 会回填，不必再请求
+            seen_fallback.add(title)
+            need_fallback.append(title)
+        # ②③ 已在缓存里（含本轮刚识别的）但没海报
+        for title in mtype_by_title:
+            if title in seen_fallback or title in cutoff_titles:
+                continue
+            identity = self._resolved_identity.get(title)
+            if not identity or identity.get("poster"):
+                continue
+            if (prev_map.get(title) or {}).get("poster"):
+                continue
+            # 反复补不到图的（数据源确实没有）别每轮都再打一次
+            if int(identity.get("miss") or 0) >= self._POSTER_FALLBACK_MAX_MISS:
+                continue
+            seen_fallback.add(title)
+            need_fallback.append(title)
+
+        fallback = 0
+        self._douban_blocked = False
+        for title in need_fallback:
+            # 被豆瓣限流就本轮收手：剩余条目的 miss 不动，下一轮再试
+            if fallback >= self._POSTER_FALLBACK_LIMIT or self._douban_blocked:
+                break
+            mtype = mtype_by_title.get(title, MediaType.TV)
+            release_info = release_info_by_title.get(title)
+            if release_info is None:
+                release_info = (prev_map.get(title) or {}).get("releaseInfo")
+            year = str((raw_cache.get(title) or {}).get("year")
+                       or self.__release_year(release_info, current_time) or "")
+            poster, cn_title = self.__douban_poster(title, mtype, year)
+            fallback += 1
+            identity = self._resolved_identity.get(title)
+            if identity is None:
+                # ① 还没识别过：只填兜底图，不伪造媒体身份
+                identity = {
                     "media_source": "",
                     "media_id": "",
-                    "poster": poster,
+                    "poster": "",
                     "overview": "",
-                    "year": str(year or ""),
+                    "year": year,
                     "type": mtype.value,
-                    "title_cn": cn_title if cn_title and cn_title != title else "",
+                    "title_cn": "",
                     "release_date": "",
                     "ts": current_time.timestamp(),
-                    # 兜底也没补到图：累计失败次数，下一轮沉到后面，别反复占用兜底额度
-                    "miss": miss if poster else miss + 1,
+                    # 继承历史失败次数：不能从 0 重来，否则沉底排序失效
+                    "miss": int((raw_cache.get(title) or {}).get("miss") or 0),
                 }
-                if poster:
-                    logger.info(f"猫眼条目 {title} 本轮未轮到识别，已用豆瓣检索补齐海报")
+            elif not identity.get("year"):
+                identity["year"] = year
+            if poster:
+                identity["poster"] = poster
+                if cn_title and cn_title != title and not identity.get("title_cn"):
+                    identity["title_cn"] = cn_title
+                identity["miss"] = 0
+                logger.info(f"猫眼条目 {title} 缺海报，已用豆瓣检索补齐")
             else:
-                # 上一份快照有图：__save_snapshot 会按标题回填，不必再请求
-                continue
+                # 补不到就累加 miss：达到上限后本轮不再尝试，也不会被排序挤到前面
+                identity["miss"] = int(identity.get("miss") or 0) + 1
+            identity.setdefault("ts", current_time.timestamp())
+            self._resolved_identity[title] = identity
 
         left = len(pending) - resolved
         if left > 0:
@@ -2055,37 +2120,77 @@ class MaoyanPro(_PluginBase):
             "release_date": "",
         }
 
-    def __douban_poster(self, title: str, mtype: MediaType) -> tuple:
+    def __douban_poster(self, title: str, mtype: MediaType, year: str = "") -> tuple:
         """
-        识别失败时用豆瓣检索兜底补一张海报（只补图，不提供媒体身份）。
+        识别失败（或识别到了但没海报）时用豆瓣检索兜底补一张海报（只补图，不提供媒体身份）。
 
         豆瓣图片有防盗链（无 Referer 返回 418），App 直连时同样需要补 Referer，
         宿主图片代理则会自行带上，因此这里只负责给出可用的图片地址；
         同时带回豆瓣词条标题（多为中文），供英文榜单条目转中文展示。
         返回 (poster_url, cn_title)，检索失败时两者为空串。
+
+        长英文片名在豆瓣常常整串搜不到（实测「Chiikawa the Movie: The Secret of Mermaid
+        Island」返回空，但「Chiikawa」能命中《吉伊卡哇：人鱼之岛的秘密》），因此整串搜不到时
+        按词逐步截短再试。截短检索会放宽匹配，必须靠 [year] 校验兜住 —— 只接受年份完全一致的
+        候选，拿不到年份的条目不参与降级检索，宁可不补图也不张冠李戴。
         """
-        try:
-            candidates = RequestUtils(
-                headers={"User-Agent": self.get_random_user_agent()},
-                proxies=getattr(settings, "PROXY", None),
-                referer="https://movie.douban.com/",
-            ).get_json("https://movie.douban.com/j/subject_suggest", params={"q": title})
-        except Exception as e:
-            logger.debug(f"猫眼条目 {title} 豆瓣补图请求失败：{e}")
+        def _query(keyword: str) -> list:
+            # 节流：连打会被豆瓣拦（表现为返回空/异常），否则一轮补图全军覆没
+            last = getattr(self, "_douban_last_at", 0.0)
+            gap = time.monotonic() - last
+            if gap < self._POSTER_FALLBACK_INTERVAL:
+                time.sleep(self._POSTER_FALLBACK_INTERVAL - gap)
+            try:
+                data = RequestUtils(
+                    headers={"User-Agent": self.get_random_user_agent()},
+                    proxies=getattr(settings, "PROXY", None),
+                    referer="https://movie.douban.com/",
+                ).get_json("https://movie.douban.com/j/subject_suggest", params={"q": keyword})
+            except Exception as e:
+                # 抛异常基本就是被限流/网络不可达，标记后让调用方本轮收手
+                self._douban_blocked = True
+                logger.warning(f"猫眼条目 {title} 豆瓣补图请求失败（本轮停止补图）：{e}")
+                return []
+            finally:
+                self._douban_last_at = time.monotonic()
+            return [c for c in data if isinstance(c, dict)] if isinstance(data, list) else []
+
+        def _pick(pool: list, strict_title: bool) -> tuple:
+            if strict_title:
+                # 优先同名词条；剧集优先带集数（豆瓣 suggestion 用 episode 标记剧集）
+                same = [c for c in pool if c.get("title") == title]
+                pool = same or pool
+            if mtype == MediaType.TV:
+                pool = sorted(pool, key=lambda c: 0 if c.get("episode") else 1)
+            for candidate in pool:
+                img = candidate.get("img")
+                if isinstance(img, str) and img.startswith("http"):
+                    # 缩略图换中等尺寸，避免 App 里糊掉
+                    return (img.replace("/s_ratio_poster/", "/m_ratio_poster/"),
+                            str(candidate.get("title") or "").strip())
             return "", ""
-        if not isinstance(candidates, list):
+
+        # ① 整串检索：命中的都是原文匹配，直接采纳
+        result = _pick(_query(title), strict_title=True)
+        if result[0]:
+            return result
+
+        # ② 截短检索：按词逐步减少，命中后必须年份一致才采纳
+        year = str(year or "").strip()
+        if not re.fullmatch(r"(?:19|20)\d{2}", year):
             return "", ""
-        # 优先同名词条；剧集优先带集数（豆瓣 suggestion 用 episode 标记剧集）
-        same_title = [c for c in candidates if isinstance(c, dict) and c.get("title") == title]
-        pool = same_title or [c for c in candidates if isinstance(c, dict)]
-        if mtype == MediaType.TV:
-            pool.sort(key=lambda c: 0 if c.get("episode") else 1)
-        for candidate in pool:
-            img = candidate.get("img")
-            if isinstance(img, str) and img.startswith("http"):
-                # 缩略图换中等尺寸，避免 App 里糊掉
-                return (img.replace("/s_ratio_poster/", "/m_ratio_poster/"),
-                        str(candidate.get("title") or "").strip())
+        words = [w for w in re.split(r"[\s:：\-—–·,，.。!！?？/]+", title) if w]
+        for size in (1, 2, 3):
+            if size >= len(words):
+                continue  # 等于原长就是原串，①已经试过
+            keyword = " ".join(words[:size])
+            if len(keyword) < 3:
+                continue
+            matched = [c for c in _query(keyword) if str(c.get("year") or "") == year]
+            result = _pick(matched, strict_title=False)
+            if result[0]:
+                logger.info(f"猫眼条目 {title} 豆瓣整串无结果，改用关键词「{keyword}」命中 {result[1]}")
+                return result
         return "", ""
 
     def set_sub(self, addr_list, history, mtype):
