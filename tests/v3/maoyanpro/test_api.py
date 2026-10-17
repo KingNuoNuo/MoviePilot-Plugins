@@ -15,6 +15,8 @@
 """
 
 import datetime
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -26,6 +28,7 @@ from app.plugins.maoyanpro import (
     MaoyanProSnapshot,
     MaoyanRefreshResult,
 )
+from app import schemas
 from app.schemas import (
     MediaInfo,
     MediaType,
@@ -314,7 +317,17 @@ def test_get_api_declares_typed_responses(plugin):
     assert apis["/rank-list"]["auth"] == "bear"
     assert apis["/rank-list"]["response_model"] is not None
     assert apis["/refresh"]["methods"] == ["GET", "POST"]
-    assert apis["/refresh"]["response_model"] is MaoyanRefreshResult
+    assert apis["/refresh"]["response_model"] is schemas.Response[MaoyanRefreshResult]
+    # 防漂移：三个接口必须全部用宿主信封，否则宿主普通数据客户端
+    # （含详情页按钮）会把裸模型判为「无效响应」
+    for path in ("/rank", "/rank-list", "/refresh"):
+        declared = apis[path]["response_model"]
+        assert declared is not None, f"{path} 未声明响应模型"
+        # pydantic v2 参数化泛型不保留 typing 的 __origin__，
+        # 统一从泛型元数据里取原始类
+        metadata = getattr(declared, "__pydantic_generic_metadata__", None) or {}
+        origin = metadata.get("origin") or getattr(declared, "__origin__", None)
+        assert origin is schemas.Response, f"{path} 未用 schemas.Response 信封"
     assert all(api.get("summary") for api in apis.values())
 
 
@@ -394,24 +407,28 @@ def test_recommend_source_registers_combined_tv_board(plugin):
 
 
 def test_refresh_now_reports_counts(plugin, monkeypatch):
-    """手动刷新返回抓取与订阅统计。"""
+    """手动刷新返回抓取与订阅统计，并包宿主信封。"""
     monkeypatch.setattr(plugin, "_MaoyanPro__refresh_maoyan", lambda: {
         "board_count": 2, "item_count": 4, "subscribed": 2,
     })
 
     result = plugin.refresh_now()
 
-    assert isinstance(result, MaoyanRefreshResult)
-    assert result.refreshed is True
-    assert (result.board_count, result.item_count, result.subscribed) == (2, 4, 2)
+    assert result.success is True
+    assert isinstance(result.data, MaoyanRefreshResult)
+    assert result.data.refreshed is True
+    assert (result.data.board_count, result.data.item_count,
+            result.data.subscribed) == (2, 4, 2)
 
 
 def test_refresh_now_handles_missing_config_and_errors(plugin, monkeypatch):
     """未配置榜单或刷新抛错时返回明确的业务失败，不向上抛异常。"""
     plugin._type = []
     empty = plugin.refresh_now()
-    assert empty.refreshed is False
-    assert "未配置" in empty.message
+    assert empty.success is False
+    assert isinstance(empty.data, MaoyanRefreshResult)
+    assert empty.data.refreshed is False
+    assert "未配置" in empty.data.message
 
     plugin._type = ["movie"]
 
@@ -420,8 +437,9 @@ def test_refresh_now_handles_missing_config_and_errors(plugin, monkeypatch):
 
     monkeypatch.setattr(plugin, "_MaoyanPro__refresh_maoyan", boom)
     failed = plugin.refresh_now()
-    assert failed.refreshed is False
-    assert "刷新失败" in failed.message
+    assert failed.success is False
+    assert failed.data.refreshed is False
+    assert "刷新失败" in failed.data.message
 
 
 def test_refresh_builds_board_snapshot_with_identity(plugin, monkeypatch):
@@ -916,6 +934,36 @@ def test_form_separates_movie_and_tv_subscription_types(plugin):
     assert defaults["movie_rec_enabled"] is True
 
 
+def test_get_form_places_promo_above_form(plugin):
+    """设置页顶部展示 App 推荐卡，原有表单项与默认值不受影响。"""
+    form_items, defaults = plugin.get_form()
+
+    blobs = [json.dumps(node, ensure_ascii=False) for node in form_items]
+    promo_at = next(i for i, blob in enumerate(blobs) if "MoviePilotApp" in blob)
+    assert promo_at == 0, "推荐卡应为设置页第一个节点"
+    assert any("VForm" in blob for blob in blobs), "原有 VForm 表单项应保留"
+
+    # 表单内容不变：关键配置项与默认值仍在
+    fields, _ = _form_fields(plugin)
+    assert fields["enabled"]["label"] == "启用插件"
+    assert fields["type_movie"]["label"] == "电影订阅类型"
+    assert fields["api_enabled"]["label"] == "开放榜单接口"
+    assert defaults["type_movie"] == ["movie", "web-movie"]
+    assert defaults["movie_rec_enabled"] is True
+
+
+def test_plugin_version_matches_package_metadata():
+    """plugin_version 必须与 package.v3.json 版本一致。
+
+    宿主市场用两者比较判断「有更新」（runtime/extensions/plugin/metadata.py），
+    类属性漏升会让市场在已装最新版时仍误报更新。
+    """
+    package = json.loads(
+        (Path(__file__).resolve().parents[3] / "package.v3.json")
+        .read_text(encoding="utf-8"))
+    assert MaoyanPro.plugin_version == package["MaoyanPro"]["version"]
+
+
 def test_legacy_types_merge_into_combined_tv_board():
     """旧配置里独立的综艺、电视剧/网剧单榜会并入剧集综合榜，且不产生重复项。"""
     instance = object.__new__(MaoyanPro)
@@ -1220,6 +1268,15 @@ def test_get_page_renders_board_sections_history_and_promo(plugin):
     assert "github.com/KingNuoNuo/MoviePilotApp" in texts
     assert "GitHub 仓库" in texts
     assert "https://github.com/KingNuoNuo/MoviePilotApp" in hrefs
+
+    # 推荐卡置于页面最顶部（榜单区与订阅历史之前）
+    blobs = [json.dumps(node, ensure_ascii=False) for node in page]
+    promo_at = next(i for i, blob in enumerate(blobs) if "MoviePilotApp" in blob)
+    assert promo_at == 0, "推荐卡应为数据页第一个节点"
+    rank_at = next(i for i, blob in enumerate(blobs) if "实时榜单" in blob)
+    assert promo_at < rank_at
+    history_at = next(i for i, blob in enumerate(blobs) if "订阅记录" in blob)
+    assert promo_at < history_at
 
     # 未启用影史总票房时给出开启提示
     assert "影史总票房榜未启用" in "".join(texts)
