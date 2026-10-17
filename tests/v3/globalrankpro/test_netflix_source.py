@@ -254,7 +254,8 @@ def test_rank_boards_filters_by_region_and_kind(plugin):
     assert len(boards) == 4
     assert sum(b.count for b in boards) == 5
     assert all(b.source == "netflix" for b in boards)
-    assert all(b.board_type == "" for b in boards)
+    # 快照里全球榜 region 是空串，对外必须还原成 global，调用方才能回传过滤
+    assert all(b.board_type == "global" for b in boards)
 
     boards = plugin.rank_boards(board_type="global", kind="film")
     assert len(boards) == 2

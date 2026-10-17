@@ -248,8 +248,10 @@ class NetflixSource(RankSource):
             # count 统一表示「本次返回的条目数」（存储里的 count 是抓取时的原始条数，
             # 被 limit 截断后会与 items 长度不符，跨源聚合时容易误读）
             payload["count"] = len(payload["items"])
-            # Netflix 的「榜单种类」是地区，统一层再暴露一份 board_type 便于跨源过滤
-            payload["board_type"] = region_key
+            # Netflix 的「榜单种类」是地区，统一层再暴露一份 board_type 便于跨源过滤。
+            # 快照里全球榜的 region 是空串（历史约定），对外必须还原成 global，
+            # 否则调用方拿到 board_type="" 无法回传过滤。
+            payload["board_type"] = region_key or "global"
             selected.append(RankBoard(**payload))
         return selected
 
