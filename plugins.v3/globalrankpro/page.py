@@ -36,14 +36,16 @@ def form_col(component: str, props: dict, md: int = 6) -> dict:
     }
 
 
-def num_col(model: str, label: str, items: List[dict] = None) -> dict:
-    """构造「条数」下拉列。"""
+def num_col(model: str, label: str, md: int = 4) -> dict:
+    """构造「条数」下拉列（紧凑排版，不带 hint）。"""
     return form_col('VSelect', {
         'model': model,
         'label': label,
-        'items': items or [{'title': str(n), 'value': n}
-                           for n in (0, 1, 2, 3, 5, 7, 10)],
-    })
+        'items': [{'title': str(n), 'value': n} for n in (0, 1, 2, 3, 5, 7, 10)],
+        'density': 'compact',
+        'variant': 'outlined',
+        'hide-details': True,
+    }, md=md)
 
 
 def type_col(model: str, label: str, items: List[dict]) -> dict:
@@ -54,6 +56,9 @@ def type_col(model: str, label: str, items: List[dict]) -> dict:
         'items': items,
         'chips': True,
         'multiple': True,
+        'density': 'compact',
+        'variant': 'outlined',
+        'hide-details': True,
     })
 
 
@@ -69,6 +74,7 @@ def section_hint(title: str, text: str) -> dict:
                 'props': {
                     'type': 'info',
                     'variant': 'tonal',
+                    'density': 'compact',
                     'title': title,
                     'text': text,
                 },
@@ -128,28 +134,62 @@ def promo_card() -> dict:
 # ---------------------------------------------------------------------------
 
 def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
-    """拼装合并插件的设置表单与默认配置。"""
-    maoyan = host.sources.get(SOURCE_MAOYAN)
+    """拼装合并插件的设置表单与默认配置。
+
+    合并插件要在同一张表单里放下两套配置，逐项写说明会把页面拉得很长，因此
+    排版走「一行多列 + 字段不带 hint」：解释统一收进分区提示条，字段只留名字；
+    每个榜单的「是否抓取」与「自动订阅条数」压进同一列，行数减半。
+    """
     netflix = host.sources.get(SOURCE_NETFLIX)
     regions = list(getattr(netflix, "_regions", ['global', 'hk', 'tw']))
     region_items = [{'title': name, 'value': code}
                     for code, name in (getattr(netflix, "_REGION_NAMES", {}) or {}).items()]
 
+    def switch(model: str, label: str, md: int = 4,
+               hint: str = "", persistent: bool = False) -> dict:
+        """开关列。给了 hint 才展开详情区，否则压平以省高度。"""
+        props: Dict[str, Any] = {
+            'model': model, 'label': label, 'color': 'primary',
+            'density': 'compact', 'hide-details': not hint,
+        }
+        if hint:
+            props['hint'] = hint
+            props['persistent-hint'] = persistent
+        return form_col('VSwitch', props, md)
+
+    def rank_group(enabled_model: str, label: str, num_model: str, md: int) -> dict:
+        """一个榜单 = 抓取开关 + 该榜自动订阅条数，两项压在同一列里。"""
+        return {
+            'component': 'VCol',
+            'props': {'cols': 12, 'md': md},
+            'content': [
+                {'component': 'VSwitch',
+                 'props': {'model': enabled_model, 'label': label,
+                           'color': 'primary', 'density': 'compact',
+                           'hide-details': True}},
+                {'component': 'VSelect',
+                 'props': {'model': num_model, 'label': '自动订阅条数',
+                           'items': [{'title': str(n), 'value': n}
+                                     for n in (0, 1, 2, 3, 5, 7, 10)],
+                           'density': 'compact', 'variant': 'outlined',
+                           'hide-details': True}},
+            ],
+        }
+
     rows: List[dict] = [
+        section_hint(
+            '使用说明',
+            '勾选后按执行周期抓取已启用的数据源；「立即运行一次」只在保存后跑一次，'
+            '跑完自动取消；「清理插件数据」会清空两源快照、识别缓存与订阅历史且不可恢复。'
+            '榜单接口与 App 首页榜单不受插件开关影响，随时可读。',
+        ),
         # ---- 通用 ----
         {
             'component': 'VRow',
             'content': [
-                form_col('VSwitch', {
-                    'model': 'enabled', 'label': '启用插件',
-                    'hint': '开启后按周期抓取已启用数据源的榜单',
-                    'persistent-hint': True,
-                }),
-                form_col('VSwitch', {
-                    'model': 'onlyonce', 'label': '立即运行一次',
-                    'hint': '保存后立即抓取一次全部已启用数据源',
-                    'persistent-hint': True,
-                }),
+                switch('enabled', '启用插件'),
+                switch('onlyonce', '立即运行一次'),
+                switch('clear', '清理插件数据'),
             ],
         },
         {
@@ -159,52 +199,30 @@ def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
                     'model': 'cron',
                     'label': '执行周期',
                     'placeholder': '0 9 * * *',
-                    'hint': '猫眼每日更新、Netflix 每周二发榜，默认每天 09:00 抓取'
-                            '（Netflix 无新数据时不会重复落库）',
-                    'persistent-hint': True,
-                }),
-                form_col('VSwitch', {
-                    'model': 'clear', 'label': '清理插件数据',
-                    'hint': '清空两个数据源的榜单快照与识别缓存',
-                    'persistent-hint': True,
-                }),
-            ],
-        },
-        {
-            'component': 'VRow',
-            'content': [
-                form_col('VSwitch', {
-                    'model': 'api_enabled', 'label': '开放榜单接口',
-                    'hint': '开启后 /rank、/rank-list、/refresh 可被 App 与脚本调用',
-                    'persistent-hint': True,
-                }),
-                form_col('VSwitch', {
-                    'model': 'recommend_enabled', 'label': '接入推荐页数据源',
-                    'hint': '在宿主推荐页展示两个数据源的榜单（需同时开放接口）',
-                    'persistent-hint': True,
-                }),
+                    'density': 'compact',
+                    'variant': 'outlined',
+                    'hide-details': True,
+                }, md=4),
+                switch('api_enabled', '推荐页取数授权', 4,
+                       '推荐页通过本插件接口取榜单，关闭后推荐页取不到数据'),
+                switch('recommend_enabled', '接入推荐页', 4,
+                       '在宿主推荐页注册两源榜单，需与左侧同时打开'),
             ],
         },
         # ---- 猫眼 ----
         section_hint(
             '猫眼榜单',
-            '抓取猫眼电影票房、剧集与综艺热度榜，可自动订阅新上榜条目。'
-            '订阅类型决定抓取哪些榜单；订阅条数为 0 表示不订阅（仍抓取供推荐页使用）；'
-            '推荐开关关闭表示推荐页与榜单接口不展示该榜。推荐按满榜展示（单榜最多 10 条）。',
+            '电影、剧集、综艺三类榜单。每个榜单独开关：关掉后该榜不再抓取，'
+            '接口与推荐页也不会出现；「自动订阅条数」取该榜前 N 条提交订阅，'
+            '选 0 表示只抓榜、不订阅。',
         ),
         {
             'component': 'VRow',
             'content': [
-                form_col('VSwitch', {
-                    'model': 'maoyan_enabled', 'label': '启用猫眼数据源',
-                    'hint': '关闭后不抓取猫眼榜单，接口也不返回猫眼数据',
-                    'persistent-hint': True,
-                }),
-                form_col('VSwitch', {
-                    'model': 'maoyan_sub_enabled', 'label': '自动订阅新上榜',
-                    'hint': '关闭则只更新榜单快照，不向下载/订阅链提交',
-                    'persistent-hint': True,
-                }),
+                switch('maoyan_enabled', '启用猫眼数据源', 6,
+                       '关闭后不抓取猫眼榜单，接口也不返回猫眼数据'),
+                switch('maoyan_sub_enabled', '自动订阅新上榜', 6,
+                       '关闭则只更新榜单，不提交任何订阅'),
             ],
         },
         {
@@ -226,88 +244,54 @@ def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
         {
             'component': 'VRow',
             'content': [
-                num_col('maoyan_movie_sub_num', '电影榜单订阅条数'),
-                form_col('VSwitch', {'model': 'maoyan_movie_rec_enabled',
-                                     'label': '电影榜单推荐'}),
-            ],
-        },
-        {
-            'component': 'VRow',
-            'content': [
-                num_col('maoyan_tv_sub_num', '剧集榜单订阅条数'),
-                form_col('VSwitch', {'model': 'maoyan_tv_rec_enabled',
-                                     'label': '剧集榜单推荐'}),
-            ],
-        },
-        {
-            'component': 'VRow',
-            'content': [
-                num_col('maoyan_zongyi_sub_num', '综艺榜单订阅条数'),
-                form_col('VSwitch', {'model': 'maoyan_zongyi_rec_enabled',
-                                     'label': '综艺榜单推荐'}),
+                rank_group('maoyan_movie_rec_enabled', '电影榜',
+                           'maoyan_movie_sub_num', 4),
+                rank_group('maoyan_tv_rec_enabled', '剧集榜',
+                           'maoyan_tv_sub_num', 4),
+                rank_group('maoyan_zongyi_rec_enabled', '综艺榜',
+                           'maoyan_zongyi_sub_num', 4),
             ],
         },
         section_hint(
             '猫眼平台细分榜',
-            '各视频平台榜单的订阅条数与推荐开关（左订阅、右推荐）：'
-            '订阅条数只影响自动订阅，推荐开关决定推荐页与榜单接口是否展示该平台榜单。',
+            '各视频平台的专项榜单，同样「开关决定抓不抓、条数决定订不订」。'
+            '四个平台默认关闭，需要时再打开。',
         ),
         {
             'component': 'VRow',
             'content': [
-                num_col('maoyan_tx_sub_num', '腾讯视频订阅条数'),
-                form_col('VSwitch', {'model': 'maoyan_tx_rec_enabled',
-                                     'label': '腾讯视频推荐'}),
-            ],
-        },
-        {
-            'component': 'VRow',
-            'content': [
-                num_col('maoyan_iqy_sub_num', '爱奇艺订阅条数'),
-                form_col('VSwitch', {'model': 'maoyan_iqy_rec_enabled',
-                                     'label': '爱奇艺推荐'}),
-            ],
-        },
-        {
-            'component': 'VRow',
-            'content': [
-                num_col('maoyan_mg_sub_num', '芒果TV订阅条数'),
-                form_col('VSwitch', {'model': 'maoyan_mg_rec_enabled',
-                                     'label': '芒果TV推荐'}),
-            ],
-        },
-        {
-            'component': 'VRow',
-            'content': [
-                num_col('maoyan_yk_sub_num', '优酷订阅条数'),
-                form_col('VSwitch', {'model': 'maoyan_yk_rec_enabled',
-                                     'label': '优酷推荐'}),
+                rank_group('maoyan_tx_rec_enabled', '腾讯视频',
+                           'maoyan_tx_sub_num', 3),
+                rank_group('maoyan_iqy_rec_enabled', '爱奇艺',
+                           'maoyan_iqy_sub_num', 3),
+                rank_group('maoyan_mg_rec_enabled', '芒果TV',
+                           'maoyan_mg_sub_num', 3),
+                rank_group('maoyan_yk_rec_enabled', '优酷',
+                           'maoyan_yk_sub_num', 3),
             ],
         },
         # ---- Netflix ----
         section_hint(
             'Netflix 榜单',
-            '数据来自 Netflix 官方 Tudum Top 10 榜单（每周二更新）。'
-            '全球榜附周观看量与在榜周数，地区榜仅名次；Netflix 未进入中国大陆，'
-            '地区榜提供中国香港、中国台湾等选项。',
+            'Netflix 官方 Tudum Top 10，每周二更新。全球榜带周观看量与在榜周数，'
+            '地区榜只有名次；Netflix 未进入中国大陆，地区榜可选中国香港、中国台湾等。',
         ),
         {
             'component': 'VRow',
             'content': [
-                form_col('VSwitch', {
-                    'model': 'netflix_enabled', 'label': '启用 Netflix 数据源',
-                    'hint': '关闭后不抓取 Netflix 榜单，接口也不返回相关数据',
-                    'persistent-hint': True,
-                }),
+                switch('netflix_enabled', '启用 Netflix 数据源', 4,
+                       '关闭后不抓取 Netflix 榜单，接口也不返回相关数据'),
                 form_col('VSelect', {
                     'model': 'netflix_regions',
-                    'label': '抓取地区',
+                    'label': '榜单地区',
                     'items': region_items,
                     'chips': True,
                     'multiple': True,
-                    'hint': '全球榜附观看量与在榜周数；地区榜仅名次',
+                    'density': 'compact',
+                    'variant': 'outlined',
+                    'hint': '全球榜含观看量与在榜周数；地区榜只有名次',
                     'persistent-hint': True,
-                }),
+                }, md=8),
             ],
         },
     ]
@@ -321,14 +305,14 @@ def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
         'recommend_enabled': False,
         # 猫眼
         'maoyan_enabled': True,
-        'maoyan_sub_enabled': True,
+        'maoyan_sub_enabled': False,
         'maoyan_type_movie': ['movie', 'web-movie'],
         'maoyan_type_tv': ['web-all', 'zongyi'],
-        'maoyan_movie_sub_num': 10,
+        'maoyan_movie_sub_num': 0,
         'maoyan_movie_rec_enabled': True,
-        'maoyan_tv_sub_num': 10,
+        'maoyan_tv_sub_num': 0,
         'maoyan_tv_rec_enabled': True,
-        'maoyan_zongyi_sub_num': 10,
+        'maoyan_zongyi_sub_num': 0,
         'maoyan_zongyi_rec_enabled': True,
         'maoyan_tx_sub_num': 0,
         'maoyan_iqy_sub_num': 0,
@@ -345,6 +329,7 @@ def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
     # 用当前运行态覆盖默认值，让设置页回显已保存的配置
     defaults.update(host.serialize_config())
     return [promo_card(), {'component': 'VForm', 'content': rows}], defaults
+
 
 
 # ---------------------------------------------------------------------------

@@ -486,8 +486,8 @@ def test_get_form_contains_both_sources(plugin):
     assert "MoviePilotApp" in blobs[0], "推荐卡应为设置页第一个节点"
     assert any("VForm" in blob for blob in blobs)
     form_blob = "".join(blobs)
-    for label in ("启用插件", "立即运行一次", "执行周期", "开放榜单接口",
-                  "推荐页数据源", "清理插件数据"):
+    for label in ("启用插件", "立即运行一次", "执行周期", "推荐页取数授权",
+                  "接入推荐页", "清理插件数据", "自动订阅条数", "榜单地区"):
         assert label in form_blob
     # 猫眼配置
     assert "猫眼榜单" in form_blob
@@ -499,7 +499,7 @@ def test_get_form_contains_both_sources(plugin):
     # Netflix 配置
     assert "Netflix 榜单" in form_blob
     assert "启用 Netflix 数据源" in form_blob
-    assert "抓取地区" in form_blob
+    assert "榜单地区" in form_blob
 
     assert defaults["maoyan_type_movie"] == ["movie"]
     assert defaults["netflix_regions"] == ["global", "hk"]
@@ -618,6 +618,32 @@ def test_get_page_netflix_board_titles_use_board_name(plugin):
     assert "全球 · 电影（非英语）" in blob
     # 旧写法会把两份都渲染成「全球电影」
     assert "全球电影" not in blob
+
+
+# ==================== 生命周期 ====================
+
+def test_stop_service_does_not_block_on_running_job(plugin):
+    """抓取进行中保存配置时，stop_service 不能阻塞等待任务结束。
+
+    单轮抓取要跑几分钟（识别 + 补图 + 订阅），``shutdown()`` 默认 wait=True 会让
+    宿主保存配置的请求一直转圈。
+    """
+    calls = []
+
+    class DummyScheduler:
+        running = True
+
+        def remove_all_jobs(self):
+            calls.append(("remove_all_jobs",))
+
+        def shutdown(self, wait=True):
+            calls.append(("shutdown", wait))
+
+    plugin._scheduler = DummyScheduler()
+    plugin.stop_service()
+
+    assert ("shutdown", False) in calls, "必须显式 wait=False"
+    assert plugin._scheduler is None
 
 
 # ==================== 版本 ====================

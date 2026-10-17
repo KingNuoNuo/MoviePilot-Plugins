@@ -45,7 +45,7 @@
     "name": "全球影视榜单",
     "description": "整合猫眼与 Netflix 榜单，提供统一的榜单接口与推荐页数据源。",
     "labels": "榜单",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/globalrank.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -53,7 +53,8 @@
     "release": false,
     "system_version": ">=3.0.0",
     "history": {
-      "v1.0.0": "把猫眼榜单（MaoyanPro）与 Netflix 榜单（NetflixPro）合并为一个插件，对外只暴露一套接口：/rank（统一榜单快照，source=maoyan/netflix/all，两源字段取并集，board_type 按源语义过滤）、/rank-list（统一媒体信息列表）、/refresh（按 source 抓取并汇总结果），全部走 bear 认证与 schemas.Response 信封。两个数据源在插件内部各自独立（数据键带 maoyan_/netflix_ 前缀），可分别开关、分别抓取；设置页把两套配置放在同一表单，详情页同时展示两源榜单分区与猫眼订阅历史，各分区带独立的刷新按钮。推荐页数据源按两源合并注册。"
+      "v1.0.0": "把猫眼榜单（MaoyanPro）与 Netflix 榜单（NetflixPro）合并为一个插件，对外只暴露一套接口：/rank（统一榜单快照，source=maoyan/netflix/all，两源字段取并集，board_type 按源语义过滤）、/rank-list（统一媒体信息列表）、/refresh（按 source 抓取并汇总结果），全部走 bear 认证与 schemas.Response 信封。两个数据源在插件内部各自独立（数据键带 maoyan_/netflix_ 前缀），可分别开关、分别抓取；设置页把两套配置放在同一表单，详情页同时展示两源榜单分区与猫眼订阅历史，各分区带独立的刷新按钮。推荐页数据源按两源合并注册。",
+      "v1.0.1": "修复首次部署暴露的三个问题：① 猫眼模块漏导入 settings，豆瓣兜底补图每次报错、缺图条目补不上；② 停止定时任务时阻塞等待正在运行的抓取，「保存」配置会一直转圈；③ 设置页重做：字段改一行多列、说明收进分区提示条，页面高度约减半，并把「各榜推荐开关」正名为「榜单开关」（关掉即不抓取，原措辞与实际作用不符）、「开放榜单接口」正名为「推荐页取数授权」（它只放行推荐页取数，不影响 /rank 接口）；各榜自动订阅条数默认改为 0，新装不再默认自动订阅。"
     }
   }
 }

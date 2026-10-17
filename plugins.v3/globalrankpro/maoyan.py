@@ -22,6 +22,7 @@ from app import schemas
 from app.chain.tmdb import TmdbChain
 from app.sdk.media import MediaInfo
 from app.sdk.browser import launch_browser_context
+from app.sdk.config import settings
 from app.sdk.media import MetaInfo
 from app.sdk.logging import logger
 from app.schemas import MediaSource, MediaType

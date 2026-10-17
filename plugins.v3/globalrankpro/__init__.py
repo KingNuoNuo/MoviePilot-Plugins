@@ -52,7 +52,7 @@ class GlobalRankPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/globalrank.png")
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -153,12 +153,21 @@ class GlobalRankPro(_PluginBase):
         return bool(self._enabled or self._recommend_enabled)
 
     def stop_service(self):
-        """停止定时任务。"""
+        """停止定时任务。
+
+        ⚠️ 必须 ``wait=False``：抓取单轮要跑几分钟（识别 + 补图 + 订阅），
+        ``shutdown()`` 默认会阻塞到正在运行的任务结束，宿主保存配置时就会
+        一直转圈；后台线程让它自然跑完即可，下次抓取会覆盖快照。
+        """
         try:
             if self._scheduler:
                 self._scheduler.remove_all_jobs()
                 if self._scheduler.running:
-                    self._scheduler.shutdown()
+                    try:
+                        self._scheduler.shutdown(wait=False)
+                    except TypeError:
+                        # 老/新版调度器签名差异时退回无参调用
+                        self._scheduler.shutdown()
                 self._scheduler = None
         except Exception as e:
             logger.error(f"退出定时任务失败：{str(e)}")
