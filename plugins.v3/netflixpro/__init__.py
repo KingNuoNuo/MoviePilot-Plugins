@@ -225,7 +225,7 @@ class NetflixPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/netflix.png")
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -388,7 +388,14 @@ class NetflixPro(_PluginBase):
     # ==================== 数据抓取 ====================
 
     def __fetch_tsv(self, url: str) -> str:
-        """下载 TSV 数据文件，返回文本内容。"""
+        """下载 TSV 数据文件，返回文本内容。
+
+        Netflix 的 Tudum 数据文件是 UTF-8，但响应不带 charset，直接取
+        ``response.text`` 会让 requests 靠嗅探猜编码：这种九成内容是 ASCII 的
+        大文件经常被猜成 latin-1 系，弯引号、破折号、汉字全变成
+        ``â\x80\x99`` 这类乱码（TMDB 识别跟着失败）。这里按字节取回后显式
+        按 UTF-8 解码，绕开嗅探。
+        """
         response = RequestUtils(
             headers={"User-Agent": _UA},
             proxies=getattr(settings, "PROXY", None),
@@ -398,7 +405,12 @@ class NetflixPro(_PluginBase):
         status = getattr(response, "status_code", None)
         if status and int(status) != 200:
             raise RuntimeError(f"Netflix 数据文件返回 {status}：{url}")
-        return response.text or ""
+        content = getattr(response, "content", None)
+        if content is None:
+            return response.text or ""
+        if isinstance(content, str):
+            return content
+        return content.decode("utf-8", errors="replace")
 
     @staticmethod
     def __parse_tsv(text: str) -> List[dict]:

@@ -457,3 +457,58 @@ def test_plugin_version_matches_package_metadata():
     meta = package.get("NetflixPro") or {}
     assert meta, "package.v3.json 未登记 NetflixPro"
     assert meta.get("version") == NetflixPro.plugin_version
+
+
+# ==================== TSV 抓取编码 ====================
+
+def test_fetch_tsv_decodes_utf8_not_sniffed(monkeypatch):
+    """抓取必须按 UTF-8 解码，不能依赖 requests 的编码嗅探。
+
+    线上实录：Tudum TSV 是 UTF-8 但响应不带 charset，``response.text`` 被嗅探成
+    latin-1 系后，弯引号/破折号全变成 ``â\x80\x99``/``â\x80\x94`` 乱码，
+    TMDB 识别随之失败。这里用带 ``content`` 字节与错误 ``text`` 的假响应复现。
+    """
+    raw = ("week\tcategory\tweekly_rank\tshow_title\n"
+           "2026-10-04\tFilms (English)\t1\tSchumacher \u201994 \u2014 Legend\n"
+           "2026-10-04\tTV (Non-English)\t1\tSTEEL BALL RUN JoJo\u2019s Adventure\n"
+           "2026-10-04\tFilms (Non-English)\t1\t鬼灭之刃：无限城篇\n")
+    content = raw.encode("utf-8")
+    # 模拟 requests 嗅探失败后的 response.text：UTF-8 字节按 cp1252 解读
+    sniffed = content.decode("cp1252", errors="replace")
+    response = SimpleNamespace(status_code=200, text=sniffed, content=content)
+
+    monkeypatch.setattr(
+        "app.plugins.netflixpro.RequestUtils",
+        lambda *a, **k: SimpleNamespace(get_res=lambda *a, **k: response))
+
+    instance = object.__new__(NetflixPro)
+    text = instance._NetflixPro__fetch_tsv("https://example.test/global.tsv")
+
+    assert "Schumacher \u201994 \u2014 Legend" in text
+    assert "JoJo\u2019s" in text
+    assert "鬼灭之刃：无限城篇" in text
+    assert "\u00e2\u0080\u0099" not in text  # 不出现 cp1252 误读痕迹
+
+
+def test_fetch_tsv_falls_back_to_text_without_content(monkeypatch):
+    """响应没有 content 字节时退回 text，行为与旧版一致。"""
+    response = SimpleNamespace(status_code=200, text="a\tb\n1\t2\n", content=None)
+    monkeypatch.setattr(
+        "app.plugins.netflixpro.RequestUtils",
+        lambda *a, **k: SimpleNamespace(get_res=lambda *a, **k: response))
+
+    instance = object.__new__(NetflixPro)
+    text = instance._NetflixPro__fetch_tsv("https://example.test/global.tsv")
+    assert text == "a\tb\n1\t2\n"
+
+
+def test_fetch_tsv_accepts_str_content(monkeypatch):
+    """某些响应对象的 content 已是 str 时原样返回。"""
+    response = SimpleNamespace(status_code=200, text="ignored", content="x\ty\n")
+    monkeypatch.setattr(
+        "app.plugins.netflixpro.RequestUtils",
+        lambda *a, **k: SimpleNamespace(get_res=lambda *a, **k: response))
+
+    instance = object.__new__(NetflixPro)
+    text = instance._NetflixPro__fetch_tsv("https://example.test/global.tsv")
+    assert text == "x\ty\n"
