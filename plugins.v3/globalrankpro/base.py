@@ -86,6 +86,7 @@ class RankBoard(BaseModel):
     url: str = Field("", description="榜单来源地址")
     count: int = Field(0, description="本次返回的条目数（受 limit 截断）")
     updated_at: str = Field("", description="快照时间")
+    stale: bool = Field(False, description="本轮抓取失败，该榜沿用上一份快照（数据本身仍有效）")
     items: List[RankItem] = Field(default_factory=list, description="榜单条目")
 
 

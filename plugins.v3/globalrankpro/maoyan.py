@@ -86,6 +86,7 @@ def _safe_board_payload(board: dict, rows: List[Any]) -> Dict[str, Any]:
         "url": text("url"),
         "count": len(items),
         "updated_at": text("updated_at"),
+        "stale": bool(board.get("stale") or False),
         "items": items,
     }
 
