@@ -21,6 +21,7 @@ from app.plugins.globalrankpro import GlobalRankPro
 from app.plugins.globalrankpro.base import (
     RankRefreshResult,
     RankSnapshot,
+    SOURCE_HONGGUO,
     SOURCE_MAOYAN,
     SOURCE_NETFLIX,
 )
@@ -109,6 +110,67 @@ def netflix_snapshot():
     }
 
 
+def hongguo_snapshot():
+    """红果快照样本（结构与插件落盘一致）。"""
+    return {
+        "updated_at": "2026-10-18 09:00:00",
+        "total": 3,
+        "boards": [
+            {
+                "board": "红果热播榜", "type": "hot", "type_name": "热播榜",
+                "category": "hot", "category_name": "热播榜",
+                "url": "https://hongguoduanju.com/rank/hot-drama",
+                "count": 2, "updated_at": "2026-10-18 09:00:00",
+                "items": [
+                    {
+                        "rank": 1, "title": "开局签到十万亿功德",
+                        "title_cn": "开局签到十万亿功德",
+                        "series_id": "7501234567890123456",
+                        "episode_cnt": 5, "heat": "热度 2145万",
+                        "score": "评分9.0", "favorite": "55.6万收藏",
+                        "likes": "137.2万点赞", "tags": "玄幻,逆袭",
+                        "status_tags": "新剧,爆剧",
+                        "preview_url": ",".join(
+                            "https://hongguoduanju.com/video/public/"
+                            "v0200fg{}/360p.mp4".format(i) for i in range(1, 4)),
+                        "media_source": "", "media_id": "",
+                        "poster": "https://p9-aio.ecombdimg.com/obj/x"
+                                  "~tplv-shrink:1080:0.image",
+                        "overview": "一朝穿越", "year": "", "release_date": "",
+                    },
+                    {
+                        "rank": 2, "title": "我在天庭收废品",
+                        "title_cn": "我在天庭收废品",
+                        "series_id": "7501234567890123458",
+                        "episode_cnt": 0, "heat": "热度 1200万",
+                        "score": "", "favorite": "", "likes": "",
+                        "tags": "", "status_tags": "新剧", "preview_url": "",
+                        "media_source": "", "media_id": "", "poster": "",
+                        "overview": "", "year": "", "release_date": "",
+                    },
+                ],
+            },
+            {
+                "board": "红果漫剧热播榜", "type": "comic",
+                "type_name": "漫剧热播榜", "category": "comic",
+                "category_name": "漫剧热播榜",
+                "url": "https://hongguoduanju.com/rank/hot-comic-drama",
+                "count": 1, "updated_at": "2026-10-18 09:00:00",
+                "items": [{
+                    "rank": 1, "title": "一念神魔", "title_cn": "一念神魔",
+                    "series_id": "7501234567890123999", "episode_cnt": 80,
+                    "heat": "热度 900万", "score": "评分8.5",
+                    "favorite": "12万收藏", "likes": "30万点赞",
+                    "tags": "奇幻,战斗", "status_tags": "",
+                    "preview_url": "", "media_source": "", "media_id": "",
+                    "poster": "", "overview": "", "year": "",
+                    "release_date": "",
+                }],
+            },
+        ],
+    }
+
+
 BASE_CONFIG = {
     'maoyan_enabled': True,
     'maoyan_sub_enabled': False,
@@ -116,6 +178,9 @@ BASE_CONFIG = {
     'maoyan_type_tv': ['web-all'],
     'netflix_enabled': True,
     'netflix_regions': ['global', 'hk'],
+    'hongguo_enabled': True,
+    'hongguo_boards': ['hot'],
+    'hongguo_limit': 20,
 }
 
 
@@ -239,10 +304,66 @@ def test_rank_filters_kind_and_limit(plugin):
     assert [b.region for b in tv.data.boards] == ["hk"]
 
 
-def test_rank_resolves_unknown_source_as_all(plugin):
+def test_rank_resolves_unknown_source_as_all():
     """未知 source 按 all 处理，避免调用方拼错就什么都没拿到。"""
-    result = plugin.get_rank_snapshot(source="douban")
-    assert result.data.sources == [SOURCE_MAOYAN, SOURCE_NETFLIX]
+    instance = make_plugin()
+    instance.sources[SOURCE_HONGGUO].save_data("snapshot", hongguo_snapshot())
+
+    result = instance.get_rank_snapshot(source="douban")
+    assert result.data.sources == [
+        SOURCE_MAOYAN, SOURCE_NETFLIX, SOURCE_HONGGUO]
+
+
+def test_rank_returns_only_hongguo():
+    """source=hongguo 时走红果分支，而不是落到 Netflix 的地区分支。"""
+    instance = make_plugin()
+    instance.sources[SOURCE_HONGGUO].save_data("snapshot", hongguo_snapshot())
+
+    result = instance.get_rank_snapshot(source=SOURCE_HONGGUO)
+
+    assert result.data.sources == [SOURCE_HONGGUO]
+    assert [b.board for b in result.data.boards] == [
+        "红果热播榜", "红果漫剧热播榜"]
+    assert result.data.total == 3
+    assert result.data.updated_at == "2026-10-18 09:00:00"
+    first = result.data.boards[0].items[0]
+    assert first.series_id == "7501234567890123456"
+    assert first.episode_cnt == 5
+    assert first.score == "评分9.0"
+    assert first.tags == "玄幻,逆袭"
+    assert first.preview_url.count("http") == 3
+
+
+def test_rank_hongguo_filters_board_codes():
+    """红果的 board_type 是榜单代码，多值逐个取，非法代码返回空。"""
+    instance = make_plugin()
+    instance.sources[SOURCE_HONGGUO].save_data("snapshot", hongguo_snapshot())
+
+    one = instance.get_rank_snapshot(
+        source=SOURCE_HONGGUO, board_type="comic")
+    assert [b.board for b in one.data.boards] == ["红果漫剧热播榜"]
+
+    # 逗号多值
+    multi = instance.get_rank_snapshot(
+        source=SOURCE_HONGGUO, board_type="hot,comic")
+    assert len(multi.data.boards) == 2
+
+    assert instance.get_rank_snapshot(
+        source=SOURCE_HONGGUO, board_type="nope").data.boards == []
+
+
+def test_rank_all_merges_three_sources():
+    """source=all 时三源合并，各自按自己的语义解释 board_type。"""
+    instance = make_plugin()
+    instance.sources[SOURCE_HONGGUO].save_data("snapshot", hongguo_snapshot())
+
+    result = instance.get_rank_snapshot(source="all")
+    assert result.data.sources == [
+        SOURCE_MAOYAN, SOURCE_NETFLIX, SOURCE_HONGGUO]
+    # 猫眼 2 榜 + Netflix 2 榜 + 红果 2 榜
+    assert len(result.data.boards) == 6
+    assert {b.source for b in result.data.boards} == {
+        SOURCE_MAOYAN, SOURCE_NETFLIX, SOURCE_HONGGUO}
 
 
 # ==================== /rank-list 分发 ====================
@@ -267,6 +388,23 @@ def test_rank_list_dispatches_to_netflix(plugin):
     assert result.data[0].type == "电影"
 
 
+def test_rank_list_dispatches_to_hongguo():
+    """source=hongguo 时转发到红果数据源，短剧标题即中文名。"""
+    instance = make_plugin()
+    instance.sources[SOURCE_HONGGUO].save_data("snapshot", hongguo_snapshot())
+
+    # 不传 board_type 时返回全部已抓取榜单
+    result = instance.rank_list(source=SOURCE_HONGGUO)
+    assert result.success is True
+    assert [media.title for media in result.data] == [
+        "开局签到十万亿功德", "我在天庭收废品", "一念神魔"]
+    assert result.data[0].type == "电视剧"
+    assert result.data[0].poster_path.endswith("~tplv-shrink:1080:0.image")
+
+    one = instance.rank_list(source=SOURCE_HONGGUO, board_type="comic")
+    assert [media.title for media in one.data] == ["一念神魔"]
+
+
 def test_rank_list_rejects_unknown_source(plugin):
     """未知数据源明确报错，而不是静默返回空。"""
     result = plugin.rank_list(source="douban")
@@ -287,7 +425,7 @@ def test_rank_list_rejects_disabled_source(plugin):
 # ==================== /refresh 聚合 ====================
 
 def test_refresh_aggregates_sources(plugin, monkeypatch):
-    """source=all 时逐个抓取并汇总条数。"""
+    """source=all 时逐个抓取并汇总条数（三源都算进去）。"""
     calls = []
     plugin.sources[SOURCE_MAOYAN].fetch = lambda: (
         calls.append("maoyan") or
@@ -295,15 +433,19 @@ def test_refresh_aggregates_sources(plugin, monkeypatch):
     plugin.sources[SOURCE_NETFLIX].fetch = lambda: (
         calls.append("netflix") or
         {"board_count": 6, "item_count": 8, "week": "2026-10-04"})
+    plugin.sources[SOURCE_HONGGUO].fetch = lambda: (
+        calls.append("hongguo") or
+        {"board_count": 1, "item_count": 20})
 
     result = plugin.refresh_now()
 
     assert result.success is True
     assert isinstance(result.data, RankRefreshResult)
-    assert calls == ["maoyan", "netflix"]
+    assert calls == ["maoyan", "netflix", "hongguo"]
     assert (result.data.board_count, result.data.item_count,
-            result.data.subscribed) == (8, 12, 1)
-    assert [s.source for s in result.data.sources] == [SOURCE_MAOYAN, SOURCE_NETFLIX]
+            result.data.subscribed) == (9, 32, 1)
+    assert [s.source for s in result.data.sources] == [
+        SOURCE_MAOYAN, SOURCE_NETFLIX, SOURCE_HONGGUO]
     assert result.data.sources[1].week == "2026-10-04"
 
 
@@ -322,18 +464,20 @@ def test_refresh_single_source_only_touches_it(plugin):
 
 
 def test_refresh_reports_source_errors_without_raising(plugin):
-    """单个数据源抛错被收敛成该源失败，另一源照常成功。"""
+    """单个数据源抛错被收敛成该源失败，其它源照常成功。"""
     def boom():
         raise RuntimeError("upstream down")
 
     plugin.sources[SOURCE_MAOYAN].fetch = boom
     plugin.sources[SOURCE_NETFLIX].fetch = lambda: {
         "board_count": 6, "item_count": 8, "week": "2026-10-04"}
+    plugin.sources[SOURCE_HONGGUO].fetch = lambda: {
+        "board_count": 1, "item_count": 20}
 
     result = plugin.refresh_now()
 
     assert result.success is True  # 至少一个源成功
-    assert result.data.board_count == 6
+    assert result.data.board_count == 7      # Netflix 6 + 红果 1，猫眼失败不计
     maoyan_result = result.data.sources[0]
     assert maoyan_result.refreshed is False
     assert "upstream down" in maoyan_result.message
@@ -343,18 +487,20 @@ def test_refresh_all_failed_returns_business_error(plugin):
     """全部源失败时 success=False，但业务数据仍完整返回。"""
     plugin.sources[SOURCE_MAOYAN].fetch = lambda: {"board_count": 0}
     plugin.sources[SOURCE_NETFLIX].fetch = lambda: {"board_count": 0}
+    plugin.sources[SOURCE_HONGGUO].fetch = lambda: {"board_count": 0}
 
     result = plugin.refresh_now()
 
     assert result.success is False
     assert result.data.refreshed is False
-    assert len(result.data.sources) == 2
+    assert len(result.data.sources) == 3
 
 
 def test_refresh_when_nothing_enabled(plugin):
     """没有任何数据源启用时给出明确提示。"""
     plugin._GlobalRankPro__apply_config({
-        'maoyan_enabled': False, 'netflix_enabled': False})
+        'maoyan_enabled': False, 'netflix_enabled': False,
+        'hongguo_enabled': False})
 
     result = plugin.refresh_now()
 
@@ -368,8 +514,8 @@ def _event():
     return type("Evt", (), {"event_data": RecommendSourceEventData()})()
 
 
-def test_recommend_source_registers_both_sources(plugin):
-    """两个数据源的推荐源合并注册，api_path 都指向本插件。"""
+def test_recommend_source_registers_all_sources(plugin):
+    """三个数据源的推荐源合并注册，api_path 都指向本插件。"""
     event = _event()
     plugin.recommend_source(event)
 
@@ -378,12 +524,15 @@ def test_recommend_source_registers_both_sources(plugin):
     assert "猫眼电影票房" in names
     assert "Netflix 全球电影" in names
     assert "Netflix 中国香港剧集" in names
+    assert "红果热播榜" in names           # 配置里只勾了 hot 榜
     assert all(s.api_path.startswith("plugin/GlobalRankPro/rank-list?source=")
                for s in sources)
     assert any(s.api_path.startswith(
         "plugin/GlobalRankPro/rank-list?source=maoyan") for s in sources)
     assert any(s.api_path.startswith(
         "plugin/GlobalRankPro/rank-list?source=netflix") for s in sources)
+    assert any(s.api_path.startswith(
+        "plugin/GlobalRankPro/rank-list?source=hongguo") for s in sources)
 
 
 def test_recommend_source_respects_switches(plugin):
@@ -406,10 +555,11 @@ def test_recommend_source_respects_switches(plugin):
 
 
 def test_recommend_source_skips_disabled_source(plugin):
-    """关掉 Netflix 数据源后不再注册它的推荐源。"""
+    """关掉 Netflix 与红果数据源后不再注册它们的推荐源。"""
     plugin._GlobalRankPro__apply_config({
         'maoyan_enabled': True, 'maoyan_type_movie': ['movie'],
-        'maoyan_type_tv': [], 'netflix_enabled': False})
+        'maoyan_type_tv': [], 'netflix_enabled': False,
+        'hongguo_enabled': False})
 
     event = _event()
     plugin.recommend_source(event)
@@ -440,6 +590,8 @@ def test_config_prefixes_are_split_per_source(plugin):
         'maoyan_enabled': True, 'maoyan_sub_enabled': True,
         'maoyan_type_movie': ['total'], 'maoyan_type_tv': ['zongyi'],
         'netflix_enabled': False, 'netflix_regions': ['tw'],
+        'hongguo_enabled': True, 'hongguo_boards': ['comic', 'ai'],
+        'hongguo_limit': 40,
         'enabled': True, 'cron': '0 8 * * *',
     })
 
@@ -450,27 +602,37 @@ def test_config_prefixes_are_split_per_source(plugin):
     netflix = plugin.sources[SOURCE_NETFLIX]
     assert netflix.enabled is False
     assert netflix._regions == ["tw"]
+    hongguo = plugin.sources[SOURCE_HONGGUO]
+    assert hongguo.enabled is True
+    assert hongguo._boards == ["comic", "ai"]
+    assert hongguo._limit == 40
 
 
 def test_data_keys_are_isolated_between_sources(plugin):
-    """两个源的快照与识别缓存互不覆盖（键带源前缀）。"""
+    """三个源的快照与识别缓存互不覆盖（键带源前缀）。"""
     plugin.sources[SOURCE_MAOYAN].save_data("snapshot", {"marker": "m"})
     plugin.sources[SOURCE_NETFLIX].save_data("snapshot", {"marker": "n"})
+    plugin.sources[SOURCE_HONGGUO].save_data("snapshot", {"marker": "h"})
 
     assert plugin.sources[SOURCE_MAOYAN].get_data("snapshot") == {"marker": "m"}
     assert plugin.sources[SOURCE_NETFLIX].get_data("snapshot") == {"marker": "n"}
+    assert plugin.sources[SOURCE_HONGGUO].get_data("snapshot") == {"marker": "h"}
     # 直接看宿主侧真实键名
     assert plugin._data[f"{SOURCE_MAOYAN}_snapshot"] == {"marker": "m"}
     assert plugin._data[f"{SOURCE_NETFLIX}_snapshot"] == {"marker": "n"}
+    assert plugin._data[f"{SOURCE_HONGGUO}_snapshot"] == {"marker": "h"}
 
 
 def test_serialize_config_round_trips(plugin):
-    """配置回写包含两个源的开关与默认值，且类型可控（None 收敛）。"""
+    """配置回写包含三个源的开关与默认值，且类型可控（None 收敛）。"""
     config = plugin.serialize_config()
 
     assert config["maoyan_enabled"] is True
     assert config["maoyan_type_movie"] == ["movie"]
     assert config["netflix_regions"] == ["global", "hk"]
+    assert config["hongguo_enabled"] is True
+    assert config["hongguo_boards"] == ["hot"]
+    assert config["hongguo_limit"] == 20
     assert config["cron"] == ""
     assert config["onlyonce"] is False
     assert isinstance(config["enabled"], bool)
@@ -515,6 +677,27 @@ def test_get_form_contains_both_sources(plugin):
     assert defaults["maoyan_type_movie"] == ["movie"]
     assert defaults["netflix_regions"] == ["global", "hk"]
     assert defaults["maoyan_platforms"] == []  # 旧配置无 platforms 键 → 全不勾
+
+
+def test_get_form_contains_hongguo_block(plugin):
+    """设置页新增红果卡片：开关 + 榜单多选 + 每榜条数。"""
+    form_items, defaults = plugin.get_form()
+    form_blob = "".join(json.dumps(node, ensure_ascii=False)
+                        for node in form_items)
+
+    assert "红果短剧榜单" in form_blob
+    assert "启用红果数据源" in form_blob
+    assert "抓取榜单" in form_blob
+    assert "每榜条数" in form_blob
+    for model in ("hongguo_enabled", "hongguo_boards", "hongguo_limit"):
+        assert model in form_blob
+    # 四个官方热播榜都要能勾
+    for name in ("热播榜", "真人剧热播榜", "漫剧热播榜", "AI剧热播榜"):
+        assert name in form_blob
+
+    assert defaults["hongguo_enabled"] is True
+    assert defaults["hongguo_boards"] == ["hot"]
+    assert defaults["hongguo_limit"] == 20
 
 
 def test_get_form_reflects_saved_config(plugin):

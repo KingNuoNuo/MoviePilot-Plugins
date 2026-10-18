@@ -1,13 +1,13 @@
 """全球影视榜单插件的数据源基类与统一响应模型。
 
 合并后的插件由主类 :class:`GlobalRankPro` 承担宿主生命周期（配置、调度、
-页面与接口注册），猫眼与 Netflix 两套抓取解析逻辑各自封装成一个
+页面与接口注册），猫眼、Netflix 与红果短剧三套抓取解析逻辑各自封装成一个
 :class:`RankSource` 子类。数据源不继承 ``_PluginBase``，而是持有主插件实例，
 把 ``get_data``/``save_data``/``chain``/``systemmessage`` 等宿主能力代理回去，
 因此上游数据源代码可以几乎原样复用。
 
-两个数据源共用同一份插件数据区（``plugin_config_prefix`` 相同），所以代理层
-统一给数据键加 ``<source_id>_`` 前缀，两个源的 ``snapshot``/``history``/
+三个数据源共用同一份插件数据区（``plugin_config_prefix`` 相同），所以代理层
+统一给数据键加 ``<source_id>_`` 前缀，各源的 ``snapshot``/``history``/
 ``identity_cache`` 互不覆盖。
 """
 from __future__ import annotations
@@ -19,9 +19,10 @@ from pydantic import BaseModel, Field
 # 数据源标识：对外接口的 source 参数取值，也是数据键前缀
 SOURCE_MAOYAN = "maoyan"
 SOURCE_NETFLIX = "netflix"
+SOURCE_HONGGUO = "hongguo"
 # 对外接口 source 参数支持的全部取值（all 表示合并返回）
 SOURCE_ALL = "all"
-SOURCE_CHOICES = (SOURCE_MAOYAN, SOURCE_NETFLIX)
+SOURCE_CHOICES = (SOURCE_MAOYAN, SOURCE_NETFLIX, SOURCE_HONGGUO)
 
 
 class RankItem(BaseModel):
@@ -54,11 +55,21 @@ class RankItem(BaseModel):
     weeks_in_top10: int = Field(0, description="累计在榜周数")
     release_date: str = Field("", description="发行日期 YYYY-MM-DD，未识别时为空")
 
+    # ---- 红果短剧专有 ----
+    series_id: str = Field("", description="红果剧集 ID")
+    episode_cnt: int = Field(0, description="总集数")
+    score: str = Field("", description="评分文本，如「评分9.0」")
+    favorite: str = Field("", description="收藏数文本，如「55.6万收藏」")
+    likes: str = Field("", description="点赞数文本，如「137.2万点赞」")
+    tags: str = Field("", description="题材标签，逗号分隔，如「玄幻,逆袭,修真」")
+    status_tags: str = Field("", description="状态标签，逗号分隔，如「新剧,爆剧」")
+    preview_url: str = Field("", description="前 3 集的公开 360p 直链，多集用逗号分隔")
+
 
 class RankBoard(BaseModel):
-    """统一榜单快照：两个数据源榜单元数据字段的并集。"""
+    """统一榜单快照：三个数据源榜单元数据字段的并集。"""
 
-    source: str = Field("", description="数据源标识：maoyan / netflix")
+    source: str = Field("", description="数据源标识：maoyan / netflix / hongguo")
     board: str = Field(..., description="榜单名称")
     board_type: str = Field("", description="统一榜单类型标识：猫眼取 type，Netflix 取地区代码")
     type: str = Field("", description="猫眼原生榜单类型标识")

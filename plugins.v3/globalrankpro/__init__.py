@@ -1,14 +1,15 @@
 """全球影视榜单插件（GlobalRankPro）。
 
-把猫眼榜单与 Netflix 榜单合并成一个插件，对外只暴露一套接口：
+把猫眼榜单、Netflix 榜单与红果短剧榜单合并成一个插件，对外只暴露一套接口：
 
-- ``GET /rank?source=maoyan|netflix|all``：统一榜单快照（两源字段并集）；
+- ``GET /rank?source=maoyan|netflix|hongguo|all``：统一榜单快照（三源字段并集）；
 - ``GET /rank-list?source=...``：统一媒体信息列表（宿主 ``MediaInfo``）；
 - ``GET /refresh?source=...``：立即抓取指定数据源。
 
-两个数据源各自封装在 ``maoyan.py`` / ``netflix.py`` 里（原 MaoyanPro 与
-NetflixPro 的抓取解析逻辑整体平移），宿主生命周期、配置与接口注册集中在本类。
-数据键带 ``maoyan_`` / ``netflix_`` 前缀，两源互不覆盖。
+三个数据源各自封装在 ``maoyan.py`` / ``netflix.py`` / ``hongguo.py`` 里（原
+MaoyanPro 与 NetflixPro 的抓取解析逻辑整体平移，红果为新增的 SSR 抓取），
+宿主生命周期、配置与接口注册集中在本类。数据键带 ``maoyan_`` / ``netflix_`` /
+``hongguo_`` 前缀，三源互不覆盖。
 """
 import datetime
 from typing import Any, Dict, List, Tuple
@@ -33,26 +34,29 @@ from .base import (
     RankSourceRefresh,
     SOURCE_ALL,
     SOURCE_CHOICES,
+    SOURCE_HONGGUO,
     SOURCE_MAOYAN,
     SOURCE_NETFLIX,
 )
+from .hongguo import HongguoSource
 from .maoyan import MaoyanSource
 from .netflix import NetflixSource
 from . import page as page_ui
 
 
 class GlobalRankPro(_PluginBase):
-    """全球影视榜单：猫眼 + Netflix 双数据源，统一接口对外提供。"""
+    """全球影视榜单：猫眼 + Netflix + 红果短剧三数据源，统一接口对外提供。"""
 
     # 插件名称
     plugin_name = "全球影视榜单"
     # 插件描述
-    plugin_desc = "整合猫眼与 Netflix 榜单，提供统一的榜单接口与推荐页数据源。"
+    plugin_desc = ("整合猫眼、Netflix 与红果短剧榜单，提供统一的榜单接口与"
+                   "推荐页数据源。")
     # 插件图标
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/globalrank.png")
     # 插件版本
-    plugin_version = "1.0.5"
+    plugin_version = "1.1.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -70,8 +74,9 @@ class GlobalRankPro(_PluginBase):
         self.sources = {
             SOURCE_MAOYAN: MaoyanSource(self),
             SOURCE_NETFLIX: NetflixSource(self),
+            SOURCE_HONGGUO: HongguoSource(self),
         }
-        # 下载/订阅链：猫眼自动订阅用，Netflix 不用，但代理层统一暴露
+        # 下载/订阅链：猫眼自动订阅用，Netflix / 红果不用，但代理层统一暴露
         self.downloadchain = None
         self.subscribechain = None
         self._scheduler = None
@@ -101,7 +106,7 @@ class GlobalRankPro(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        # 清理插件数据：两个源的快照、识别缓存与订阅历史一起清
+        # 清理插件数据：三个源的快照、识别缓存与订阅历史一起清
         if self._clear:
             for source in self.sources.values():
                 for key in ("snapshot", "history", "identity_cache"):
@@ -219,6 +224,13 @@ class GlobalRankPro(_PluginBase):
                 'netflix_enabled': netflix.enabled,
                 'netflix_regions': list(getattr(netflix, '_regions', [])),
             })
+        hongguo = self.sources.get(SOURCE_HONGGUO)
+        if hongguo is not None:
+            config.update({
+                'hongguo_enabled': hongguo.enabled,
+                'hongguo_boards': list(getattr(hongguo, '_boards', [])),
+                'hongguo_limit': int(getattr(hongguo, '_limit', 0) or 0),
+            })
         return config
 
     def __update_config(self) -> None:
@@ -303,8 +315,8 @@ class GlobalRankPro(_PluginBase):
                 "auth": "bear",
                 "summary": "全球影视榜单快照",
                 "description": "返回最近一次抓取的榜单快照：source 选数据源"
-                               "（maoyan/netflix/all），board_type 按源语义过滤"
-                               "（猫眼为榜单类型，Netflix 为地区代码）",
+                               "（maoyan/netflix/hongguo/all），board_type 按源语义过滤"
+                               "（猫眼为榜单类型，Netflix 为地区代码，红果为榜单代码）",
                 "response_model": schemas.Response[RankSnapshot],
             },
             {
@@ -322,7 +334,8 @@ class GlobalRankPro(_PluginBase):
                 "methods": ["GET", "POST"],
                 "auth": "bear",
                 "summary": "立即刷新榜单",
-                "description": "立即触发一次抓取：source 选数据源（maoyan/netflix/all）",
+                "description": "立即触发一次抓取：source 选数据源"
+                               "（maoyan/netflix/hongguo/all）",
                 "response_model": schemas.Response[RankRefreshResult],
             },
         ]
@@ -350,10 +363,11 @@ class GlobalRankPro(_PluginBase):
         """
         返回统一榜单快照。
 
-        :param source: 数据源，``maoyan`` / ``netflix`` / ``all``（默认 all）
+        :param source: 数据源，``maoyan`` / ``netflix`` / ``hongguo`` / ``all``（默认 all）
         :param board_type: 榜单类型，逗号分隔多值；猫眼取 type（movie/web-all/total/
                            year/global/web-movie/zongyi），Netflix 取地区代码
-                           （global/hk/tw/jp/kr/sg），all 下两边各自匹配
+                           （global/hk/tw/jp/kr/sg），红果取榜单代码
+                           （hot/real/comic/ai），all 下各源各自匹配
         :param kind: 内容类型，``film`` / ``tv``（仅 Netflix 生效）
         :param limit: 每个榜单最多返回的条目数
         :param board: 榜单名包含该关键字（仅猫眼生效）
@@ -385,7 +399,7 @@ class GlobalRankPro(_PluginBase):
                 else:
                     batches = src.rank_boards(
                         limit=limit, board=board, platform=platform)
-            else:
+            elif source_id == SOURCE_NETFLIX:
                 batches = []
                 # Netflix 的 board_type 是地区；多值时逐个地区取
                 for one in (wanted_types or ["global"]):
@@ -401,6 +415,12 @@ class GlobalRankPro(_PluginBase):
                             b for b in src.rank_boards(board_type=other,
                                                        kind=kind, limit=limit)
                             if b.board not in seen)
+            else:
+                # 红果：board_type 是榜单代码（hot/real/comic/ai），多值逐个取；
+                # 不传时 rank_boards 直接返回快照里的全部榜单
+                batches = []
+                for one in (wanted_types or [None]):
+                    batches.extend(src.rank_boards(board_type=one, limit=limit))
 
             if batches:
                 boards.extend(batches)
@@ -431,8 +451,9 @@ class GlobalRankPro(_PluginBase):
         """
         推荐页/浏览页使用的榜单列表接口（内部转发到对应数据源）。
 
-        :param source: 数据源，``maoyan``（默认，保持旧接口语义）/ ``netflix``
-        :param board_type: 猫眼为榜单类型（默认 web-all），Netflix 为地区（默认 global）
+        :param source: 数据源，``maoyan``（默认，保持旧接口语义）/ ``netflix`` / ``hongguo``
+        :param board_type: 猫眼为榜单类型（默认 web-all），Netflix 为地区（默认 global），
+                           红果为榜单代码（默认返回全部已抓取榜单）
         :param kind: 内容类型（仅 Netflix：film/tv）
         :param page: 页码（仅猫眼平台细分榜编组时有效）
         :param limit: 返回条目上限
@@ -442,7 +463,8 @@ class GlobalRankPro(_PluginBase):
         src = self.sources.get(source_id)
         if src is None:
             return schemas.Response(
-                success=False, message=f"未知数据源：{source}，可选 maoyan/netflix",
+                success=False,
+                message=f"未知数据源：{source}，可选 maoyan/netflix/hongguo",
                 data=[])
         if not src.enabled:
             return schemas.Response(
@@ -451,13 +473,17 @@ class GlobalRankPro(_PluginBase):
             return src.rank_list(
                 board_type=board_type or "web-all", page=page,
                 limit=limit, platform=platform)
-        return src.rank_list(
-            board_type=board_type or "global", kind=kind,
-            page=page, limit=limit)
+        if source_id == SOURCE_NETFLIX:
+            return src.rank_list(
+                board_type=board_type or "global", kind=kind,
+                page=page, limit=limit)
+        # 红果：不传 board_type 时返回全部已抓取榜单
+        return src.rank_list(board_type=board_type, kind=kind,
+                             page=page, limit=limit)
 
     def refresh_now(self, source: str = SOURCE_ALL
                     ) -> schemas.Response[RankRefreshResult]:
-        """立即触发一次抓取：source 选数据源（maoyan/netflix/all）。"""
+        """立即触发一次抓取：source 选数据源（maoyan/netflix/hongguo/all）。"""
         targets = self.__resolve_sources(source)
         results = [self.__refresh_source(sid) for sid in targets]
         result = self.__aggregate(results)
@@ -476,7 +502,7 @@ class GlobalRankPro(_PluginBase):
 
     @eventmanager.register(ChainEventType.RecommendSource)
     def recommend_source(self, event: SdkEvent):
-        """把两个数据源的榜单注册为宿主推荐页数据源（与订阅功能相互独立）。"""
+        """把三个数据源的榜单注册为宿主推荐页数据源（与订阅功能相互独立）。"""
         if not (self._recommend_enabled and self._api_enabled):
             return
         event_data = event.event_data if event else None
@@ -503,9 +529,9 @@ class GlobalRankPro(_PluginBase):
     # ==================== 表单与详情页 ====================
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """设置表单：App 推荐卡 + 通用开关 + 猫眼配置 + Netflix 配置。"""
+        """设置表单：App 推荐卡 + 通用开关 + 猫眼 / Netflix / 红果配置。"""
         return page_ui.build_form(self)
 
     def get_page(self) -> List[dict]:
-        """详情页：App 推荐 + 各数据源实时榜单 + 猫眼订阅历史。"""
+        """详情页：App 推荐 + 三源抓取状态与刷新 + 猫眼订阅历史。"""
         return page_ui.build_page(self)

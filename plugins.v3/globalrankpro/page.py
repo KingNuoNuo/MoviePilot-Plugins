@@ -1,11 +1,14 @@
 """插件设置表单与详情页的节点构造。
 
-合并插件要在一个设置页里放下「猫眼」与「Netflix」两套配置、在一个详情页里
-同时展示两套数据的状态，因此把节点构造从插件主类里拆出来：这里只做纯 UI 拼装，
+合并插件要在一个设置页里放下「猫眼」「Netflix」「红果短剧」三套配置、在一个详情页里
+同时展示三套数据的状态，因此把节点构造从插件主类里拆出来：这里只做纯 UI 拼装，
 抓取与存储一律通过传入的 ``host`` 与数据源对象完成。
 
-详情页只保留「订阅记录」这一类数据：榜单条目本身通过 /rank、/rank-list 提供给
-推荐页与 App 消费，不在页面上重复平铺。"""
+详情页只保留「订阅记录」这一类数据：三个数据源的榜单条目本身都通过 /rank、/rank-list
+提供给推荐页与 App 消费，不在页面上重复平铺；页面只回答「抓到了多少、什么时候抓的、
+能不能订阅」——各源的状态与刷新入口收在概览卡里。红果短剧不在 TMDB / 豆瓣里、没有
+订阅入口，它抓到的内容同样只走接口，页面不另开一块铺榜。
+"""
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
@@ -13,16 +16,19 @@ from typing import Any, Dict, List, Tuple
 from app.schemas import MediaSource, MediaType
 from app.sdk.media import normalize_media_source
 
-from .base import SOURCE_MAOYAN, SOURCE_NETFLIX
+from .base import SOURCE_HONGGUO, SOURCE_MAOYAN, SOURCE_NETFLIX
 
 # 详情页底部/设置页顶部共用的 App 推荐卡内容
 APP_PROMO = {
     'name': 'MoviePilotApp',
     'subtitle': 'Jetpack Compose · Material 3 安卓客户端',
     'desc': '首页榜单 · 媒体订阅 · 下载整理，随时随地管理媒体库；'
-            '猫眼与 Netflix 榜单共用一套接口',
+            '猫眼、Netflix 与红果短剧榜单共用一套接口',
     'repo': 'https://github.com/KingNuoNuo/MoviePilotApp',
 }
+
+# 红果每榜抓取条数档位（官网每页 20 条）
+HONGGUO_LIMIT_CHOICES = (20, 40, 60, 100)
 
 # 宿主的 @core 样式把 ``.v-switch.v-input`` 的 --v-input-control-height 改成了
 # auto，开关高度塌缩成文字行高，视觉高度溢出到下一行，与下方控件叠在一起
@@ -77,6 +83,23 @@ def num_select(model: str, width: int = 84) -> dict:
         'props': {
             'model': model,
             'items': [{'title': str(n), 'value': n} for n in SUB_NUM_CHOICES],
+            'density': 'compact',
+            'variant': 'outlined',
+            'hide-details': True,
+            # d-flex 里 .v-input 默认 flex:1 1 auto，会把限宽撑回整列
+            'style': {'width': '{0}px'.format(width), 'flex': '0 0 auto'},
+        },
+    }
+
+
+def limit_select(model: str, choices=(), width: int = 100) -> dict:
+    """通用小号数值下拉（红果每榜抓取条数这类自由档位）。"""
+    values = list(choices) or list(HONGGUO_LIMIT_CHOICES)
+    return {
+        'component': 'VSelect',
+        'props': {
+            'model': model,
+            'items': [{'title': '{0} 条'.format(n), 'value': n} for n in values],
             'density': 'compact',
             'variant': 'outlined',
             'hide-details': True,
@@ -206,9 +229,9 @@ def promo_card() -> dict:
 def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
     """拼装合并插件的设置表单与默认配置。
 
-    排版按「三张卡 + 一行多项」组织：运行 / 猫眼榜单 / Netflix 榜单各一张卡，
-    卡内每行放 1~3 个同类字段，说明统一收进卡片描述，字段只留名字——原来每个
-    字段都拖一行 hint，行高参差且页面被拉得很长。
+    排版按「四张卡 + 一行多项」组织：运行 / 猫眼榜单 / Netflix 榜单 / 红果短剧榜单
+    各一张卡，卡内每行放 1~3 个同类字段，说明统一收进卡片描述，字段只留名字——
+    原来每个字段都拖一行 hint，行高参差且页面被拉得很长。
 
     每个榜单的「抓取开关」与「订阅条数」不再上下堆叠：宿主的 switch 高度会塌缩，
     堆叠时必然压住下面的下拉框；订阅条数改成一行并排的小号下拉。
@@ -224,6 +247,11 @@ def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
         for code, label in getattr(maoyan, "_PLATFORM_LABELS",
                                    {'tx': '腾讯视频', 'iqy': '爱奇艺',
                                     'mg': '芒果TV', 'yk': '优酷'}).items()
+    ]
+    hongguo = host.sources.get(SOURCE_HONGGUO)
+    hongguo_items = [
+        {'title': name, 'value': code}
+        for code, name in getattr(hongguo, "_BOARD_NAMES", {}).items()
     ]
 
     rows: List[dict] = [
@@ -296,6 +324,28 @@ def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
                 ]),
             ],
         ),
+        setting_card(
+            '红果短剧榜单',
+            '红果短剧官网热播榜（SSR 直取，无需签名）。短剧不在 TMDB / 豆瓣里，'
+            '本源不做媒体识别也不提供订阅，只用于榜单展示与推荐页选片；'
+            '「每榜抓取条数」按 20 一页向上翻页。',
+            [
+                form_row([switch_col('hongguo_enabled', '启用红果数据源', 6)]),
+                form_row([
+                    type_select('hongguo_boards', '抓取榜单', hongguo_items, 8),
+                    form_col_nodes([{
+                        'component': 'div',
+                        'props': {'class': 'd-flex align-center ga-2 pt-1'},
+                        'content': [
+                            {'component': 'span',
+                             'props': {'class': 'text-body-2'},
+                             'text': '每榜条数'},
+                            limit_select('hongguo_limit'),
+                        ],
+                    }], 4),
+                ], cls='align-start'),
+            ],
+        ),
     ]
 
     defaults = {
@@ -320,6 +370,10 @@ def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
         # Netflix
         'netflix_enabled': True,
         'netflix_regions': regions,
+        # 红果短剧
+        'hongguo_enabled': True,
+        'hongguo_boards': list(getattr(hongguo, "_boards", ['hot'])),
+        'hongguo_limit': int(getattr(hongguo, "_limit", 20) or 20),
     }
     # 用当前运行态覆盖默认值，让设置页回显已保存的配置；
     # 未渲染的死开关（*_rec_enabled 等）也一并带回，保存时不会丢字段。
@@ -366,11 +420,12 @@ def _refresh_button(source_id: str, variant: str = "tonal") -> dict:
 
 
 def _overview_card(host: Any) -> dict:
-    """概览卡：两个数据源的榜数、条数、更新时间与独立刷新。"""
+    """概览卡：三个数据源的榜数、条数、更新时间与独立刷新。"""
     rows: List[dict] = []
     for source_id, label, icon in (
             (SOURCE_MAOYAN, '猫眼榜单', 'mdi-movie-open-outline'),
-            (SOURCE_NETFLIX, 'Netflix 榜单', 'mdi-television-classic')):
+            (SOURCE_NETFLIX, 'Netflix 榜单', 'mdi-television-classic'),
+            (SOURCE_HONGGUO, '红果短剧榜单', 'mdi-filmstrip')):
         source = host.sources.get(source_id)
         if source is None:
             continue
@@ -513,8 +568,10 @@ def _history_card(source: Any) -> dict:
 def build_page(host: Any) -> List[dict]:
     """拼装插件详情页：App 推荐 → 概览 → 订阅记录。
 
-    榜单条目不在页面上平铺——抓取结果经 /rank、/rank-list 供给推荐页与 App，
-    页面只保留「订阅了什么」这条记录和两源的手动刷新入口。
+    三个数据源的榜单条目都不在页面上平铺——抓取结果经 /rank、/rank-list 供给
+    推荐页与 App，页面只回答「抓到了多少、什么时候抓的」（概览卡）与「订阅了什么」
+    （猫眼订阅记录），刷新入口也在概览卡里。红果短剧不在 TMDB / 豆瓣里、没有订阅
+    入口，但它同样只走接口，页面不为此单开一块。
     """
     maoyan = host.sources.get(SOURCE_MAOYAN)
     nodes: List[dict] = [

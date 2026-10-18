@@ -1,20 +1,20 @@
 # 全球影视榜单
 
-把 **猫眼榜单**（原 [MaoyanPro](../maoyanpro/README.md)）与 **Netflix 榜单**
-（原 [NetflixPro](../netflixpro/README.md)）合并成一个插件（MoviePilot v3），
-对外只暴露一套统一接口。
+把 **猫眼榜单**（原 [MaoyanPro](../maoyanpro/README.md)）、**Netflix 榜单**
+（原 [NetflixPro](../netflixpro/README.md)）与 **红果短剧榜单** 合并成一个插件
+（MoviePilot v3），对外只暴露一套统一接口。
 
 ## 为什么要合并
 
-猫眼与 Netflix 的榜单数据源、抓取方式和条目字段都不同，但「榜单」这件事的消费方
+猫眼、Netflix 与红果的榜单数据源、抓取方式和条目字段都不同，但「榜单」这件事的消费方
 （App 首页、宿主推荐页、脚本）只关心「有哪些榜、每个榜有哪些条目、条目对应哪部媒体」。
 合并后：
 
 - **一套接口**：`/rank`、`/rank-list`、`/refresh` 用 `source` 参数区分数据源，
-  返回结构统一（两源字段取并集），调用方不必为每个数据源写一套解析；
-- **一次安装**：不用同时装两个插件、配两套执行周期；
-- **各自独立**：两个数据源在插件内部仍是独立对象（可分别开关、分别抓取），
-  数据键带 `maoyan_` / `netflix_` 前缀，快照与识别缓存互不覆盖。
+  返回结构统一（三源字段取并集），调用方不必为每个数据源写一套解析；
+- **一次安装**：不用同时装三个插件、配三套执行周期；
+- **各自独立**：三个数据源在插件内部仍是独立对象（可分别开关、分别抓取），
+  数据键带 `maoyan_` / `netflix_` / `hongguo_` 前缀，快照与识别缓存互不覆盖。
 
 > 原 `MaoyanPro` / `NetflixPro` 插件本仓库仍保留并继续可用，接口与配置不变。
 > 新部署建议直接用本插件。
@@ -25,14 +25,19 @@
 |---|---|---|
 | 猫眼 | `maoyan` | 电影票房、网络电影、影史总票房、国内年度票房、全球年度票房（Box Office Mojo）、剧集综合榜（电视剧+网剧）、综艺热度；爱优腾芒平台细分榜 |
 | Netflix | `netflix` | 官方 Tudum Top 10 静态 TSV：全球榜（四类目，含周观看小时数/观看次数/片长/在榜周数）+ 约 90 个国家/地区榜（仅名次），每周二更新 |
+| 红果短剧 | `hongguo` | 红果短剧官网（hongguoduanju.com）SSR 榜单页：红果热播榜、真人剧热播榜、漫剧热播榜、AI 剧热播榜，每榜按 20 条一页翻页，含热度/评分/收藏/点赞、题材与状态标签、简介与前 3 集试看直链 |
 
 ⚠️ Netflix 未进入中国大陆，地区榜提供中国香港、中国台湾、美国、日本、韩国、新加坡选项
 （官方数据文件实际覆盖 93 个国家/地区，白名单外的地区暂未开放）。
 
+⚠️ 红果短剧**不做媒体识别也不提供订阅**：短剧基本不在 TMDB / 豆瓣里，强行走识别只会
+得到错误匹配，条目直接用官网自带的中文标题与竖版海报；因此 `media_source` /
+`media_id` 为空，仅用于榜单展示与推荐页选片。
+
 ## 配置
 
-设置页分三张卡：「运行」「猫眼榜单」「Netflix 榜单」，卡内一行放 1~3 个同类项，
-说明写在卡片副标题里，字段本身只留名字。
+设置页分四张卡：「运行」「猫眼榜单」「Netflix 榜单」「红果短剧榜单」，卡内一行放
+1~3 个同类项，说明写在卡片副标题里，字段本身只留名字。
 
 ### 运行
 
@@ -42,8 +47,8 @@
 | 立即运行一次 | 保存后立即抓取一次，跑完自动取消勾选 |
 | 执行周期 | Cron 表达式，默认 `0 9 * * *`（猫眼每日更新，Netflix 每周二发榜） |
 | 推荐页取数授权 | 允许宿主推荐页通过本插件接口取榜单；关闭后推荐页取不到数据（**不影响** `/rank` 等接口与 App） |
-| 接入推荐页 | 在宿主推荐页注册两源榜单，需与「推荐页取数授权」同时打开 |
-| 清理插件数据 | 清空两源的快照、识别缓存与订阅历史，**不可恢复** |
+| 接入推荐页 | 在宿主推荐页注册三源榜单，需与「推荐页取数授权」同时打开 |
+| 清理插件数据 | 清空三源的快照、识别缓存与订阅历史，**不可恢复** |
 
 ### 猫眼
 
@@ -72,6 +77,14 @@
 | 启用 Netflix 数据源 | 关闭后不抓取 Netflix 榜单，接口也不返回相关数据 |
 | 榜单地区 | 多选，默认七地：全球、美国、日本、韩国、中国香港、中国台湾、新加坡；全球榜含观看量与在榜周数，地区榜只有名次 |
 
+### 红果短剧
+
+| 配置项 | 说明 |
+|---|---|
+| 启用红果数据源 | 关闭后不抓取红果榜单，接口也不返回相关数据 |
+| 抓取榜单 | 多选：红果热播榜 / 真人剧热播榜 / 漫剧热播榜 / AI 剧热播榜——勾选哪些就抓哪些 |
+| 每榜条数 | 20 / 40 / 60 / 100，按 20 条一页向上翻页；默认 20 |
+
 ## 对外接口
 
 统一使用宿主的 `bear` 认证（接受 App 登录态 JWT、`X-API-KEY` 头与 `apikey` 查询参数）
@@ -83,15 +96,15 @@
 
 | 参数 | 说明 |
 |---|---|
-| `source` | `maoyan` / `netflix` / `all`（默认 `all`；非法值按 `all` 处理） |
-| `board_type` | 逗号分隔多值。**按源语义解释**：猫眼取榜单类型（`movie`/`web-movie`/`web-all`/`zongyi`/`total`/`year`/`global`），Netflix 取地区代码（`global`/`hk`/`tw`/`us`/`jp`/`kr`/`sg`）。`source=all` 时两边各自匹配 |
+| `source` | `maoyan` / `netflix` / `hongguo` / `all`（默认 `all`；非法值按 `all` 处理） |
+| `board_type` | 逗号分隔多值。**按源语义解释**：猫眼取榜单类型（`movie`/`web-movie`/`web-all`/`zongyi`/`total`/`year`/`global`），Netflix 取地区代码（`global`/`hk`/`tw`/`us`/`jp`/`kr`/`sg`），红果取榜单代码（`hot`/`real`/`comic`/`ai`）。`source=all` 时各源各自匹配 |
 | `kind` | `film` / `tv`（仅 Netflix 生效） |
 | `limit` | 每个榜单最多返回的条目数 |
 | `board` | 榜单名包含该关键字（仅猫眼生效，如「腾讯」） |
 | `platform` | 猫眼 `platformType`（`3`=腾讯视频 `2`=爱奇艺 `7`=芒果TV `1`=优酷） |
 
 ```bash
-# 两个数据源全部榜单
+# 三个数据源全部榜单
 curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>"
 
 # 只看猫眼电影票房榜
@@ -99,6 +112,9 @@ curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=
 
 # 只看 Netflix 中国香港电影榜
 curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=netflix&board_type=hk&kind=film"
+
+# 只看红果热播榜与漫剧热播榜
+curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=hongguo&board_type=hot,comic"
 ```
 
 响应 `data` 结构：
@@ -110,6 +126,34 @@ curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=
   "total": 4,
   "sources": ["maoyan", "netflix"],
   "boards": [
+    {
+      "source": "hongguo",
+      "board": "红果热播榜",
+      "board_type": "hot",
+      "type": "hot", "type_name": "热播榜",
+      "platform": "", "platform_type": "", "show_date": "",
+      "region": "", "region_name": "", "kind": "",
+      "category": "hot", "category_name": "热播榜", "week": "",
+      "url": "https://hongguoduanju.com/rank/hot-drama", "count": 20,
+      "updated_at": "2026-10-18 09:00:00",
+      "items": [
+        {
+          "rank": 1, "title": "开局签到十万亿功德", "title_cn": "开局签到十万亿功德",
+          "media_source": "", "media_id": "",
+          "poster": "https://p3-novel.byteimg.com/novel-pic/xxx~tplv-shrink:1080:0.image",
+          "overview": "一朝穿越", "year": "",
+          "type": "", "type_name": "", "platform": "",
+          "release_info": "", "show_date": "",
+          "box_office": "", "total_box_office": "", "heat": "热度 2145万",
+          "season_title": "", "hours_viewed": 0, "views": 0,
+          "runtime": 0.0, "weeks_in_top10": 0, "release_date": "",
+          "series_id": "7501234567890123456", "episode_cnt": 5,
+          "score": "评分9.0", "favorite": "55.6万收藏", "likes": "137.2万点赞",
+          "tags": "玄幻,逆袭,修真", "status_tags": "新剧,爆剧",
+          "preview_url": "https://hongguoduanju.com/video/public/<vid>/360p.mp4,..."
+        }
+      ]
+    },
     {
       "source": "maoyan",
       "board": "电影票房榜单",
@@ -137,8 +181,8 @@ curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=
 }
 ```
 
-- `board_type` 是统一层的「榜单种类」：猫眼取 `type`，Netflix 取地区代码（全球榜为 `global`）；
-- 条目字段是两源并集，与源无关的字段保持空值/0，调用方按 `source` 取自己关心的字段即可；
+- `board_type` 是统一层的「榜单种类」：猫眼取 `type`，Netflix 取地区代码（全球榜为 `global`），红果取榜单代码；
+- 条目字段是三源并集，与源无关的字段保持空值/0，调用方按 `source` 取自己关心的字段即可；
 - `sources` 只包含本次真正返回了榜单的数据源；未启用的数据源会在 `message` 里说明。
 
 ### GET `/rank-list`
@@ -147,8 +191,8 @@ curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=
 
 | 参数 | 说明 |
 |---|---|
-| `source` | `maoyan`（默认）/ `netflix` |
-| `board_type` | 猫眼默认 `web-all`，Netflix 默认 `global` |
+| `source` | `maoyan`（默认）/ `netflix` / `hongguo` |
+| `board_type` | 猫眼默认 `web-all`，Netflix 默认 `global`，红果不传则返回全部已抓取榜单 |
 | `kind` | `film` / `tv`（仅 Netflix） |
 | `page` | 页码（猫眼平台细分榜按页编组时有效） |
 | `limit` | 返回条目上限 |
@@ -156,7 +200,8 @@ curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=
 
 ### GET|POST `/refresh`
 
-立即抓取，`source` 取 `maoyan` / `netflix` / `all`（默认 `all`），逐个抓取并汇总：
+立即抓取，`source` 取 `maoyan` / `netflix` / `hongguo` / `all`（默认 `all`），
+逐个抓取并汇总：
 
 ```json
 {
@@ -174,33 +219,37 @@ curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=
 }
 ```
 
-单个数据源失败不会影响另一个：失败信息落在对应 `sources[].message`，
+单个数据源失败不会影响其它源：失败信息落在对应 `sources[].message`，
 只要有一个源成功，外层 `success` 就是 `true`。
 
 ## 推荐页数据源
 
-开启「推荐页数据源」+「开放榜单接口」后，按两个数据源的实际配置合并注册：
+开启「推荐页数据源」+「开放榜单接口」后，按三个数据源的实际配置合并注册：
 
 - 猫眼：`猫眼电影票房`、`猫眼影史总票房`、`国内年度票房`、`全球年度票房`、
   `猫眼剧集综合热度`、`猫眼综艺热度`，以及「平台专项榜」勾选了的平台各一个
   `猫眼<平台>剧集榜`（如 `猫眼腾讯视频剧集榜`、`猫眼爱奇艺剧集榜`、`猫眼芒果TV剧集榜`、
   `猫眼优酷剧集榜`，主榜为剧集综合榜）；
-- Netflix：按「地区 × 电影/剧集」逐个注册，如 `Netflix 全球电影`。
+- Netflix：按「地区 × 电影/剧集」逐个注册，如 `Netflix 全球电影`；
+- 红果短剧：按勾选的榜单逐个注册 `红果热播榜`、`红果真人剧热播榜`、
+  `红果漫剧热播榜`、`红果AI 剧热播榜`，分类一律「电视剧」。
 
 关掉某个数据源后，它对应的推荐源不再注册。
 
 ## 插件详情页
 
-页面只保留三张卡，自上而下：
+页面共三张卡，自上而下：
 
 1. **MoviePilotApp 推荐卡**：App 名称、简介与 GitHub 入口；
-2. **概览卡**：两个数据源的榜数、条数、更新时间与独立「刷新」按钮；
-   抓取结果不在页面平铺——榜单数据经 `/rank`、`/rank-list` 供给宿主推荐页与 App；
+2. **概览卡**：三个数据源各自的榜数、条数、更新时间与独立「刷新」按钮；
+   未启用的源标「未启用」，已启用但还没抓过的标「暂无快照」；
 3. **自动订阅记录**：猫眼订阅流水表格（时间倒序，含标题、类型、平台、
    上线信息、时间，TMDB 条目标题可点击跳转）。订阅记录由
    「自动全网订阅 / 自动平台榜订阅」产生，未开启时显示引导文案。
 
-Netflix 无订阅语义，订阅记录卡只展示猫眼来源。
+三个数据源的榜单条目**都不在页面平铺**——抓取结果经 `/rank`、`/rank-list` 供给
+宿主推荐页与 App，页面只回答「抓到了多少、什么时候抓的、能不能订阅」。红果短剧
+不在 TMDB / 豆瓣里、没有订阅入口，但它同样只走接口，页面不为此单开一块。
 
 ## 与旧插件的关系
 
@@ -221,4 +270,9 @@ Netflix 无订阅语义，订阅记录卡只展示猫眼来源。
 - 猫眼的热度值是 PUA 字体加密，抓出来是乱码，剧集/综艺榜不展示热度值，改展示上线信息；
 - 猫眼榜单接口有反爬（美团 H5guard），抓取依赖无头浏览器拿 Cookie，失败时保留上一次快照；
 - Netflix 地区榜只有名次与在榜周数，没有观看量；全球榜才有观看小时数/次数/片长；
-- 两源都走宿主识别链补全中文片名与海报，识别结果按源分别持久化，跨周复用。
+- 猫眼与 Netflix 走宿主识别链补全中文片名与海报，识别结果按源分别持久化，跨周复用；
+- 红果官网只公开**前 3 集**的 **360p** 直链（`preview_url`），第 4 集起与更高清晰度
+  均返回 404；海报源图上限 896×1280（缩略后缀已提到 1080，再大不会放大）；
+- 红果官网没有公开榜单 API，抓的是 SSR 页面；官网同一个 URL 会随机返回两种渲染输出
+  （数据分别挂在 `data-fn-name="r"` 与 `mergeLoaderData` 上），插件两种都认，
+  页面结构真变了则保留上一次快照并在刷新结果里报错。

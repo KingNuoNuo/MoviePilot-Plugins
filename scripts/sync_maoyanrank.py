@@ -80,14 +80,12 @@ TOTAL_ZIP_ORDER = (
     "plugins.v3/maoyanpro/README.md",
     "plugins.v3/netflixpro/__init__.py",
     "plugins.v3/netflixpro/README.md",
-    # 全球影视榜单是包形式（主类 + 数据源 + 页面构造分模块），整包下发
-    "plugins.v3/globalrankpro/__init__.py",
-    "plugins.v3/globalrankpro/base.py",
-    "plugins.v3/globalrankpro/maoyan.py",
-    "plugins.v3/globalrankpro/netflix.py",
-    "plugins.v3/globalrankpro/page.py",
-    "plugins.v3/globalrankpro/README.md",
-)
+    # 全球影视榜单是包形式（主类 + 数据源 + 页面构造分模块），整包下发；
+    # 按实际文件展开，新增模块不必再回来改清单（hongguo.py 就是这么漏过一次的）
+) + tuple(
+    "plugins.v3/globalrankpro/{0}".format(p.name)
+    for p in sorted((REPO / "plugins.v3" / "globalrankpro").glob("*.py"))
+) + ("plugins.v3/globalrankpro/README.md",)
 
 TOTAL_ZIP_NAME = "MoviePilot-Plugins.zip"
 
