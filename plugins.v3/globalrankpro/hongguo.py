@@ -29,9 +29,9 @@
 第 4 集起返回 404，更高清晰度同样没有。``preview_url`` 只拼前三集。
 
 海报是字节图床（``p3/p6-novel.byteimg.com``）的绝对地址。桌面浏览器直连没问题，
-但手机端（移动网络解析不稳、App 内 WebView 丢跨域大图）经常出不来，所以默认把
-``poster`` 换成宿主自己的 ``/poster`` 接口转发：客户端只要能访问 MoviePilot 就能
-出图。开关是「海报经宿主转发」，关掉则回到官网原图地址。
+但手机端（移动网络解析不稳、App 内 WebView 丢跨域大图）经常出不来，所以海报
+一律换成宿主自己的 ``/poster`` 接口转发：客户端只要能访问 MoviePilot 就能出图。
+只有宿主既没配 ``APP_DOMAIN``、又拿不到请求地址时，才退回官网原图地址。
 """
 
 import datetime
@@ -269,8 +269,6 @@ class HongguoSource(RankSource):
         super().__init__(host)
         object.__setattr__(self, "_boards", list(self._DEFAULT_BOARDS))
         object.__setattr__(self, "_limit", self._DEFAULT_LIMIT)
-        # 海报是否经宿主转发（默认开：手机端直连字节 CDN 经常拿不到图）
-        object.__setattr__(self, "_poster_proxy", True)
 
     def apply_config(self, config: Dict[str, Any]) -> None:
         """接收主类剥离前缀后的红果配置。"""
@@ -283,9 +281,6 @@ class HongguoSource(RankSource):
         limit = _safe_int((config or {}).get("limit"), self._DEFAULT_LIMIT)
         if limit > 0:
             object.__setattr__(self, "_limit", limit)
-        proxy = (config or {}).get("poster_proxy")
-        if proxy is not None:
-            object.__setattr__(self, "_poster_proxy", bool(proxy))
 
     # ------------------------------------------------------------------
     # 海报代理
@@ -307,7 +302,7 @@ class HongguoSource(RankSource):
         return f"{domain}/{prefix.strip('/')}"
 
     def poster_url_for(self, raw: str, base: str = "") -> str:
-        """把 CDN 原图地址换成宿主转发地址（关闭代理或取不到域名时原样返回）。
+        """把 CDN 原图地址换成宿主转发地址（取不到宿主地址时原样返回）。
 
         :param base: 请求方实际访问的宿主地址（来自 ``request.base_url``），
                      仅作 ``APP_DOMAIN`` 未配置时的兜底。默认优先用
@@ -315,7 +310,7 @@ class HongguoSource(RankSource):
                      改了 Host 头时也不会拼错。
         """
         url = str(raw or "").strip()
-        if not url or not self._poster_proxy:
+        if not url:
             return url
         prefix = str(getattr(settings, "API_V1_STR", "/api/v1") or "/api/v1")
         root = self._api_base()

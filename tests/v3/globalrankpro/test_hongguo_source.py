@@ -432,8 +432,9 @@ def test_rank_list_returns_flat_media_info(plugin, monkeypatch):
     install_pages(monkeypatch, plugin, [("hot-drama",
                                         make_page_html(PAGE_ROWS))])
     plugin.fetch()
-    # 这里验的是统一模型与排序，海报转发另有专门用例；先关掉看官网原图地址
-    monkeypatch.setattr(plugin, "_poster_proxy", False)
+    # 这里验的是统一模型与排序，海报转发另有专门用例；先让宿主地址不可得
+    monkeypatch.setattr("app.plugins.globalrankpro.hongguo.settings",
+                        _proxy_settings(domain=""))
 
     result = plugin.rank_list()
     assert result.success is True
@@ -521,14 +522,6 @@ def test_poster_url_uses_host_proxy(plugin, monkeypatch):
     assert "~tplv-shrink%3A1080%3A0.image" in url
     assert "https://p6-novel" not in url
 
-
-def test_poster_proxy_can_be_disabled(plugin, monkeypatch):
-    """关掉开关就回到官网原图地址，行为与升级前一致。"""
-    monkeypatch.setattr("app.plugins.globalrankpro.hongguo.settings",
-                        _proxy_settings())
-    plugin.apply_config({"poster_proxy": False})
-
-    assert plugin.poster_url_for(POSTER_CDN) == POSTER_CDN
 
 
 def test_poster_url_without_any_host_falls_back_to_cdn(plugin, monkeypatch):

@@ -405,8 +405,11 @@ def test_rank_list_dispatches_to_hongguo(monkeypatch):
     """source=hongguo 时转发到红果数据源，短剧标题即中文名。"""
     instance = make_plugin()
     instance.sources[SOURCE_HONGGUO].save_data("snapshot", hongguo_snapshot())
-    # 这里只验分发与标题，海报转发另有专门用例；先关掉看官网原图地址
-    monkeypatch.setattr(instance.sources[SOURCE_HONGGUO], "_poster_proxy", False)
+    # 这里只验分发与标题，海报转发另有专门用例；先让宿主地址不可得，看官网原图
+    monkeypatch.setattr(
+        "app.plugins.globalrankpro.hongguo.settings",
+        SimpleNamespace(APP_DOMAIN="", API_V1_STR="/api/v1",
+                        PROXY=None, TZ="Asia/Shanghai"))
 
     # 不传 board_type 时返回全部已抓取榜单
     result = instance.rank_list(source=SOURCE_HONGGUO)

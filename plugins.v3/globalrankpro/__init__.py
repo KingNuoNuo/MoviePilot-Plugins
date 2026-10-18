@@ -58,7 +58,7 @@ class GlobalRankPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/globalrank.png")
     # 插件版本
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -232,8 +232,6 @@ class GlobalRankPro(_PluginBase):
                 'hongguo_enabled': hongguo.enabled,
                 'hongguo_boards': list(getattr(hongguo, '_boards', [])),
                 'hongguo_limit': int(getattr(hongguo, '_limit', 0) or 0),
-                'hongguo_poster_proxy': bool(
-                    getattr(hongguo, '_poster_proxy', True)),
             })
         return config
 
