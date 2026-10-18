@@ -31,6 +31,8 @@ from app.schemas.types import ChainEventType
 from app.sdk.network import RequestUtils
 from app.sdk.media import normalize_media_source, resolve_media_identity
 
+from .app_promo import promo_card
+
 
 # ---------------------------------------------------------------------------
 # 对外接口的响应模型
@@ -175,7 +177,7 @@ class MaoyanPro(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan-v2.png"
     # 插件版本
-    plugin_version = "1.2.7"
+    plugin_version = "1.2.8"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -280,13 +282,6 @@ class MaoyanPro(_PluginBase):
     # 详情页榜单分区的展示顺序，快照里存在哪个类型就出现哪个分区
     _PAGE_BOARD_ORDER = ('movie', 'total', 'year', 'global',
                          'web-movie', 'web-all', 'zongyi')
-    # 详情页底部 App 推荐卡：仓库地址与 App 仓库保持一致
-    _APP_PROMO = {
-        'name': 'MoviePilotApp',
-        'subtitle': 'Jetpack Compose · Material 3 安卓客户端',
-        'desc': '首页榜单 · 媒体订阅 · 下载整理，随时随地管理媒体库；已适配本插件榜单接口',
-        'repo': 'https://github.com/KingNuoNuo/MoviePilotApp',
-    }
 
     # 单次刷新最多识别的条目数：平台细分榜会让待识别条目变多，超出的留待下次刷新补齐。
     # 识别结果会持久化（identity_cache），因此限额只影响「新条目」的收敛速度，
@@ -867,55 +862,6 @@ class MaoyanPro(_PluginBase):
             'items': items,
         })
 
-    def __app_promo_card(self) -> dict:
-        """构造 MoviePilotApp 推荐卡：数据页与设置页共用，均置于页面顶部。"""
-        promo = self._APP_PROMO
-        return {
-            'component': 'VCard',
-            'props': {'variant': 'outlined', 'class': 'mt-2'},
-            'content': [{
-                'component': 'div',
-                'props': {'class': 'd-flex align-center flex-wrap ga-4',
-                          'style': {'padding': '16px'}},
-                'content': [
-                    {'component': 'div',
-                     'props': {'class': 'd-flex align-center '
-                                       'justify-center flex-shrink-0',
-                               'style': {'width': '48px', 'height': '48px',
-                                         'border-radius': '12px',
-                                         'background': '#8D51F9'}},
-                     'content': [{'component': 'VIcon',
-                                  'props': {'icon': 'mdi-android',
-                                            'size': 28, 'color': 'white'}}]},
-                    {'component': 'div',
-                     'props': {'class': 'min-w-0 flex-grow-1'},
-                     'content': [
-                         {'component': 'div',
-                          'props': {'class': 'text-subtitle-1 '
-                                             'font-weight-bold'},
-                          'text': promo['name']},
-                         {'component': 'div',
-                          'props': {'class': 'text-body-2 '
-                                             'text-medium-emphasis'},
-                          'text': promo['subtitle']},
-                         {'component': 'div',
-                          'props': {'class': 'text-caption '
-                                             'text-medium-emphasis'},
-                          'text': promo['desc']},
-                         {'component': 'div',
-                          'props': {'class': 'text-caption '
-                                             'text-medium-emphasis'},
-                          'text': promo['repo'].replace('https://', '')},
-                     ]},
-                    {'component': 'VBtn',
-                     'props': {'href': promo['repo'], 'target': '_blank',
-                               'color': 'primary', 'variant': 'tonal',
-                               'prepend-icon': 'mdi-github'},
-                     'text': 'GitHub 仓库'},
-                ],
-            }],
-        }
-
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """提供订阅类型、订阅条数、推荐开关、平台订阅/推荐配置与执行周期。"""
         rows = [
@@ -1049,7 +995,7 @@ class MaoyanPro(_PluginBase):
             },
         ]
         # App 推荐卡置于设置页顶部（表单项之前），与数据页位置保持一致
-        return [self.__app_promo_card(), {
+        return [promo_card(), {
             'component': 'VForm',
             'content': rows,
         }], {
@@ -1083,7 +1029,7 @@ class MaoyanPro(_PluginBase):
 
         榜单区直接读快照（与对外接口同源），按榜单类型分区展示，标题可跳转 TMDB；
         订阅历史保持原有版式；顶部固定一条 App 推荐卡导流 GitHub 仓库
-        （与设置页顶部位置一致，由 __app_promo_card 共用）。
+        （与设置页顶部位置一致，由同一个 ``promo_card()`` 渲染）。
         """
         historys = self.get_data('history') or []
         if not isinstance(historys, list):
@@ -1592,9 +1538,7 @@ class MaoyanPro(_PluginBase):
 
         # ==================== App 推荐 ====================
         # 推荐卡置于页面最顶部（榜单区之前），与设置页位置保持一致
-        promo_card = self.__app_promo_card()
-
-        return [promo_card] + rank_nodes + history_nodes
+        return [promo_card()] + rank_nodes + history_nodes
 
     def stop_service(self):
         """

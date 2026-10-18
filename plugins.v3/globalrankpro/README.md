@@ -35,6 +35,14 @@
 得到错误匹配，条目直接用官网自带的中文标题与竖版海报；因此 `media_source` /
 `media_id` 为空，仅用于榜单展示与推荐页选片。
 
+## 插件页面
+
+设置页（`get_form`）与详情页（`get_page`）顶部各有一张 **MoviePilotApp 推荐卡**：
+左侧是 MoviePilot 官方 logo，右侧「下载 App」直达 Releases 最新版、旁边是 GitHub
+仓库文字按钮。两个位置用同一个 `promo_card()` 渲染，与 MaoyanPro / NetflixPro /
+MediaStreamPro 完全一致（实现在 `app_promo.py`，由 `tools/gen_app_promo.py` 生成，
+四份逐字节相同）。详情页那张卡下面是三源概览卡，再往下才是猫眼订阅记录。
+
 ## 配置
 
 设置页分四张卡：「运行」「猫眼榜单」「Netflix 榜单」「红果短剧榜单」，卡内一行放

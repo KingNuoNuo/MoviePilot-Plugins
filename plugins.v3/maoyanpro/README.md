@@ -137,8 +137,9 @@ curl -X POST "http://<MP>:3000/api/v1/plugin/MaoyanPro/refresh?apikey=<API_TOKEN
 
 宿主插件管理页点开插件即可看到详情页（`get_page`），自上而下三块：
 
-1. **MoviePilotApp 推荐卡**：置于页面最顶部，附 GitHub 仓库地址外链；
-   插件设置页（`get_form`）顶部展示同一张卡片。
+1. **MoviePilotApp 推荐卡**：置于页面最顶部，左侧是 MoviePilot 官方 logo，
+   右侧「下载 App」直达 Releases 最新版、旁边是 GitHub 仓库文字按钮；
+   插件设置页（`get_form`）顶部展示同一张卡片（同一个 `promo_card()` 渲染）。
 2. **实时榜单**：直接读快照，按榜单类型分区展示（电影票房 / 影史总票房 / 国内年度票房 /
    全球年度票房 / 网络电影 / 剧集综合 / 综艺热度，快照里存在哪个类型就出现哪个分区），
    每榜展示前 10 条，标题识别到 TMDB 时可点击跳转；右上角「刷新榜单」触发一次立即抓取，

@@ -16,16 +16,8 @@ from typing import Any, Dict, List, Tuple
 from app.schemas import MediaSource, MediaType
 from app.sdk.media import normalize_media_source
 
+from .app_promo import promo_card
 from .base import SOURCE_HONGGUO, SOURCE_MAOYAN, SOURCE_NETFLIX
-
-# 详情页底部/设置页顶部共用的 App 推荐卡内容
-APP_PROMO = {
-    'name': 'MoviePilotApp',
-    'subtitle': 'Jetpack Compose · Material 3 安卓客户端',
-    'desc': '首页榜单 · 媒体订阅 · 下载整理，随时随地管理媒体库；'
-            '猫眼、Netflix 与红果短剧榜单共用一套接口',
-    'repo': 'https://github.com/KingNuoNuo/MoviePilotApp',
-}
 
 # 红果每榜抓取条数档位（官网每页 20 条）
 HONGGUO_LIMIT_CHOICES = (20, 40, 60, 100)
@@ -175,49 +167,6 @@ def setting_card(title: str, desc: str, rows: List[dict]) -> dict:
             'props': {'class': 'pa-4 pt-3'},
             'content': head + [{'component': 'div',
                                 'props': {'class': 'mb-2'}}] + rows,
-        }],
-    }
-
-
-def promo_card() -> dict:
-    """构造 MoviePilotApp 推荐卡：数据页与设置页共用，均置于页面顶部。
-
-    只保留两行文字（名称 + 一句话说明），避免在设置页顶部吃掉一百多像素。
-    """
-    promo = APP_PROMO
-    return {
-        'component': 'VCard',
-        'props': {'variant': 'outlined', 'class': 'mb-3'},
-        'content': [{
-            'component': 'div',
-            'props': {'class': 'd-flex align-center flex-wrap ga-3',
-                      'style': {'padding': '12px 16px'}},
-            'content': [
-                {'component': 'div',
-                 'props': {'class': 'd-flex align-center '
-                                   'justify-center flex-shrink-0',
-                           'style': {'width': '40px', 'height': '40px',
-                                     'border-radius': '10px',
-                                     'background': '#8D51F9'}},
-                 'content': [{'component': 'VIcon',
-                              'props': {'icon': 'mdi-android',
-                                        'size': 24, 'color': 'white'}}]},
-                {'component': 'div',
-                 'props': {'class': 'min-w-0 flex-grow-1'},
-                 'content': [
-                     {'component': 'div',
-                      'props': {'class': 'text-body-1 font-weight-bold'},
-                      'text': promo['name']},
-                     {'component': 'div',
-                      'props': {'class': 'text-caption text-medium-emphasis'},
-                      'text': promo['subtitle'] + ' · 榜单接口与宿主插件共用'},
-                 ]},
-                {'component': 'VBtn',
-                 'props': {'href': promo['repo'], 'target': '_blank',
-                           'color': 'primary', 'variant': 'tonal',
-                           'size': 'small', 'prepend-icon': 'mdi-github'},
-                 'text': 'GitHub'},
-            ],
         }],
     }
 

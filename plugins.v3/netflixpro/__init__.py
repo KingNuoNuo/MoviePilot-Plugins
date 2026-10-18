@@ -39,6 +39,8 @@ from app.plugins import _PluginBase
 from app.schemas import MediaSource, MediaType
 from app.schemas.types import ChainEventType
 
+from .app_promo import promo_card
+
 # 全球榜 TSV（含观看量）与国家/地区榜 TSV（仅名次）
 GLOBAL_TSV_URL = ("https://www.netflix.com/tudum/top10/data/"
                   "all-weeks-global.tsv")
@@ -225,7 +227,7 @@ class NetflixPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/netflix.png")
     # 插件版本
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -957,7 +959,8 @@ class NetflixPro(_PluginBase):
                 ],
             },
         ]
-        return [{
+        # App 推荐卡固定在表单项之前（与详情页同位置、同一函数）
+        return [promo_card(), {
             'component': 'VForm',
             'content': rows,
         }], {
@@ -1100,7 +1103,7 @@ class NetflixPro(_PluginBase):
         }
 
         if not boards:
-            return [header, {
+            return [promo_card(), header, {
                 'component': 'VAlert',
                 'props': {'type': 'info', 'variant': 'tonal', 'class': 'mt-2'},
                 'text': '暂无榜单快照，点击「刷新榜单」或等待定时任务运行',
@@ -1141,4 +1144,5 @@ class NetflixPro(_PluginBase):
                 })
             nodes.append({'component': 'div', 'props': {'class': 'mb-6'},
                           'content': children})
-        return nodes
+        # App 推荐卡置于页面最顶部，与设置页位置一致
+        return [promo_card()] + nodes

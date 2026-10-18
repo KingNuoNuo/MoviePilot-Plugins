@@ -71,21 +71,25 @@ TOTAL_ZIP_ORDER = (
     "package.json",
     "package.v3.json",
     "README.md",
-    "icons/maoyan-v2.png",
-    "icons/netflix.png",
-    "icons/globalrank.png",
-    "plugins/tgtodrivesync/__init__.py",
-    "plugins/tgtodrivesync/README.md",
-    "plugins.v3/maoyanpro/__init__.py",
-    "plugins.v3/maoyanpro/README.md",
-    "plugins.v3/netflixpro/__init__.py",
-    "plugins.v3/netflixpro/README.md",
-    # 全球影视榜单是包形式（主类 + 数据源 + 页面构造分模块），整包下发；
-    # 按实际文件展开，新增模块不必再回来改清单（hongguo.py 就是这么漏过一次的）
 ) + tuple(
-    "plugins.v3/globalrankpro/{0}".format(p.name)
-    for p in sorted((REPO / "plugins.v3" / "globalrankpro").glob("*.py"))
-) + ("plugins.v3/globalrankpro/README.md",)
+    "icons/{0}".format(p.name)
+    for p in sorted((REPO / "icons").glob("*.png"))
+) + tuple(
+    "plugins/tgtodrivesync/{0}".format(p.name)
+    for p in sorted((REPO / "plugins" / "tgtodrivesync").iterdir())
+    if p.is_file()
+) + tuple(
+    # v3 插件全部按目录展开：新增模块（page.py、app_promo.py、hongguo.py 这类）
+    # 不会再因为清单漏写而进不了总包 —— 之前 hongguo.py、mediastreampro 都是这么漏的
+    "plugins.v3/{0}/{1}".format(plugin.name, p.name)
+    for plugin in sorted((REPO / "plugins.v3").iterdir())
+    if plugin.is_dir() and not plugin.name.startswith("_")
+    for p in sorted(plugin.iterdir())
+    if p.is_file() and p.suffix in (".py", ".md")
+) + (
+    # 推荐卡的 logo 源文件：插件里已内嵌 data URI，放进总包只为可审计/可重生成
+    "assets/moviepilot-logo.svg",
+)
 
 TOTAL_ZIP_NAME = "MoviePilot-Plugins.zip"
 

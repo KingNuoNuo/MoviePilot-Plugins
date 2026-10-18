@@ -3,7 +3,7 @@
     "name": "猫眼榜单",
     "description": "猫眼榜单显示和订阅功能。",
     "labels": "订阅,榜单",
-    "version": "1.2.7",
+    "version": "1.2.8",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/maoyan-v2.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -22,14 +22,15 @@
       "v1.2.4": "全球年度票房榜条目补全上映日期：Box Office Mojo 数据源只提供榜单年份，现于媒体识别到 TMDB 时把发行日期一并写入识别缓存，回填进榜单条目（格式与国内榜一致「YYYY-MM-DD 上映」，客户端直接渲染完整日期，识别失败或无日期的条目维持原年份展示）。识别缓存自动升级：缺少日期键的旧条目会重识别一轮补齐，几轮内收敛，无需重配。",
       "v1.2.5": "榜单条目「缺海报 / 缺上映日期」根治：识别队列不再按榜单固定顺序遍历，改为「缺海报或只有年份的条目优先、连续失败次数少的优先」排序——此前全球年度票房榜排在 4 个电影榜之后，待识别条目攒到数百条时它每一轮都被限额截断，导致该榜新进榜条目长期空海报（如 Obsession）、上映日期也永远补不上。同时：待识别条目超过常规限额（80）时单轮上限自动抬到 240，并加 180 秒时间预算，超时即收工、未轮到的条目下一轮排最前；被限额或超时截断、且上一份快照里本来也没有海报的条目，直接用豆瓣检索补一张兜底图（不占用识别额度），保证最多只空一轮。识别缓存新增 miss 计数，反复认不出来的条目自动沉底，不再每轮占满识别预算。",
       "v1.2.6": "补齐「识别到媒体但 TMDB 没有海报」的漏网条目（如全球年度票房榜第 10 名 Obsession：身份匹配到 TMDB，但该记录 poster 是空串，以前被识别缓存的 TTL 分支当成有效缓存放回内存，既不重识别也不补图，一空就是一整个缓存周期）。现在所有「缓存里没图且上一份快照也没图」的条目每轮都会走一次豆瓣检索补兜底图，补到即写回快照（并带回中文片名，Obsession → 痴迷）。豆瓣整串搜不到时长英文片名会按词逐步截短再试（实测「Chiikawa the Movie: The Secret of Mermaid Island」整串无结果、「Chiikawa」可命中《吉伊卡哇：人鱼之岛的秘密》），截短检索一律带年份校验，年份对不上宁可不补图。补图请求加 0.4 秒间隔并在被限流时立即停止本轮（豆瓣连打会返回空），补图失败达 3 次的条目不再每轮重试。",
-      "v1.2.7": "重识别不再抹掉已补好的海报与中文名：上一版补图成功后，缺上映日期的条目会在下一轮重新识别，而新结果来自 TMDB（该记录本身没有 poster），直接把刚补上的海报和中文片名覆盖成了空 —— Obsession 补到「痴迷」后又变回灰块。现在识别结果缺图/缺中文名时，优先继承识别缓存与上一份快照里已有的值，只更新上映日期等新拿到的字段。"
+      "v1.2.7": "重识别不再抹掉已补好的海报与中文名：上一版补图成功后，缺上映日期的条目会在下一轮重新识别，而新结果来自 TMDB（该记录本身没有 poster），直接把刚补上的海报和中文片名覆盖成了空 —— Obsession 补到「痴迷」后又变回灰块。现在识别结果缺图/缺中文名时，优先继承识别缓存与上一份快照里已有的值，只更新上映日期等新拿到的字段。",
+      "v1.2.8": "设置页与详情页顶部的 App 推荐卡换版：左侧图标由紫色底块 + `mdi-android` 换成 **MoviePilot 官方 logo**（以 data URI 内嵌进节点，不依赖宿主部署路径，反代子路径也不会 404），并把「下载 App」做成主按钮直达 Releases 最新版、GitHub 降为文字按钮 —— 原来只有一个「GitHub 仓库」按钮，点进去还得自己在仓库里找安装包。卡片与另外三个插件共用同一份实现（`app_promo.py`，由 `tools/gen_app_promo.py` 生成，四份逐字节一致）。"
     }
   },
   "NetflixPro": {
     "name": "Netflix榜单",
     "description": "Netflix 官方 Top 10 榜单显示。",
     "labels": "榜单",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/netflix.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -37,6 +38,7 @@
     "release": false,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.0.2": "新增 App 推荐卡：设置页（`get_form`）与详情页（`get_page`）顶部各一张，由同一个 `promo_card()` 渲染 —— 官方 logo + 「下载 App」主按钮（直达 Releases）+ GitHub 文字按钮，与 MaoyanPro / GlobalRankPro / MediaStreamPro 完全一致。",
       "v1.0.1": "修复 Tudum TSV 抓取的编码缺陷：数据文件本身是 UTF-8 但响应不带 charset，原先直接取 response.text 靠 requests 嗅探编码，九成内容是 ASCII 的大文件常被误判为 latin-1 系，弯引号、破折号等非 ASCII 字符全部变成「â」式乱码并导致 TMDB 识别失败；改为按字节取回后显式按 UTF-8 解码。",
       "v1.0.0": "Netflix 官方 Tudum Top 10 榜单插件：数据源为 Netflix 官方静态 TSV 文件（全球榜 all-weeks-global.tsv 附周观看小时数/观看次数/片长/在榜周数，四类目 Films/TV × English/Non-English 各 10 条；国家地区榜 all-weeks-countries.tsv 覆盖约 90 个国家/地区，含中国香港、中国台湾、日本、韩国、新加坡，仅名次与在榜周数，Netflix 未进入中国大陆）。插件默认抓取全球榜 + 中国香港 + 中国台湾，地区可在配置里多选；抓取后走宿主识别链补全中文片名、海报、年份与发行日期，识别结果按「类型|标题」持久化复用。对外提供 /rank（榜单快照，按 board_type 地区与 kind 内容类型过滤）、/rank-list（媒体信息列表，供宿主推荐页与 App）、/refresh（立即抓取）三个接口，统一 bear 认证与 schemas.Response 信封；推荐页按「地区 × 电影/剧集」注册数据源；插件详情页实时展示各分区榜单（名次角标、中文片名优先、观看量格式化）并提供刷新按钮。"
     }
@@ -45,7 +47,7 @@
     "name": "全球影视榜单",
     "description": "整合猫眼、Netflix 与红果短剧榜单，提供统一的榜单接口与推荐页数据源。",
     "labels": "榜单",
-    "version": "1.2.3",
+    "version": "1.2.4",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/globalrank.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -63,14 +65,15 @@
       "v1.2.0": "新增红果海报转发，修手机端拿不到图的问题。红果海报是字节图床（p3/p6-novel.byteimg.com）的绝对外链，桌面浏览器直连正常，但手机端（移动网络对字节 CDN 解析不稳、App 内 WebView 丢跨域大图）经常整屏空白。现在 /rank-list 返回的 poster_path 默认换成插件自己的 GET /poster 接口地址（匿名可访问——图片标签带不了请求头），由宿主代取图片字节后原样回传，客户端只要能访问 MoviePilot 就能出图，不再依赖第三方 CDN。接口只放行 *.byteimg.com 下 /novel-pic/ 的地址（其余 403），响应带 7 天 Cache-Control 与 64 张进程内 LRU 缓存。设置页红果卡片新增「海报经宿主转发」开关（默认开，关掉即回到官网原图地址）；转发地址按 APP_DOMAIN → 请求 base_url → 原图 逐级回落，反向代理改 Host 头或用局域网 IP 访问都不会拼错。",
       "v1.2.1": "红果海报改为固定经插件 /poster 接口转发，去掉 1.2.0 里那个「海报经宿主转发」设置项——手机端拿不到字节图床的图是常态，留一个关掉就会坏的开关没有意义。地址仍按 APP_DOMAIN → 请求 base_url → 原图 逐级回落，只有宿主既没配对外域名、又拿不到请求地址时才退回官网原图；接口白名单、缓存头与行为不变。",
       "v1.2.2": "修复单个榜单抓取失败时整榜从快照里消失的问题：快照原本是「整份替换」语义，而各榜分头抓取（dashboard 一个、影史/国内年度一个页面、全球年度是境外站点 Box Office Mojo）。任何一路失败只会跳过该榜，结果不是「该榜为空」而是「快照里整个没有这个榜」，接口按 board_type 查不到，客户端直接显示「暂无数据」——全球年度票房在国内偶发超时，于是隔三差五空一天。现在改为按榜合并：本次抓到的用新数据，没抓到的沿用上一份快照的同名榜并标 stale，摘要在这种情况下附一句「其中 N 个沿用上次快照：榜名」。兜底只对配置里仍启用的榜生效（关掉的类型、条数归零的平台不复活）；整轮一条没抓到时不兜底，仍由原逻辑整体保留旧快照。",
-      "v1.2.3": "榜单响应补 `stale` 字段：该榜本轮抓取失败、沿用上一份快照时为 true，数据本身仍有效但时间戳是旧的。v1.2.2 的兜底只在插件内部生效，接口载荷是显式白名单，不补这个字段客户端就完全看不到「这是旧数据」。"
+      "v1.2.3": "榜单响应补 `stale` 字段：该榜本轮抓取失败、沿用上一份快照时为 true，数据本身仍有效但时间戳是旧的。v1.2.2 的兜底只在插件内部生效，接口载荷是显式白名单，不补这个字段客户端就完全看不到「这是旧数据」。",
+      "v1.2.4": "App 推荐卡换版：官方 logo 取代紫色 `mdi-android` 底块，「下载 App」升为主按钮（直达 Releases），GitHub 降为文字按钮。卡片实现从 `page.py` 挪到独立的 `app_promo.py`，与 MaoyanPro / NetflixPro / MediaStreamPro 共用同一份代码（由 `tools/gen_app_promo.py` 生成），避免四个插件的卡片样式各自漂移。"
     }
   },
   "MediaStreamPro": {
     "name": "媒体流播放",
     "description": "把已整理入库的视频按原始文件流式传给客户端播放（支持拖动进度）。自动跟随宿主「目录配置」里的媒体库目录，装好即用，无需配置。",
     "labels": "媒体库,播放",
-    "version": "1.0.1",
+    "version": "1.1.0",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/mediastream.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -78,6 +81,8 @@
     "release": false,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.1.0": "新增 `GET /season?path=<媒体库内某个视频的绝对路径>`：**返回同一季还有哪些集**，供客户端拼选集。为什么由服务端给：客户端只能从宿主整理记录里拼（`/history/transfer` 只保留最近几天），而逐集下载时每集是独立种子、没有共同的 `download_hash` —— 两头都会漏集。本接口直接扫这个文件**所在的那一个目录**（不递归、不跨目录，宿主整理规则默认「剧名/Season 2/」，同一季必定同目录），按「剧名主干 + 季号」认亲：文件名先抹掉 `S02E05` / `EP05` / `第5集` 及其后的规格（2160p / WEB-DL / 字幕组），只保留字母数字与汉字再比，所以 `某剧.S02E05.2160p.WEB-DL.mkv` 与 `某剧 第05集.mkv` 都能落到 `某剧`。同一集有多个版本时按集号去重（正在播的那份优先，否则留体积最大的）。认不出集号的（电影/花絮）只回它自己。路径校验与 `/stream` 同一套：realpath 归一 + 媒体库根前缀比较 + 扩展名白名单，符号链接逃出媒体库的也挡。另外，设置页与详情页顶部新增 App 推荐卡（官方 logo + 下载入口），与另外三个插件共用同一份实现。",
+      "v1.0.2": "新增 HEAD 支持：`/stream` 之前只注册了 GET，宿主路由对外部播放器/下载器的 HEAD 探测回 405。现在 `methods` 里显式带上 HEAD，HEAD 请求只回响应头（`Content-Type`、`Content-Length`、`Accept-Ranges: bytes`），不打开文件读数据、也不回文件体；鉴权、路径白名单、扩展名白名单与 GET 完全一致（越权依旧 403、文件不存在依旧 404）。GET 行为不变，Range 拖动照旧。App 侧新增的「用系统播放器打开」就是靠本机中转转发这条流（token 只在 App 内存里，不进 URL）。",
       "v1.0.1": "修复：未实现基类的抽象方法 `stop_service`（本插件没有后台任务要停，但 `_PluginBase` 把它列成了抽象方法），宿主加载时直接抛 `Can't instantiate abstract class MediaStreamPro without an implementation for abstract method 'stop_service'` → 插件装不上。**发版前必须照  `_PluginBase` 的六个抽象方法逐个对一遍**：`init_plugin` / `get_state` / `get_api` / `get_form` / `get_page` / `stop_service`，缺任何一个都是「安装成功但加载失败」，宿主 Web 端只会报一句「加载失败」，真实原因在日志里。此版本内容与 v1.0.0 完全相同，仅补这个方法。",
       "v1.0.0": "首个版本：给客户端一条能直接喂播放器的视频流。GET /stream?path=<媒体库内绝对路径> 返回原始文件，走 Starlette FileResponse 自带 HTTP Range，客户端（MoviePilotApp 下载记录）可以拖进度；GET /ping 供客户端探测可用性与当前放行目录。放行的媒体库根目录不写死也不落配置，每次请求实时读宿主「目录配置」里的 library_path（只放行媒体库，下载目录刻意不放行），宿主改目录即刻生效；路径经 realpath 归一后按「根目录 + 分隔符」比较，挡住前缀串与 .. 穿越，扩展名限定视频容器。认证沿用宿主 bear 模式（JWT / API 令牌），插件不解析凭据、也不支持把 token 拼进 URL。插件没有开关与配置项，安装即生效，配置页只有一张说明卡。"
     }

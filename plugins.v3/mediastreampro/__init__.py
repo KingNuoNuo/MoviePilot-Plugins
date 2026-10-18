@@ -19,16 +19,26 @@
 三个对外接口：
 
 - ``GET /stream?path=...``：视频文件流（Range / 拖动进度）；
+- ``HEAD /stream?path=...``：只回头（文件长度、类型、是否支持 Range），供外部播放器
+  或下载器先探一次再决定怎么播 —— 老版本没注册 HEAD，宿主路由直接 405；
+- ``GET /season?path=...``：**同一季的集列表**。客户端只靠宿主的整理记录拼不出完整选集
+  （`/history/transfer` 只留得下最近几天，且逐集下载时每集是独立种子、没有共同的
+  ``download_hash``），所以这里直接扫媒体库里这个文件所在的目录，按「剧名主干 + 季号」认亲。
+  不递归、不跨目录：宿主整理规则默认就是「剧名/Season 2/」这种结构，同一季必定同目录。
 - ``GET /ping``：可用性探测 + 当前放行的媒体库目录（App 用它决定是否显示播放按钮）；
 - 无表单配置项。
 """
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.plugins import _PluginBase
 from app.sdk.logging import logger
+
+from .app_promo import promo_card
 
 # 只放行视频容器，别的一律不认（同目录下还有 nfo / jpg / srt，不该被这条流读出去）
 VIDEO_EXTENSIONS = {
@@ -60,6 +70,50 @@ MEDIA_TYPES = {
 # 宿主目录配置读不到时的兜底（不是配置项，只是让常见部署里插件立刻可用）
 FALLBACK_ROOTS = ("/DSM/media", "/media")
 
+# ---------- 选集识别（/season 用） ----------
+# 季 + 集：S02E05 / s02.e05 / S02-E05（前后允许分隔符，避免把 S02E05 里的数字当别的）
+_SEASON_EPISODE = re.compile(r"(?i)(?:^|[^0-9a-z])s(\d{1,3})[\s._-]*e(\d{1,4})(?:[^0-9]|$)")
+# 只有集号：EP05 / E05 / Episode.05
+_EPISODE_EN = re.compile(r"(?i)(?:^|[^0-9a-z])(?:e|ep|episode)[\s._-]*(\d{1,4})(?:[^0-9]|$)")
+# 只有集号（中文）：第 5 集 / 第5话
+_EPISODE_CN = re.compile(r"第\s*(\d{1,4})\s*[集话話]")
+# 一次最多回多少集：防着有人把整季库塞进一个目录（正常一部剧一季几十集）
+MAX_SEASON_FILES = 500
+
+
+def parse_season_episode(filename: str) -> Optional[Tuple[Optional[int], int]]:
+    """从文件名解析 ``(季号, 集号)``；认不出集号返回 None。
+
+    季号可能为 None（``EP05`` 这种命名不给季）—— 此时只和同样没有季号的文件认亲，
+    免得把「无季标记的第二季」拼进第一季。电影、花絮这类本来就没有集号的直接返回 None，
+    客户端会当成单片处理。
+    """
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    match = _SEASON_EPISODE.search(stem)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    for pattern in (_EPISODE_EN, _EPISODE_CN):
+        match = pattern.search(stem)
+        if match:
+            return None, int(match.group(1))
+    return None
+
+
+def show_stem(filename: str) -> str:
+    """剧名主干：抹掉季集标记及其后的规格（2160p / WEB-DL / 字幕组），只留能认亲的部分。
+
+    只保留字母数字与汉字 —— 空格、点、下划线、方括号、各站点的标记都会被归一掉，
+    于是 ``某剧.S02E05.2160p.WEB-DL.mkv`` 与 ``某剧 第05集.mkv`` 都能落到 ``某剧``。
+    """
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    cut = len(stem)
+    for pattern in (_SEASON_EPISODE, _EPISODE_EN, _EPISODE_CN):
+        match = pattern.search(stem)
+        if match:
+            cut = min(cut, match.start())
+    stem = stem[:cut]
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", stem.lower())
+
 
 class MediaStreamPro(_PluginBase):
     """媒体库文件流转发：把已入库的视频按原文件喂给客户端播放器。"""
@@ -73,7 +127,7 @@ class MediaStreamPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/mediastream.png")
     # 插件版本
-    plugin_version = "1.0.1"
+    plugin_version = "1.1.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -119,9 +173,10 @@ class MediaStreamPro(_PluginBase):
         """
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
-        """配置页只放说明：没有可配项，因此不渲染任何输入控件。"""
+        """配置页只有两件事：App 推荐卡 + 「装好即用」说明，没有可配项。"""
         return (
             [
+                promo_card(),
                 {
                     "component": "VForm",
                     "content": [
@@ -157,7 +212,7 @@ class MediaStreamPro(_PluginBase):
         )
 
     def get_page(self) -> Optional[List[dict]]:
-        """详情页：显示当前放行的媒体库目录与用法。"""
+        """详情页：App 推荐卡 + 当前放行的媒体库目录与用法。"""
         roots = self.media_roots()
         rows = [
             {
@@ -184,6 +239,7 @@ class MediaStreamPro(_PluginBase):
         ]
 
         return [
+            promo_card(),
             {
                 "component": "VRow",
                 "content": [
@@ -231,9 +287,12 @@ class MediaStreamPro(_PluginBase):
                                     {
                                         "component": "VCardText",
                                         "props": {"class": "text-body-2 text-medium-emphasis"},
-                                        "text": ("GET /api/v1/plugin/MediaStreamPro/stream?path=<媒体文件绝对路径>"
+                                        "text": ("GET /stream?path=<媒体文件绝对路径>"
                                                  "（需在请求头带 Authorization: Bearer <token>，"
-                                                 "返回支持 Range 的文件流；不放行下载目录）"),
+                                                 "返回支持 Range 的文件流；HEAD 只回头不回文件体）"
+                                                 " ｜ GET /season?path=<媒体文件绝对路径>"
+                                                 "（返回同一季还有哪些集，供客户端做选集）"
+                                                 " —— 两者都只放行媒体库目录，下载目录不放行。"),
                                     },
                                 ],
                             }
@@ -256,12 +315,22 @@ class MediaStreamPro(_PluginBase):
             {
                 "path": "/stream",
                 "endpoint": self.stream,
-                "methods": ["GET"],
+                "methods": ["GET", "HEAD"],
                 "auth": "bear",
                 "summary": "视频文件流",
                 "description": "按 path（媒体库内的绝对路径）返回原始视频文件，"
-                               "支持 HTTP Range（客户端可拖动进度）。"
+                               "支持 HTTP Range（客户端可拖动进度）；HEAD 只回头不回文件体。"
                                "只放行宿主目录配置里媒体库路径下的视频文件。",
+            },
+            {
+                "path": "/season",
+                "endpoint": self.season,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "同季集列表",
+                "description": "按 path（媒体库内某个视频的绝对路径）扫它所在目录，"
+                               "返回同一部剧同一季的其它集，供客户端拼选集。"
+                               "按「剧名主干 + 季号」认亲，不递归、不跨目录。",
             },
             {
                 "path": "/ping",
@@ -283,10 +352,13 @@ class MediaStreamPro(_PluginBase):
             },
         }
 
-    def stream(self, path: str = "") -> Any:
+    def stream(self, request: Request, path: str = "") -> Any:
         """返回视频文件流（Range 由 Starlette 的 FileResponse 处理）。
 
         ``path`` 是普通标量默认参数 → FastAPI 当成查询参数，不需要额外声明。
+        ``request`` 只用来区分 GET / HEAD：HEAD 自己构造一个只有响应头的 200，
+        不走 FileResponse —— 部分 Starlette 版本对 HEAD 仍会去打开文件、甚至在
+        生成器里读数据，白白占一次句柄与一次磁盘预读。
         """
         target = self.resolve(path)
         if target is None:
@@ -300,15 +372,130 @@ class MediaStreamPro(_PluginBase):
                 {"success": False, "message": "文件不存在或已被移走"}, status_code=404
             )
         ext = os.path.splitext(target)[1].lower()
+        media_type = MEDIA_TYPES.get(ext, "application/octet-stream")
+        headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-store"}
+
+        if request.method.upper() == "HEAD":
+            # 外置播放器 / 下载器常用的探路请求：长度 + 类型 + 支持 Range 就够了。
+            # 这里刻意不看 Range 头，HEAD 一律回 200 + 完整长度（不是 206），
+            # 与 nginx / Apache 对 HEAD 的处理一致；真取分片请用 GET。
+            try:
+                size = os.path.getsize(target)
+            except OSError as error:
+                logger.warning(f"媒体流播放读取失败：{error}")
+                return JSONResponse(
+                    {"success": False, "message": "文件读取失败"}, status_code=500
+                )
+            headers["Content-Length"] = str(size)
+            logger.debug(f"媒体流播放 HEAD：{os.path.basename(target)}（{size} 字节）")
+            return Response(status_code=200, headers=headers, media_type=media_type)
+
         logger.debug(f"媒体流播放：{os.path.basename(target)}")
         return FileResponse(
             target,
-            media_type=MEDIA_TYPES.get(ext, "application/octet-stream"),
+            media_type=media_type,
             # 文件名不放 Content-Disposition（inline 播放，浏览器里也不会触发下载）
-            headers={"Accept-Ranges": "bytes", "Cache-Control": "no-store"},
+            headers=headers,
         )
 
     # ---------- 内部 ----------
+
+    def season(self, path: str = "") -> Any:
+        """同一季的集列表：扫当前文件所在目录，按「剧名主干 + 季号」认亲。
+
+        为什么不在宿主整理记录里拼：``/history/transfer`` 只保留最近几天的回执，
+        更早入库的集根本查不到；而逐集下载时每集是独立种子，没有共同的 ``download_hash``。
+        直接扫媒体库没有这两个限制 —— 文件在，集就在。
+
+        只用**当前文件所在的那一个目录**：不递归、不跨目录。宿主整理规则默认是
+        「剧名/Season 2/」，同一季必定同目录；跨目录扫会把别的剧、预告、花絮全带进来。
+        """
+        target = self.resolve(path)
+        if target is None:
+            return JSONResponse(
+                {"success": False, "message": "路径不在可播放范围内"}, status_code=403
+            )
+        if not os.path.isfile(target):
+            return JSONResponse(
+                {"success": False, "message": "文件不存在或已被移走"}, status_code=404
+            )
+
+        parsed = parse_season_episode(target)
+        if parsed is None:
+            # 认不出集号（电影、花絮、命名诡异）→ 只回它自己，客户端按单片处理
+            return {"success": True, "data": {"season": None, "episodes": [self._episode_item(target, None)]}}
+
+        season_no, episode_no = parsed
+        stem = show_stem(target)
+        if not stem:
+            # 文件名里除了集号什么都没有，没法认亲，同样只回自己
+            return {"success": True, "data": {"season": season_no, "episodes": [self._episode_item(target, episode_no)]}}
+
+        roots = self.media_roots()
+
+        def allowed(candidate: str) -> bool:
+            """realpath 后仍在某个媒体库根内（挡符号链接逃逸），复用 /stream 同一套口径。"""
+            return any(
+                candidate == root or candidate.startswith(root + os.sep) for root in roots
+            )
+
+        found: List[Dict[str, Any]] = []
+        try:
+            with os.scandir(os.path.dirname(target)) as entries:
+                for entry in entries:
+                    if len(found) >= MAX_SEASON_FILES:
+                        break
+                    try:
+                        if not entry.is_file() or os.path.splitext(entry.name)[1].lower() not in VIDEO_EXTENSIONS:
+                            continue
+                    except OSError:
+                        continue
+                    if show_stem(entry.name) != stem:
+                        continue
+                    candidate = os.path.realpath(entry.path)
+                    if not allowed(candidate):
+                        continue
+                    item_parsed = parse_season_episode(entry.name)
+                    if item_parsed is None or item_parsed[0] != season_no:
+                        continue
+                    found.append(self._episode_item(candidate, item_parsed[1]))
+        except OSError as error:
+            logger.warning(f"扫描同季文件失败：{error}")
+
+        if not found:
+            return {"success": True, "data": {"season": season_no, "episodes": [self._episode_item(target, episode_no)]}}
+
+        # 同一集可能有多个版本（2160p / 1080p 同时留着）→ 同集号只留一个：
+        # 正在播的那份优先（免得客户端按 path 找不到当前集），否则留体积最大的
+        dedup: Dict[Optional[int], Dict[str, Any]] = {}
+        for item in found:
+            key = item["episode"]
+            previous = dedup.get(key)
+            if previous is None:
+                dedup[key] = item
+            elif item["path"] == target:
+                dedup[key] = item
+            elif previous["path"] != target and item["size"] > previous["size"]:
+                dedup[key] = item
+
+        episodes = [dedup[key] for key in sorted(dedup, key=lambda n: (n is None, n or 0))]
+        logger.debug(f"同季集列表：{stem} S{season_no} 共 {len(episodes)} 集")
+        return {"success": True, "data": {"season": season_no, "stem": stem, "episodes": episodes}}
+
+    @staticmethod
+    def _episode_item(file_path: str, episode: Optional[int]) -> Dict[str, Any]:
+        """一条选集项：客户端只用 ``path`` 与 ``label``，``size`` 留给同集多版本去重。"""
+        try:
+            size = os.path.getsize(file_path)
+        except OSError:
+            size = 0
+        return {
+            "path": file_path,
+            "episode": episode,
+            "label": str(episode) if episode is not None else "正片",
+            "name": os.path.basename(file_path),
+            "size": size,
+        }
 
     def media_roots(self) -> List[str]:
         """当前放行的媒体库根目录（实时读宿主「目录配置」，去重保序）。"""
