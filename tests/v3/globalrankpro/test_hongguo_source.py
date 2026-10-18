@@ -432,6 +432,8 @@ def test_rank_list_returns_flat_media_info(plugin, monkeypatch):
     install_pages(monkeypatch, plugin, [("hot-drama",
                                         make_page_html(PAGE_ROWS))])
     plugin.fetch()
+    # 这里验的是统一模型与排序，海报转发另有专门用例；先关掉看官网原图地址
+    monkeypatch.setattr(plugin, "_poster_proxy", False)
 
     result = plugin.rank_list()
     assert result.success is True
@@ -494,3 +496,85 @@ def test_detail_page_marks_disabled_source(plugin):
 
     assert "红果短剧榜单" in dumped
     assert "未启用" in dumped
+
+
+# ==================== 海报转发 ====================
+
+POSTER_CDN = ("https://p6-novel.byteimg.com/novel-pic/"
+              "abc~tplv-shrink:1080:0.image")
+
+
+def _proxy_settings(domain="https://mp.example.com"):
+    return SimpleNamespace(APP_DOMAIN=domain, API_V1_STR="/api/v1",
+                           PROXY=None, TZ="Asia/Shanghai")
+
+
+def test_poster_url_uses_host_proxy(plugin, monkeypatch):
+    """开启转发后海报地址指向插件 /poster，原图整体 urlencode 进 u 参数。"""
+    monkeypatch.setattr("app.plugins.globalrankpro.hongguo.settings",
+                        _proxy_settings())
+
+    url = plugin.poster_url_for(POSTER_CDN)
+
+    assert url.startswith("https://mp.example.com/api/v1/plugin/")
+    assert "/poster?u=" in url
+    assert "~tplv-shrink%3A1080%3A0.image" in url
+    assert "https://p6-novel" not in url
+
+
+def test_poster_proxy_can_be_disabled(plugin, monkeypatch):
+    """关掉开关就回到官网原图地址，行为与升级前一致。"""
+    monkeypatch.setattr("app.plugins.globalrankpro.hongguo.settings",
+                        _proxy_settings())
+    plugin.apply_config({"poster_proxy": False})
+
+    assert plugin.poster_url_for(POSTER_CDN) == POSTER_CDN
+
+
+def test_poster_url_without_any_host_falls_back_to_cdn(plugin, monkeypatch):
+    """APP_DOMAIN 没配、也没有请求地址时退回原图，不能拼出半截地址。"""
+    monkeypatch.setattr("app.plugins.globalrankpro.hongguo.settings",
+                        _proxy_settings(domain=""))
+
+    assert plugin.poster_url_for(POSTER_CDN) == POSTER_CDN
+
+
+def test_poster_response_rejects_untrusted_urls(plugin):
+    """匿名接口只放行字节图床，其余一律 403（避免被当成开放代理）。"""
+    from fastapi import HTTPException
+
+    for bad in (
+        "https://evil.example.com/a.jpg",
+        "https://p6-novel.byteimg.com/other/x.jpg",
+        "https://p9-aio.ecombdimg.com/other/x.jpg",
+        "file:///etc/passwd",
+        "https://byteimg.com.evil.example.com/novel-pic/x.jpg",
+    ):
+        with pytest.raises(HTTPException) as err:
+            plugin.poster_response(bad)
+        assert err.value.status_code == 403
+
+
+def test_poster_response_streams_image(plugin, monkeypatch):
+    """正常地址代取后原样回传字节，并带长期缓存头。"""
+    fake = SimpleNamespace(
+        status_code=200,
+        content=b"\xff\xd8fake-jpeg-bytes",
+        headers={"Content-Type": "image/jpeg; charset=utf-8"})
+
+    class _FakeRequestUtils:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def get_res(self, url):
+            assert url == POSTER_CDN
+            return fake
+
+    monkeypatch.setattr("app.plugins.globalrankpro.hongguo.RequestUtils",
+                        _FakeRequestUtils)
+
+    response = plugin.poster_response(POSTER_CDN)
+
+    assert response.body == fake.content
+    assert response.media_type == "image/jpeg"
+    assert "max-age" in response.headers["Cache-Control"]

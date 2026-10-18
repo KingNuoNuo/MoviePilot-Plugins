@@ -328,9 +328,14 @@ def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
             '红果短剧榜单',
             '红果短剧官网热播榜（SSR 直取，无需签名）。短剧不在 TMDB / 豆瓣里，'
             '本源不做媒体识别也不提供订阅，只用于榜单展示与推荐页选片；'
-            '「每榜抓取条数」按 20 一页向上翻页。',
+            '「每榜抓取条数」按 20 一页向上翻页。'
+            '「海报经宿主转发」把海报地址换成插件自己的 /poster 接口：'
+            '手机端不必直连字节 CDN，关掉则回到官网原图地址。',
             [
-                form_row([switch_col('hongguo_enabled', '启用红果数据源', 6)]),
+                form_row([
+                    switch_col('hongguo_enabled', '启用红果数据源', 4),
+                    switch_col('hongguo_poster_proxy', '海报经宿主转发', 8),
+                ]),
                 form_row([
                     type_select('hongguo_boards', '抓取榜单', hongguo_items, 8),
                     form_col_nodes([{
@@ -374,6 +379,7 @@ def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
         'hongguo_enabled': True,
         'hongguo_boards': list(getattr(hongguo, "_boards", ['hot'])),
         'hongguo_limit': int(getattr(hongguo, "_limit", 20) or 20),
+        'hongguo_poster_proxy': True,
     }
     # 用当前运行态覆盖默认值，让设置页回显已保存的配置；
     # 未渲染的死开关（*_rec_enabled 等）也一并带回，保存时不会丢字段。

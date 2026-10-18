@@ -84,11 +84,13 @@
 | 启用红果数据源 | 关闭后不抓取红果榜单，接口也不返回相关数据 |
 | 抓取榜单 | 多选：红果热播榜 / 真人剧热播榜 / 漫剧热播榜 / AI 剧热播榜——勾选哪些就抓哪些 |
 | 每榜条数 | 20 / 40 / 60 / 100，按 20 条一页向上翻页；默认 20 |
+| 海报经宿主转发 | 默认开。开启后海报地址改走插件自己的 `/poster` 接口，手机端只需能访问 MoviePilot，不必直连字节 CDN；关闭则回到官网原图地址 |
 
 ## 对外接口
 
 统一使用宿主的 `bear` 认证（接受 App 登录态 JWT、`X-API-KEY` 头与 `apikey` 查询参数）
-与 `schemas.Response` 信封（`success/message/data` 三键结构）。
+与 `schemas.Response` 信封（`success/message/data` 三键结构）。唯一的例外是
+`/poster`：图片标签带不了请求头，它按匿名接口注册。
 
 ### GET `/rank`
 
@@ -222,6 +224,23 @@ curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=
 单个数据源失败不会影响其它源：失败信息落在对应 `sources[].message`，
 只要有一个源成功，外层 `success` 就是 `true`。
 
+### GET `/poster`
+
+红果海报转发。**匿名可访问**（`<img>` 标签带不了请求头），供客户端直接引用。
+
+| 参数 | 说明 |
+|---|---|
+| `u` | 红果官网的海报原图地址（`urlencode` 后） |
+
+只放行字节图床（`*.byteimg.com/novel-pic/`、`*.ecombdimg.com/obj/`）的图片，
+其余返回 `403`；取图失败返回
+`502`。响应带 `Cache-Control: public, max-age=604800`，进程内另有 64 张的
+LRU 缓存。
+
+开启「海报经宿主转发」后，`/rank-list` 返回的 `poster_path` 就是本接口地址
+（形如 `https://你的域名/api/v1/plugin/GlobalRankPro/poster?u=...`），
+客户端只需要能访问 MoviePilot 本身；关闭则直接返回官网原图地址。
+
 ## 推荐页数据源
 
 开启「推荐页数据源」+「开放榜单接口」后，按三个数据源的实际配置合并注册：
@@ -273,6 +292,8 @@ curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=
 - 猫眼与 Netflix 走宿主识别链补全中文片名与海报，识别结果按源分别持久化，跨周复用；
 - 红果官网只公开**前 3 集**的 **360p** 直链（`preview_url`），第 4 集起与更高清晰度
   均返回 404；海报源图上限 896×1280（缩略后缀已提到 1080，再大不会放大）；
+- 红果海报是字节图床外链，桌面直连没问题，手机端（移动网络 / App 内 WebView）
+  经常拿不到；默认开启「海报经宿主转发」由插件代取，客户端不再依赖第三方 CDN；
 - 红果官网没有公开榜单 API，抓的是 SSR 页面；官网同一个 URL 会随机返回两种渲染输出
   （数据分别挂在 `data-fn-name="r"` 与 `mergeLoaderData` 上），插件两种都认，
   页面结构真变了则保留上一次快照并在刷新结果里报错。

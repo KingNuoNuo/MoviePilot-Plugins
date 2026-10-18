@@ -27,6 +27,11 @@
 
 ⚠️ 官网只公开前 3 集的 360p 直链（``/video/public/{vid}/360p.mp4``），
 第 4 集起返回 404，更高清晰度同样没有。``preview_url`` 只拼前三集。
+
+海报是字节图床（``p3/p6-novel.byteimg.com``）的绝对地址。桌面浏览器直连没问题，
+但手机端（移动网络解析不稳、App 内 WebView 丢跨域大图）经常出不来，所以默认把
+``poster`` 换成宿主自己的 ``/poster`` 接口转发：客户端只要能访问 MoviePilot 就能
+出图。开关是「海报经宿主转发」，关掉则回到官网原图地址。
 """
 
 import datetime
@@ -34,7 +39,9 @@ import html as html_lib
 import json
 import re
 import time
-from typing import Any, Dict, List, Optional
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote, urlsplit
 
 import pytz
 
@@ -80,6 +87,25 @@ _PAGE_INTERVAL = 0.4
 # 直接全文扫属性而不是先匹配 <script> 标签：属性值本身带引号，遇到内容里含
 # 「>」的标签也不会被截断。
 _ARGS_RE = re.compile(r'''data-fn-args=(?:'([^']*)'|"([^"]*)")''', re.S)
+
+# ---- 海报代理 ----
+# 红果海报是字节图床的绝对地址（p3/p6-novel.byteimg.com/novel-pic/…）。桌面浏览器
+# 直连没问题，但手机端经常拿不到：移动网络对字节 CDN 的解析/连通性不稳定，App 内
+# WebView 的图片加载器也可能把跨域大图直接丢掉。把海报改成经宿主转发的地址后，
+# 客户端只要能打开 MoviePilot 就能出图，不再依赖第三方 CDN。
+#
+# 只允许代理字节图床下的图片：插件接口是匿名可访问的（<img> 带不了请求头），
+# 不限制就等于给宿主机开了个开放代理。
+#   域名后缀 -> 允许的路径前缀（官网现在走 novel-pic，早期/部分封面走电商 CDN 的 obj）
+_POSTER_ALLOWED = (
+    (".byteimg.com", ("/novel-pic/",)),
+    (".ecombdimg.com", ("/obj/",)),
+)
+# 进程内缓存：一屏 20 张、推荐页更多，翻页/回退会反复请求同一批图
+_POSTER_CACHE: "OrderedDict[str, Tuple[bytes, str]]" = OrderedDict()
+_POSTER_CACHE_MAX = 64
+# 海报是静态资源，让浏览器长期缓存，减少宿主回源
+_POSTER_CACHE_CONTROL = "public, max-age=604800"
 
 
 def _safe_int(value, default: int = 0) -> int:
@@ -243,6 +269,8 @@ class HongguoSource(RankSource):
         super().__init__(host)
         object.__setattr__(self, "_boards", list(self._DEFAULT_BOARDS))
         object.__setattr__(self, "_limit", self._DEFAULT_LIMIT)
+        # 海报是否经宿主转发（默认开：手机端直连字节 CDN 经常拿不到图）
+        object.__setattr__(self, "_poster_proxy", True)
 
     def apply_config(self, config: Dict[str, Any]) -> None:
         """接收主类剥离前缀后的红果配置。"""
@@ -255,6 +283,111 @@ class HongguoSource(RankSource):
         limit = _safe_int((config or {}).get("limit"), self._DEFAULT_LIMIT)
         if limit > 0:
             object.__setattr__(self, "_limit", limit)
+        proxy = (config or {}).get("poster_proxy")
+        if proxy is not None:
+            object.__setattr__(self, "_poster_proxy", bool(proxy))
+
+    # ------------------------------------------------------------------
+    # 海报代理
+    # ------------------------------------------------------------------
+    def _plugin_id(self) -> str:
+        """宿主插件 ID（即插件类名），用于拼插件接口路径。"""
+        return type(self._host).__name__ or "GlobalRankPro"
+
+    def _api_base(self) -> str:
+        """宿主对外访问地址（含 ``/api/v1``），取不到时返回空串。
+
+        优先用宿主配置的 ``APP_DOMAIN``：它和用户实际访问的域名一致，手机、
+        桌面、App 拿到的都是同一个可访问地址。没配就退回直连 CDN 原图。
+        """
+        domain = str(getattr(settings, "APP_DOMAIN", "") or "").strip().rstrip("/")
+        if not domain:
+            return ""
+        prefix = str(getattr(settings, "API_V1_STR", "/api/v1") or "/api/v1")
+        return f"{domain}/{prefix.strip('/')}"
+
+    def poster_url_for(self, raw: str, base: str = "") -> str:
+        """把 CDN 原图地址换成宿主转发地址（关闭代理或取不到域名时原样返回）。
+
+        :param base: 请求方实际访问的宿主地址（来自 ``request.base_url``），
+                     仅作 ``APP_DOMAIN`` 未配置时的兜底。默认优先用
+                     ``APP_DOMAIN``：它是管理员显式配置的对外地址，反向代理
+                     改了 Host 头时也不会拼错。
+        """
+        url = str(raw or "").strip()
+        if not url or not self._poster_proxy:
+            return url
+        prefix = str(getattr(settings, "API_V1_STR", "/api/v1") or "/api/v1")
+        root = self._api_base()
+        if not root:
+            host = str(base or "").strip().rstrip("/")
+            if not host:
+                return url
+            root = f"{host}/{prefix.strip('/')}"
+        return f"{root}/plugin/{self._plugin_id()}/poster?u={quote(url, safe='')}"
+
+    def poster_response(self, url: str):
+        """下载并回传海报字节（插件 ``/poster`` 接口的实现）。
+
+        只放行字节图床白名单里的图片，其余一律 403——这个接口是匿名可访问的，
+        不做白名单就等于开放代理。
+        """
+        from fastapi import HTTPException
+        from fastapi.responses import Response
+
+        target = str(url or "").strip()
+        if not target:
+            raise HTTPException(status_code=400, detail="缺少海报地址")
+
+        parts = urlsplit(target)
+        host = (parts.hostname or "").lower()
+        allowed = any(
+            parts.scheme in ("http", "https")
+            and host.endswith(suffix)
+            and parts.path.startswith(prefixes)
+            for suffix, prefixes in _POSTER_ALLOWED
+        )
+        if not allowed:
+            raise HTTPException(status_code=403, detail="不允许代理该地址")
+
+        cached = _POSTER_CACHE.get(target)
+        if cached is not None:
+            _POSTER_CACHE.move_to_end(target)
+            return Response(content=cached[0], media_type=cached[1],
+                            headers={"Cache-Control": _POSTER_CACHE_CONTROL})
+
+        try:
+            response = RequestUtils(
+                headers={"User-Agent": _UA, "Referer": f"{SITE}/"},
+                proxies=getattr(settings, "PROXY", None),
+            ).get_res(target)
+        except Exception as e:
+            logger.error(f"红果海报下载异常：{e}")
+            raise HTTPException(status_code=502, detail="海报下载失败")
+
+        status = getattr(response, "status_code", None)
+        try:
+            code = int(status) if status is not None else 0
+        except (TypeError, ValueError):
+            code = 0
+        content = getattr(response, "content", b"") or b""
+        if not response or code != 200 or not isinstance(content, (bytes, bytearray)) \
+                or not content:
+            raise HTTPException(status_code=502,
+                                detail=f"海报下载失败（{code or '无响应'}）")
+
+        media_type = "image/jpeg"
+        headers_obj = getattr(response, "headers", None)
+        if headers_obj:
+            media_type = str(headers_obj.get("Content-Type") or media_type).split(";")[0]
+        if not media_type.startswith("image/"):
+            raise HTTPException(status_code=502, detail="海报响应不是图片")
+
+        _POSTER_CACHE[target] = (content, media_type)
+        while len(_POSTER_CACHE) > _POSTER_CACHE_MAX:
+            _POSTER_CACHE.popitem(last=False)
+        return Response(content=content, media_type=media_type,
+                        headers={"Cache-Control": _POSTER_CACHE_CONTROL})
 
     def fetch(self) -> Dict[str, Any]:
         """执行一次红果榜单抓取，返回摘要字典。"""
@@ -429,13 +562,15 @@ class HongguoSource(RankSource):
     # ==================== 对外接口 ====================
 
     def rank_list(self, board_type: str = None, kind: str = None,
-                  page: int = 1, limit: int = None
+                  page: int = 1, limit: int = None, base: str = ""
                   ) -> schemas.Response[List[schemas.MediaInfo]]:
         """
         推荐页/浏览页使用的榜单列表接口。
 
         扁平返回指定榜单（默认快照里第一个榜）的全部条目，按名次排序；
         board_type 不传时返回全部榜单，先按榜单顺序、再按名次。
+
+        :param base: 调用方实际访问宿主的地址，用于拼海报转发地址
         """
         boards = self.boards()
         if board_type:
@@ -461,7 +596,8 @@ class HongguoSource(RankSource):
                 title=title,
                 year=str(row.get("year") or "") or None,
                 type=self._RECOMMEND_TYPE,
-                poster_path=str(row.get("poster") or "") or None,
+                poster_path=(self.poster_url_for(
+                    str(row.get("poster") or ""), base) or None),
                 overview=str(row.get("overview") or "") or None,
             )
             if media.title and media.year:

@@ -4,7 +4,8 @@
 
 - ``GET /rank?source=maoyan|netflix|hongguo|all``：统一榜单快照（三源字段并集）；
 - ``GET /rank-list?source=...``：统一媒体信息列表（宿主 ``MediaInfo``）；
-- ``GET /refresh?source=...``：立即抓取指定数据源。
+- ``GET /refresh?source=...``：立即抓取指定数据源；
+- ``GET /poster?u=...``：红果海报转发（匿名可访问，手机端不直连字节 CDN）。
 
 三个数据源各自封装在 ``maoyan.py`` / ``netflix.py`` / ``hongguo.py`` 里（原
 MaoyanPro 与 NetflixPro 的抓取解析逻辑整体平移，红果为新增的 SSR 抓取），
@@ -12,11 +13,12 @@ MaoyanPro 与 NetflixPro 的抓取解析逻辑整体平移，红果为新增的 
 ``hongguo_`` 前缀，三源互不覆盖。
 """
 import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from fastapi import Request
 
 from app import schemas
 from app.chain.download import DownloadChain
@@ -56,7 +58,7 @@ class GlobalRankPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/globalrank.png")
     # 插件版本
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -230,6 +232,8 @@ class GlobalRankPro(_PluginBase):
                 'hongguo_enabled': hongguo.enabled,
                 'hongguo_boards': list(getattr(hongguo, '_boards', [])),
                 'hongguo_limit': int(getattr(hongguo, '_limit', 0) or 0),
+                'hongguo_poster_proxy': bool(
+                    getattr(hongguo, '_poster_proxy', True)),
             })
         return config
 
@@ -337,6 +341,17 @@ class GlobalRankPro(_PluginBase):
                 "description": "立即触发一次抓取：source 选数据源"
                                "（maoyan/netflix/hongguo/all）",
                 "response_model": schemas.Response[RankRefreshResult],
+            },
+            {
+                "path": "/poster",
+                "endpoint": self.hongguo_poster,
+                "methods": ["GET"],
+                "summary": "红果海报转发",
+                "description": "把红果海报经宿主转发给客户端，手机端不直连字节 CDN。"
+                               "只放行字节图床（byteimg / ecombdimg）下的图片。",
+                # <img> 标签带不了 Authorization 头，必须匿名可读；
+                # 安全边界由 endpoint 内部的域名/路径白名单保证
+                "allow_anonymous": True,
             },
         ]
 
@@ -446,7 +461,7 @@ class GlobalRankPro(_PluginBase):
     def rank_list(self, source: str = SOURCE_MAOYAN,
                   board_type: str = None, kind: str = None,
                   page: int = 1, limit: int = None,
-                  platform: str = None
+                  platform: str = None, request: Request = None
                   ) -> schemas.Response[List[schemas.MediaInfo]]:
         """
         推荐页/浏览页使用的榜单列表接口（内部转发到对应数据源）。
@@ -458,6 +473,7 @@ class GlobalRankPro(_PluginBase):
         :param page: 页码（仅猫眼平台细分榜编组时有效）
         :param limit: 返回条目上限
         :param platform: 猫眼 platformType
+        :param request: 宿主注入的请求对象，用于把海报地址拼成客户端真正能连上的地址
         """
         source_id = (source or SOURCE_MAOYAN).strip().lower()
         src = self.sources.get(source_id)
@@ -477,9 +493,32 @@ class GlobalRankPro(_PluginBase):
             return src.rank_list(
                 board_type=board_type or "global", kind=kind,
                 page=page, limit=limit)
-        # 红果：不传 board_type 时返回全部已抓取榜单
+        # 红果：不传 board_type 时返回全部已抓取榜单；海报地址按请求地址拼
         return src.rank_list(board_type=board_type, kind=kind,
-                             page=page, limit=limit)
+                             page=page, limit=limit,
+                             base=self.__request_base(request))
+
+    @staticmethod
+    def __request_base(request: Optional[Request]) -> str:
+        """取请求方实际访问的宿主地址（协议 + 域名/IP + 端口）。
+
+        只在 ``APP_DOMAIN`` 没配时兜底使用：手机用局域网 IP 访问、宿主又没配
+        对外域名时，请求里的地址才是客户端能连上的那个。
+        """
+        if request is None:
+            return ""
+        try:
+            base_url = str(request.base_url or "").strip()
+        except Exception:
+            return ""
+        if not base_url:
+            return ""
+        # 服务端内部调用（如宿主自己做聚合）拿到的是 127.0.0.1，这种地址对
+        # 客户端没意义，直接放弃，回落到 APP_DOMAIN
+        host = str(getattr(request.url, "hostname", "") or "")
+        if host in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
+            return ""
+        return base_url.rstrip("/")
 
     def refresh_now(self, source: str = SOURCE_ALL
                     ) -> schemas.Response[RankRefreshResult]:
@@ -497,6 +536,18 @@ class GlobalRankPro(_PluginBase):
             return schemas.Response(success=False, message=message, data=result)
         return schemas.Response(
             success=True, message=result.message, data=result)
+
+    def hongguo_poster(self, u: str = ""):
+        """红果海报转发接口（匿名可访问，供 ``<img>`` 直接引用）。
+
+        手机端直连字节图床经常拿不到图，这里由宿主代取后原样回传字节，
+        客户端只需要能访问 MoviePilot 本身。
+        """
+        source = self.sources.get(SOURCE_HONGGUO)
+        if source is None:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="红果数据源不存在")
+        return source.poster_response(u)
 
     # ==================== 推荐页数据源 ====================
 

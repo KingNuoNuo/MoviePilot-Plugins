@@ -13,6 +13,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -205,11 +206,13 @@ def plugin():
 # ==================== 接口合同 ====================
 
 def test_get_api_declares_enveloped_typed_responses(plugin):
-    """三个接口必须声明响应模型、bear 认证与信封包裹（V3 合同）。"""
+    """数据接口必须声明响应模型、bear 认证与信封包裹（V3 合同）。"""
     apis = {api["path"]: api for api in plugin.get_api()}
 
-    assert set(apis) == {"/rank", "/rank-list", "/refresh"}
-    for path, api in apis.items():
+    # /poster 回的是图片字节，不套信封，单独在下一个用例里校验
+    assert set(apis) == {"/rank", "/rank-list", "/refresh", "/poster"}
+    for path in ("/rank", "/rank-list", "/refresh"):
+        api = apis[path]
         assert api["response_model"] is not None, f"{path} 未声明响应模型"
         assert api["auth"] == "bear", f"{path} 未声明 bear 认证"
         assert api["summary"]
@@ -223,6 +226,16 @@ def test_get_api_declares_enveloped_typed_responses(plugin):
     # endpoint 必须是主类自己的方法，source 参数由宿主从 query 注入
     assert apis["/rank"]["endpoint"] == plugin.get_rank_snapshot
     assert apis["/rank-list"]["endpoint"] == plugin.rank_list
+
+
+def test_poster_api_is_anonymous(plugin):
+    """海报接口必须匿名：图片标签带不了 Authorization 头，鉴权就永远 401。"""
+    poster = {api["path"]: api for api in plugin.get_api()}["/poster"]
+
+    assert poster["allow_anonymous"] is True
+    assert poster["methods"] == ["GET"]
+    assert poster["endpoint"] == plugin.hongguo_poster
+    assert "response_model" not in poster
 
 
 def test_api_survives_disabled_sources(plugin):
@@ -388,10 +401,12 @@ def test_rank_list_dispatches_to_netflix(plugin):
     assert result.data[0].type == "电影"
 
 
-def test_rank_list_dispatches_to_hongguo():
+def test_rank_list_dispatches_to_hongguo(monkeypatch):
     """source=hongguo 时转发到红果数据源，短剧标题即中文名。"""
     instance = make_plugin()
     instance.sources[SOURCE_HONGGUO].save_data("snapshot", hongguo_snapshot())
+    # 这里只验分发与标题，海报转发另有专门用例；先关掉看官网原图地址
+    monkeypatch.setattr(instance.sources[SOURCE_HONGGUO], "_poster_proxy", False)
 
     # 不传 board_type 时返回全部已抓取榜单
     result = instance.rank_list(source=SOURCE_HONGGUO)
@@ -403,6 +418,43 @@ def test_rank_list_dispatches_to_hongguo():
 
     one = instance.rank_list(source=SOURCE_HONGGUO, board_type="comic")
     assert [media.title for media in one.data] == ["一念神魔"]
+
+
+def test_rank_list_proxies_hongguo_poster(monkeypatch):
+    """默认把海报换成插件 /poster 接口：手机端不必直连字节 CDN。"""
+    instance = make_plugin()
+    instance.sources[SOURCE_HONGGUO].save_data("snapshot", hongguo_snapshot())
+    monkeypatch.setattr(
+        "app.plugins.globalrankpro.hongguo.settings",
+        SimpleNamespace(APP_DOMAIN="http://mp.example.com",
+                        API_V1_STR="/api/v1", PROXY=None, TZ="Asia/Shanghai"))
+
+    poster = instance.rank_list(source=SOURCE_HONGGUO).data[0].poster_path
+
+    assert poster.startswith(
+        "http://mp.example.com/api/v1/plugin/GlobalRankPro/poster?u=")
+    # 原图地址整体 urlencode 进 u 参数，客户端不再直接连字节 CDN
+    assert "ecombdimg.com" not in poster
+    assert "~tplv-shrink%3A1080%3A0.image" in poster
+
+
+def test_poster_url_falls_back_to_request_base(monkeypatch):
+    """APP_DOMAIN 未配置时用请求地址拼，局域网 IP 访问也能出图。"""
+    instance = make_plugin()
+    instance.sources[SOURCE_HONGGUO].save_data("snapshot", hongguo_snapshot())
+    monkeypatch.setattr(
+        "app.plugins.globalrankpro.hongguo.settings",
+        SimpleNamespace(APP_DOMAIN="", API_V1_STR="/api/v1",
+                        PROXY=None, TZ="Asia/Shanghai"))
+    request = SimpleNamespace(
+        base_url="http://192.168.1.10:3000/",
+        url=SimpleNamespace(hostname="192.168.1.10"))
+
+    poster = instance.rank_list(
+        source=SOURCE_HONGGUO, request=request).data[0].poster_path
+
+    assert poster.startswith(
+        "http://192.168.1.10:3000/api/v1/plugin/GlobalRankPro/poster?u=")
 
 
 def test_rank_list_rejects_unknown_source(plugin):
