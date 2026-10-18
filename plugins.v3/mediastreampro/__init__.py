@@ -73,7 +73,7 @@ class MediaStreamPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/mediastream.png")
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -106,6 +106,17 @@ class MediaStreamPro(_PluginBase):
     def get_state(self) -> bool:
         """恒为运行中：本插件没有开关。"""
         return True
+
+    def stop_service(self) -> None:
+        """停止插件：**没有东西要停，但必须存在**。
+
+        `_PluginBase` 把它列为抽象方法，缺了的话宿主加载时会直接抛
+        ``Can't instantiate abstract class MediaStreamPro without an implementation
+        for abstract method 'stop_service'``，整个插件加载失败（v1.0.0 就是这么挂的）。
+
+        本插件没有定时任务、没有常驻线程、也没有需要收尾的连接 —— 每次请求实时
+        读目录配置、`FileResponse` 由 Starlette 负责关闭文件句柄 —— 所以这里什么都不做。
+        """
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         """配置页只放说明：没有可配项，因此不渲染任何输入控件。"""
