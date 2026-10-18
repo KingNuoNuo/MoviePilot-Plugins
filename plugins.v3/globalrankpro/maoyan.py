@@ -659,6 +659,11 @@ class MaoyanSource(RankSource):
             global_board = self.__fetch_global_board()
             if global_board is not None:
                 last_boards.append(global_board)
+        # 单榜抓取失败时用上一份快照补齐：全球年度票房走的是境外站点（Box Office
+        # Mojo），在国内偶发超时，一轮失败就会让整榜从快照里消失、接口返回不了该榜，
+        # 客户端直接显示「暂无数据」。这里把上层「整份替换」改成「按榜合并」：
+        # 本次抓到的用新的，没抓到的沿用上一次，条目上标 stale 便于日志核对。
+        last_boards = self.__fill_missing_boards(last_boards)
         # 先为榜单快照识别媒体身份与海报：推荐页/对外接口不依赖订阅开关，
         # 订阅流程随后复用这里的识别结果，不再重复请求识别链。
         self.__resolve_board_identities(last_boards)
@@ -673,11 +678,117 @@ class MaoyanSource(RankSource):
         # 保存榜单快照：接口读取的是一等公民的榜单数据，不再依赖订阅流水
         self.__save_snapshot(last_boards)
         logger.info("猫眼订阅刷新完成")
-        return {
+        stale_boards = getattr(self, "_stale_boards", []) or []
+        result = {
             "board_count": len(last_boards),
             "item_count": sum(board.get("count", 0) for board in last_boards),
             "subscribed": max(0, len(history) - subscribed_before),
         }
+        if stale_boards:
+            # 只在这个异常分支里写 message：正常刷新沿用上层的默认文案
+            # （「已抓取 N 个榜单 M 条」），不让日常提示多出一截
+            result["message"] = (
+                f"已抓取 {result['board_count']} 个榜单 {result['item_count']} 条，"
+                f"其中 {len(stale_boards)} 个沿用上次快照：" + "、".join(stale_boards)
+            )
+        return result
+
+    # ---------- 单榜抓取失败兜底 ----------
+
+    # 本轮沿用上次快照的榜名（只用于摘要文案与日志，不持久化）
+    _stale_boards: List[str] = []
+
+    @staticmethod
+    def __board_key(board: dict) -> tuple:
+        """
+        榜单去重键：猫眼同一 type 下用 platformType 区分（全网榜为空、腾讯 3、爱奇艺 2、
+        芒果 7、优酷 1），total / year / global 这类独立榜各自独占一个 type。
+
+        故意**不含榜单名** —— 抓取侧改过榜名文案（如「剧集综合」），把名字放进键里会让
+        新旧名字匹配不上，兜底时反而多出一份重复榜单。
+        """
+        return (
+            str(board.get("type") or ""),
+            str(board.get("platform_type") or ""),
+        )
+
+    def __board_still_wanted(self, board: dict) -> bool:
+        """
+        该榜是否仍在**本轮配置的抓取范围**内。
+
+        只对「配置里还留着、本轮却没抓到」的榜做兜底。用户在设置里关掉的榜（关掉榜单
+        类型，或把某平台的订阅 / 推荐条数都改成 0）不补回来 —— 否则关掉的榜会一直挂在
+        快照里，设置页关了也没用。
+        """
+        if str(board.get("type") or "") not in (self._type or []):
+            return False
+        platform_type = str(board.get("platform_type") or "")
+        if not platform_type:
+            return True
+        try:
+            keys = self._PLATFORM_NUM_KEYS.get(int(platform_type))
+        except (TypeError, ValueError):
+            return True
+        if not keys:
+            return True
+        sub_num, rec_num = (getattr(self, f"_{key}", 0) or 0 for key in keys)
+        return max(int(sub_num), int(rec_num)) > 0
+
+    def __fill_missing_boards(self, boards: List[dict]) -> List[dict]:
+        """
+        用上一份快照补齐本轮没抓到的榜。
+
+        为什么需要：``__save_snapshot`` 是**整份替换**语义，而各榜是分头抓的（dashboard
+        一个、影史 / 国内年度一个页面、全球年度又是境外站点 Box Office Mojo）。任何一路
+        失败都只会 ``continue`` 跳过，结果不是「该榜为空」而是「快照里整个没有这个榜」——
+        接口按 ``board_type`` 查不到榜，客户端只能显示「暂无数据」。全球年度票房在国内
+        偶发超时，于是隔三差五空一天。
+
+        兜底规则：
+        - 只补「配置里仍启用」的榜（见 [__board_still_wanted]），关掉的不复活；
+        - 只补上一份快照里有条目的榜，空榜补了也没意义；
+        - 本轮抓到但一条没解出来的榜，同样用旧条目顶上；
+        - 补回来的榜打 ``stale`` 标记并保留原 ``updated_at``，日志里能看出是沿用的；
+        - **整轮一条没抓到**时直接返回空列表，交给 [__save_snapshot] 保留旧快照 ——
+          否则会把旧数据当成本轮结果写回，把「更新时间」刷成现在，反而掩盖故障。
+        """
+        self._stale_boards = []
+        if not boards:
+            return boards
+        try:
+            prev = self.get_data("snapshot") or {}
+            prev_boards = prev.get("boards") if isinstance(prev, dict) else None
+        except Exception as err:
+            logger.warning(f"读取上一份榜单快照失败，跳过单榜兜底：{err}")
+            return boards
+        if not isinstance(prev_boards, list) or not prev_boards:
+            return boards
+        merged = list(boards)
+        index = {self.__board_key(board): i for i, board in enumerate(merged)}
+        kept: List[str] = []
+        for prev_board in prev_boards:
+            if not isinstance(prev_board, dict):
+                continue
+            if not (prev_board.get("items") or []):
+                continue
+            if not self.__board_still_wanted(prev_board):
+                continue
+            stale = dict(prev_board)
+            stale["stale"] = True
+            key = self.__board_key(stale)
+            slot = index.get(key)
+            if slot is None:
+                index[key] = len(merged)
+                merged.append(stale)
+                kept.append(str(stale.get("board") or key))
+            elif not (merged[slot].get("items") or []):
+                merged[slot] = stale
+                kept.append(str(stale.get("board") or key))
+        if kept:
+            logger.warning("猫眼本轮未抓到以下榜单，沿用上一次快照的数据："
+                           + "、".join(kept))
+            self._stale_boards = kept
+        return merged
 
     def __save_snapshot(self, boards: List[dict]) -> None:
         """
