@@ -2,7 +2,7 @@
 
 # MoviePilot 插件仓库
 
-**自建 MoviePilot v3 插件市场源** —— 整理入库自动生成网盘 STRM 并刷新媒体库；猫眼榜单显示与订阅、Netflix 官方 Top 10 榜单，均提供榜单对外接口。
+**自建 MoviePilot v3 插件市场源** —— MoviePilotApp必备插件源。
 
 [![Stars](https://img.shields.io/github/stars/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/stargazers)
 [![Forks](https://img.shields.io/github/forks/KingNuoNuo/MoviePilot-Plugins?style=flat&color=4F46E5)](https://github.com/KingNuoNuo/MoviePilot-Plugins/network/members)
