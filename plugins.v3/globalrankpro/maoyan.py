@@ -33,7 +33,15 @@ from .base import (
     RankSource,
     SOURCE_MAOYAN,
 )
+from . import douban
 
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """把快照里的评分字段转成浮点，空串/非法值回退默认值。"""
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 def _board_text(row: dict, key: str, board: dict) -> str:
@@ -75,6 +83,7 @@ def _safe_board_payload(board: dict, rows: List[Any]) -> Dict[str, Any]:
             "poster": str(row.get("poster") or ""),
             "overview": str(row.get("overview") or ""),
             "year": str(row.get("year") or ""),
+            "vote_average": _safe_float(row.get("vote_average")),
         })
     return {
         "board": text("board"),
@@ -208,9 +217,9 @@ class MaoyanSource(RankSource):
     _POSTER_FALLBACK_LIMIT = 60
     # 同一条目连续补不到图的上限：豆瓣确实没有这条时不必每轮都再打一次
     _POSTER_FALLBACK_MAX_MISS = 3
-    # 豆瓣 suggest 的请求间隔（秒）：连打会被拦（实测连续几次后直接返回空），
-    # 一旦某次请求抛异常就认定被限流，本轮立即停止补图（已补上的照常落库）
-    _POSTER_FALLBACK_INTERVAL = 0.4
+    # 豆瓣评分补全的单轮额度（条）。一条要打 2 个 HTTP（suggest + abstract，约 0.4s），
+    # 80 条约 56s；评分缓存在 identity_cache 里 30 天有效，首轮慢、之后只补新进榜的几条。
+    _RATING_LIMIT = 80
     # 识别缓存 TTL：已识别到媒体且拿到海报的条目长期有效；
     # 只拿到兜底海报（或啥都没有）的条目过期后重试 —— 新节目可能随后上架 TMDB
     _IDENTITY_TTL_FALLBACK = 2 * 86400
@@ -827,6 +836,7 @@ class MaoyanSource(RankSource):
                         item["overview"] = identity.get("overview", "")
                         item["year"] = identity.get("year", "")
                         item["title_cn"] = identity.get("title_cn", "")
+                        item["vote_average"] = identity.get("vote_average") or 0
                     elif title in prev_map:
                         # 本轮限额截断没轮到识别：沿用上一份快照的身份，海报不丢
                         p = prev_map[title]
@@ -842,11 +852,13 @@ class MaoyanSource(RankSource):
                         item["overview"] = p.get("overview", "")
                         item["year"] = p.get("year", "")
                         item["title_cn"] = p.get("title_cn", "")
+                        item["vote_average"] = p.get("vote_average") or 0
                     else:
                         item["poster"] = ""
                         item["media_source"] = ""
                         item["media_id"] = ""
                         item["title_cn"] = ""
+                        item["vote_average"] = 0
                     # 全球榜数据源（Box Office Mojo）不带上映日期，条目里只有榜单年份；
                     # 识别到 TMDB 发行日期后补成与国内榜一致的「YYYY-MM-DD 上映」。
                     # 已是完整日期的（国内榜猫眼原生数据）原样保留
@@ -1024,10 +1036,9 @@ class MaoyanSource(RankSource):
             need_fallback.append(title)
 
         fallback = 0
-        self._douban_blocked = False
         for title in need_fallback:
             # 被豆瓣限流就本轮收手：剩余条目的 miss 不动，下一轮再试
-            if fallback >= self._POSTER_FALLBACK_LIMIT or self._douban_blocked:
+            if fallback >= self._POSTER_FALLBACK_LIMIT or douban.is_blocked():
                 break
             mtype = mtype_by_title.get(title, MediaType.TV)
             release_info = release_info_by_title.get(title)
@@ -1035,7 +1046,9 @@ class MaoyanSource(RankSource):
                 release_info = (prev_map.get(title) or {}).get("releaseInfo")
             year = str((raw_cache.get(title) or {}).get("year")
                        or self.__release_year(release_info, current_time) or "")
-            poster, cn_title = self.__douban_poster(title, mtype, year)
+            info = self.__douban_poster(title, mtype, year)
+            poster = str(info.get("poster") or "")
+            cn_title = str(info.get("title") or "")
             fallback += 1
             identity = self._resolved_identity.get(title)
             if identity is None:
@@ -1064,6 +1077,10 @@ class MaoyanSource(RankSource):
             else:
                 # 补不到就累加 miss：达到上限后本轮不再尝试，也不会被排序挤到前面
                 identity["miss"] = int(identity.get("miss") or 0) + 1
+            # 同一次检索顺手把评分带回来，省掉评分补全那轮的第二次 suggest
+            if info.get("rate"):
+                identity["vote_average"] = info["rate"]
+                identity["rating_ts"] = current_time.timestamp()
             identity.setdefault("ts", current_time.timestamp())
             self._resolved_identity[title] = identity
 
@@ -1073,6 +1090,22 @@ class MaoyanSource(RankSource):
                 f"本次待识别 {len(pending)} 条，已识别 {resolved} 条"
                 f"{'（超出时间预算 %ds）' % int(self._RESOLVE_TIME_BUDGET) if timed_out else ''}，"
                 f"剩余 {left} 条下一轮优先处理（缺图/缺日期的排最前）")
+
+        # C：豆瓣评分补全。猫眼榜单本身不带评分，App 的海报墙要显示评分只能另查豆瓣
+        # （猫眼官方没有公开评分接口）。一条 = 2 个请求（suggest 拿 id + abstract 拿
+        # rate），所以按轮限额 + 评分持久缓存分摊：榜单条目重复率极高（同一部剧在榜
+        # 很多天），稳态下每轮只为「新进榜的那几条」付请求。
+        try:
+            used = douban.fill_ratings(
+                list(self._resolved_identity.items()),
+                budget=self._RATING_LIMIT,
+                now=current_time,
+            )
+            if used:
+                logger.info(f"豆瓣评分补全：本轮查询 {used} 条")
+        except Exception as e:
+            logger.warning(f"豆瓣评分补全失败，本轮跳过：{e}")
+
         # 回写持久缓存（只存身份字典，MediaInfo 对象不序列化）
         try:
             self.save_data("identity_cache", self._resolved_identity)
@@ -1143,10 +1176,12 @@ class MaoyanSource(RankSource):
                     "release_date": rel_date,
                 }
         logger.warning(f"未识别到媒体信息，标题：{title}，年份：{year}")
-        poster, cn_title = self.__douban_poster(title, mtype)
+        info = self.__douban_poster(title, mtype, str(year or ""))
+        poster = str(info.get("poster") or "")
+        cn_title = str(info.get("title") or "")
         if poster:
             logger.info(f"猫眼条目 {title} 未识别到媒体信息，已用豆瓣检索补齐海报")
-        return {
+        identity = {
             "media_source": "",
             "media_id": "",
             "poster": poster,
@@ -1156,79 +1191,28 @@ class MaoyanSource(RankSource):
             "title_cn": cn_title if cn_title and cn_title != title else "",
             "release_date": "",
         }
+        if info.get("rate"):
+            identity["vote_average"] = info["rate"]
+            identity["rating_ts"] = datetime.datetime.now().timestamp()
+        return identity
 
-    def __douban_poster(self, title: str, mtype: MediaType, year: str = "") -> tuple:
+    def __douban_poster(self, title: str, mtype: MediaType, year: str = "") -> Dict[str, Any]:
         """
-        识别失败（或识别到了但没海报）时用豆瓣检索兜底补一张海报（只补图，不提供媒体身份）。
+        识别失败（或识别到了但没海报）时用豆瓣检索兜底补海报 + 评分。
 
-        豆瓣图片有防盗链（无 Referer 返回 418），App 直连时同样需要补 Referer，
-        宿主图片代理则会自行带上，因此这里只负责给出可用的图片地址；
-        同时带回豆瓣词条标题（多为中文），供英文榜单条目转中文展示。
-        返回 (poster_url, cn_title)，检索失败时两者为空串。
+        检索与匹配逻辑在 :mod:`douban`（三源共用同一份节流与熔断），这里只负责套成
+        猫眼要的形状：豆瓣图有防盗链（无 Referer 返回 418），App 直连时需自带 Referer，
+        宿主图片代理会补上，所以只给出可用地址即可；顺带带回评分与豆瓣中文词条名。
 
-        长英文片名在豆瓣常常整串搜不到（实测「Chiikawa the Movie: The Secret of Mermaid
-        Island」返回空，但「Chiikawa」能命中《吉伊卡哇：人鱼之岛的秘密》），因此整串搜不到时
-        按词逐步截短再试。截短检索会放宽匹配，必须靠 [year] 校验兜住 —— 只接受年份完全一致的
-        候选，拿不到年份的条目不参与降级检索，宁可不补图也不张冠李戴。
+        返回 ``{"poster", "title", "rate"}``，检索失败时各项为空串。
         """
-        def _query(keyword: str) -> list:
-            # 节流：连打会被豆瓣拦（表现为返回空/异常），否则一轮补图全军覆没
-            last = getattr(self, "_douban_last_at", 0.0)
-            gap = time.monotonic() - last
-            if gap < self._POSTER_FALLBACK_INTERVAL:
-                time.sleep(self._POSTER_FALLBACK_INTERVAL - gap)
-            try:
-                data = RequestUtils(
-                    headers={"User-Agent": self.get_random_user_agent()},
-                    proxies=getattr(settings, "PROXY", None),
-                    referer="https://movie.douban.com/",
-                ).get_json("https://movie.douban.com/j/subject_suggest", params={"q": keyword})
-            except Exception as e:
-                # 抛异常基本就是被限流/网络不可达，标记后让调用方本轮收手
-                self._douban_blocked = True
-                logger.warning(f"猫眼条目 {title} 豆瓣补图请求失败（本轮停止补图）：{e}")
-                return []
-            finally:
-                self._douban_last_at = time.monotonic()
-            return [c for c in data if isinstance(c, dict)] if isinstance(data, list) else []
-
-        def _pick(pool: list, strict_title: bool) -> tuple:
-            if strict_title:
-                # 优先同名词条；剧集优先带集数（豆瓣 suggestion 用 episode 标记剧集）
-                same = [c for c in pool if c.get("title") == title]
-                pool = same or pool
-            if mtype == MediaType.TV:
-                pool = sorted(pool, key=lambda c: 0 if c.get("episode") else 1)
-            for candidate in pool:
-                img = candidate.get("img")
-                if isinstance(img, str) and img.startswith("http"):
-                    # 缩略图换中等尺寸，避免 App 里糊掉
-                    return (img.replace("/s_ratio_poster/", "/m_ratio_poster/"),
-                            str(candidate.get("title") or "").strip())
-            return "", ""
-
-        # ① 整串检索：命中的都是原文匹配，直接采纳
-        result = _pick(_query(title), strict_title=True)
-        if result[0]:
-            return result
-
-        # ② 截短检索：按词逐步减少，命中后必须年份一致才采纳
-        year = str(year or "").strip()
-        if not re.fullmatch(r"(?:19|20)\d{2}", year):
-            return "", ""
-        words = [w for w in re.split(r"[\s:：\-—–·,，.。!！?？/]+", title) if w]
-        for size in (1, 2, 3):
-            if size >= len(words):
-                continue  # 等于原长就是原串，①已经试过
-            keyword = " ".join(words[:size])
-            if len(keyword) < 3:
-                continue
-            matched = [c for c in _query(keyword) if str(c.get("year") or "") == year]
-            result = _pick(matched, strict_title=False)
-            if result[0]:
-                logger.info(f"猫眼条目 {title} 豆瓣整串无结果，改用关键词「{keyword}」命中 {result[1]}")
-                return result
-        return "", ""
+        return douban.lookup(
+            title,
+            year=year,
+            prefer_tv=True if mtype == MediaType.TV else None,
+            need_poster=True,
+            need_rating=True,
+        )
 
     def set_sub(self, addr_list, history, mtype):
         """

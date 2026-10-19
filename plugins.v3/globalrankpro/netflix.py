@@ -40,6 +40,11 @@ from .base import (
     RankSource,
     SOURCE_NETFLIX,
 )
+from . import douban
+
+# 豆瓣评分补全的单轮额度（条）：Netflix 条目只有英文片名和名次，评分全靠豆瓣检索。
+# 一条 2 个 HTTP，评分按 30 天缓存在 identity_cache 里，首轮慢、之后只补新上榜的。
+_RATING_LIMIT = 60
 
 
 # 全球榜 TSV（含观看量）与国家/地区榜 TSV（仅名次）
@@ -136,6 +141,7 @@ def _safe_board_payload(board: dict, rows: List[Any]) -> Dict[str, Any]:
             "overview": str(row.get("overview") or ""),
             "year": str(row.get("year") or ""),
             "release_date": str(row.get("release_date") or ""),
+            "vote_average": _safe_float(row.get("vote_average")),
         })
     return {
         "board": text("board"),
@@ -509,6 +515,27 @@ class NetflixSource(RankSource):
                 cache[cache_key] = identity
                 dirty = True
                 self.__apply_identity(item, identity)
+
+        # 豆瓣评分补全：Netflix 官方 TSV 只有名次与观看量，没有评分，评分统一从豆瓣
+        # 检索（条目是英文片名，优先拿识别出的中文名去搜，命中率高得多）。
+        # 按轮限额 + 30 天缓存分摊，稳态下每轮只为新上榜的几条付请求。
+        try:
+            pairs = [(key.split("|", 1)[-1], entry)
+                     for key, entry in cache.items() if isinstance(entry, dict)]
+            if douban.fill_ratings(pairs, budget=_RATING_LIMIT):
+                dirty = True
+        except Exception as e:
+            logger.warning(f"Netflix 豆瓣评分补全失败，本轮跳过：{e}")
+
+        # 评分可能是在 __apply_identity 之后才补上的，这里再合一次（只补这一个字段）
+        for board in boards:
+            kind = board.get("kind")
+            for item in board.get("items", []):
+                entry = cache.get(f"{kind}|{item.get('title')}")
+                if isinstance(entry, dict) and entry.get("vote_average") \
+                        and not item.get("vote_average"):
+                    item["vote_average"] = entry["vote_average"]
+
         if dirty:
             self.save_data("identity_cache", cache)
 
@@ -516,7 +543,7 @@ class NetflixSource(RankSource):
     def __apply_identity(item: dict, identity: dict) -> None:
         """把识别结果合并进快照条目（不清空已有值）。"""
         for key in ("title_cn", "media_source", "media_id", "poster",
-                    "overview", "year", "release_date"):
+                    "overview", "year", "release_date", "vote_average"):
             value = identity.get(key) or ""
             if value and not item.get(key):
                 item[key] = value

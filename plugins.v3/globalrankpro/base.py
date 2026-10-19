@@ -36,6 +36,10 @@ class RankItem(BaseModel):
     poster: str = Field("", description="海报地址，未识别时为空")
     overview: str = Field("", description="剧情简介，未识别时为空")
     year: str = Field("", description="年份，未识别时为空")
+    vote_average: float = Field(
+        0.0,
+        description="豆瓣评分（插件侧检索补全，猫眼/Netflix 等本身不带评分的数据源用），0 表示暂无",
+    )
 
     # ---- 猫眼专有 ----
     type: str = Field("", description="猫眼榜单类型：movie/web-movie/web-all/zongyi")
@@ -122,6 +126,16 @@ class RankRefreshResult(BaseModel):
     message: str = Field("", description="结果说明")
     sources: List[RankSourceRefresh] = Field(
         default_factory=list, description="按数据源拆分的刷新结果")
+
+
+class DoubanRatingResult(BaseModel):
+    """按标题批量查豆瓣评分的结果（搜索结果页用）。"""
+
+    rates: Dict[str, str] = Field(
+        default_factory=dict, description="标题 → 豆瓣评分，如 8.7；查不到的标题不出现在这里")
+    cached: int = Field(0, description="命中持久缓存的条数（不发请求）")
+    queried: int = Field(0, description="本次实际请求豆瓣的条数（每条 2 个 HTTP）")
+    blocked: bool = Field(False, description="豆瓣正在限流冷却，剩余条目下次再查")
 
 
 def as_text(value: Any) -> str:

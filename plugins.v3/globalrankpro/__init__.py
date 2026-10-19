@@ -13,6 +13,7 @@ MaoyanPro 与 NetflixPro 的抓取解析逻辑整体平移，红果为新增的 
 ``hongguo_`` 前缀，三源互不覆盖。
 """
 import datetime
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
@@ -31,6 +32,7 @@ from app.sdk.logging import logger
 from app.schemas.types import ChainEventType
 
 from .base import (
+    DoubanRatingResult,
     RankRefreshResult,
     RankSnapshot,
     RankSourceRefresh,
@@ -40,6 +42,7 @@ from .base import (
     SOURCE_MAOYAN,
     SOURCE_NETFLIX,
 )
+from . import douban
 from .hongguo import HongguoSource
 from .maoyan import MaoyanSource
 from .netflix import NetflixSource
@@ -58,7 +61,7 @@ class GlobalRankPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/globalrank.png")
     # 插件版本
-    plugin_version = "1.2.4"
+    plugin_version = "1.3.1"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -108,11 +111,12 @@ class GlobalRankPro(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        # 清理插件数据：三个源的快照、识别缓存与订阅历史一起清
+        # 清理插件数据：三个源的快照、识别缓存与订阅历史一起清（搜索评分缓存也跟着清）
         if self._clear:
             for source in self.sources.values():
                 for key in ("snapshot", "history", "identity_cache"):
                     source.del_data(key)
+            self.del_data("douban_rating")
             self._clear = False
             self.__update_config()
             logger.info("全球影视榜单数据清理完成")
@@ -341,6 +345,17 @@ class GlobalRankPro(_PluginBase):
                 "response_model": schemas.Response[RankRefreshResult],
             },
             {
+                "path": "/rating",
+                "endpoint": self.douban_ratings,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "按标题批量查豆瓣评分",
+                "description": "q 为 JSON 数组 [{\"t\":标题,\"y\":年份,\"k\":类型}]，"
+                               "返回 rates（标题 → 豆瓣评分）。命中持久缓存的立即返回，"
+                               "未命中的按 budget 限量去豆瓣检索（每条 2 个请求，约 0.8s）。",
+                "response_model": schemas.Response[DoubanRatingResult],
+            },
+            {
                 "path": "/poster",
                 "endpoint": self.hongguo_poster,
                 "methods": ["GET"],
@@ -534,6 +549,88 @@ class GlobalRankPro(_PluginBase):
             return schemas.Response(success=False, message=message, data=result)
         return schemas.Response(
             success=True, message=result.message, data=result)
+
+    def douban_ratings(self, q: str = "", budget: int = 10
+                       ) -> schemas.Response[DoubanRatingResult]:
+        """按标题批量查豆瓣评分（搜索结果页用）。
+
+        榜单快照里的评分（``vote_average``）只覆盖上榜的那几百条，搜索结果里的片子
+        大多不在榜上。这里给 App 一个「按标题查分」的入口：
+
+        - 命中插件持久缓存（``douban_rating``，30 天有效 / 未开分 3 天）立刻返回，
+          不发任何外部请求；
+        - 未命中的按 ``budget`` 限量去豆瓣检索。豆瓣检索是**一条 2 个 HTTP**、
+          全局 0.35s 节流，所以单次额度压得比较低（默认 10 条 ≈ 8s），
+          超出的条目留在下次搜索时再补 —— 缓存是持久的，补过的不会再花钱。
+
+        :param q: JSON 数组，每项 ``{"t": 标题, "y": 年份, "k": 类型}``（后两项可省）
+        :param budget: 本次最多请求豆瓣多少条（0~20）
+        """
+        try:
+            wanted = json.loads(q) if q else []
+        except Exception:
+            return schemas.Response(
+                success=False, message="q 不是合法 JSON",
+                data=DoubanRatingResult())
+        if not isinstance(wanted, list):
+            wanted = []
+        try:
+            limit = max(0, min(int(budget), 20))
+        except (TypeError, ValueError):
+            limit = 10
+
+        cache = self.get_data("douban_rating") or {}
+        if not isinstance(cache, dict):
+            cache = {}
+        now_ts = datetime.datetime.now().timestamp()
+        rates: Dict[str, str] = {}
+        cached = 0
+        used = 0
+        changed = False
+        for row in wanted[:40]:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("t") or "").strip()
+            if not title:
+                continue
+            year = str(row.get("y") or "").strip()
+            media_type = str(row.get("k") or "").strip()
+            key = douban.cache_key(title, year, media_type)
+            entry = cache.get(key)
+            # 缓存命中：有分就回，没分（豆瓣未开分）也算查过了，不再花钱
+            if douban.is_fresh(entry, now_ts):
+                cached += 1
+                rate = str((entry or {}).get("vote_average") or "")
+                if rate:
+                    rates[title] = rate
+                continue
+            if used >= limit or douban.is_blocked():
+                continue
+            prefer_tv = True if media_type.lower() in (
+                "电视剧", "tv", "show", "动漫", "anime") else None
+            info = douban.lookup(
+                title, keywords=[title], year=year,
+                prefer_tv=prefer_tv, need_poster=False, need_rating=True)
+            used += 1
+            cache[key] = {"vote_average": info.get("rate") or "",
+                          "rating_ts": now_ts}
+            changed = True
+            if info.get("rate"):
+                rates[title] = info["rate"]
+
+        if changed:
+            self.save_data("douban_rating", cache)
+        blocked = douban.is_blocked()
+        logger.info(
+            f"搜索评分：请求 {len(wanted[:40])} 条，缓存命中 {cached}，查豆瓣 {used}，"
+            f"得分 {len(rates)}" + ("（豆瓣限流中）" if blocked else ""))
+        return schemas.Response(
+            success=True,
+            message=f"得分 {len(rates)} 条（缓存 {cached}，请求 {used}）"
+                    + ("，豆瓣限流中" if blocked else ""),
+            data=DoubanRatingResult(rates=rates, cached=cached,
+                                    queried=used, blocked=blocked),
+        )
 
     def hongguo_poster(self, u: str = ""):
         """红果海报转发接口（匿名可访问，供 ``<img>`` 直接引用）。

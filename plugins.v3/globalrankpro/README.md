@@ -11,7 +11,8 @@
 合并后：
 
 - **一套接口**：`/rank`、`/rank-list`、`/refresh` 用 `source` 参数区分数据源，
-  `/poster` 转发红果海报（手机端不必直连字节 CDN），
+  `/rating` 按标题批量查豆瓣评分（服务搜索结果页），`/poster` 转发红果海报
+  （手机端不必直连字节 CDN），
   返回结构统一（三源字段取并集），调用方不必为每个数据源写一套解析；
 - **一次安装**：不用同时装三个插件、配三套执行周期；
 - **各自独立**：三个数据源在插件内部仍是独立对象（可分别开关、分别抓取），
@@ -182,6 +183,7 @@ curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=
           "rank": 1, "title": "生化危机：爆发夜", "title_cn": "",
           "media_source": "themoviedb", "media_id": "1586199",
           "poster": "...", "overview": "...", "year": "2026",
+          "vote_average": 6.8,
           "type": "movie", "type_name": "电影票房", "platform": "院线",
           "release_info": "上映 11 天", "show_date": "2026-10-17",
           "box_office": "161.93万", "total_box_office": "1.87亿", "heat": "28.1%",
@@ -196,6 +198,9 @@ curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=
 
 - `board_type` 是统一层的「榜单种类」：猫眼取 `type`，Netflix 取地区代码（全球榜为 `global`），红果取榜单代码；
 - 条目字段是三源并集，与源无关的字段保持空值/0，调用方按 `source` 取自己关心的字段即可；
+- `vote_average` 是**豆瓣评分**（0 表示暂无）：猫眼与 Netflix 的原始数据都不带评分，由插件抓取时
+  用豆瓣检索补好（`j/subject_suggest` 拿词条 + `j/subject_abstract` 取 `rate`），结果按条目缓存
+  30 天、单轮限量分摊；红果用自己的官方评分（`score` 字段），这里保持 0；
 - `sources` 只包含本次真正返回了榜单的数据源；未启用的数据源会在 `message` 里说明。
 
 ### GET `/rank-list`
@@ -234,6 +239,40 @@ curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=
 
 单个数据源失败不会影响其它源：失败信息落在对应 `sources[].message`，
 只要有一个源成功，外层 `success` 就是 `true`。
+
+### GET `/rating`
+
+按标题批量查**豆瓣评分**（App 搜索结果页用）。榜单快照里的 `vote_average` 只覆盖
+上榜的几百条，搜索结果里绝大多数片子不在榜上，所以单独开了这个入口。
+
+| 参数 | 说明 |
+|---|---|
+| `q` | JSON 数组，每项 `{"t": 标题, "y": 年份, "k": 类型}`（后两项可省）；`urlencode` 后传入 |
+| `budget` | 本次最多请求豆瓣多少条（默认 10，上限 20）。豆瓣检索是**一条 2 个 HTTP**、全局 0.35s 节流，超出的条目留在下次再查 |
+
+命中插件持久缓存（`douban_rating`，有分 30 天 / 未开分 3 天）立刻返回，不发外部请求；
+未命中的才按 `budget` 去豆瓣检索。返回：
+
+```json
+{
+  "success": true,
+  "message": "得分 2 条（缓存 1，请求 1）",
+  "data": {
+    "rates": { "流人": "8.9", "海贼王": "9.3" },
+    "cached": 1,
+    "queried": 1,
+    "blocked": false
+  }
+}
+```
+
+`rates` 只含查到的标题；`blocked=true` 表示豆瓣正在限流冷却，剩下的条目下次再试。
+缓存随插件配置里的「清理数据」一起清。
+
+```bash
+curl -G "http://<host>:3000/api/v1/plugin/GlobalRankPro/rating?apikey=<token>" \
+  --data-urlencode 'q=[{"t":"流人","y":"2026","k":"电视剧"}]'
+```
 
 ### GET `/poster`
 
