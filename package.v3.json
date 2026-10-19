@@ -47,7 +47,7 @@
     "name": "全球影视榜单",
     "description": "整合猫眼、Netflix 与红果短剧榜单，提供统一的榜单接口与推荐页数据源。",
     "labels": "榜单",
-    "version": "1.3.7",
+    "version": "1.3.8",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/globalrank.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -74,7 +74,8 @@
       "v1.3.4": "v1.3.2 换用 rexxar 后线上仍拿不到分，debug 显示原始响应是 null —— 说明 RequestUtils.get_json 在「非 200 / 非 JSON」时静默返回 None，被当成「豆瓣没这部片」。v1.3.4 改走 RequestUtils.get：记录 HTTP 状态码与响应前 300 字（/rating?debug=1 可见），据此判断是被拦、被重定向还是响应结构变了。缓存版本号提到 3，v2 存下的空值全部作废重查。",
       "v1.3.5": "加 /rating?debug=2 连通性探针：对 movie.douban.com / m.douban.com / rexxar 各用 get 与 get_json 打一次，输出状态码或 None。用于定位「RequestUtils.get 直接返回 None」是域名不通、方法用错还是被拦。",
       "v1.3.6": "修复「豆瓣一条都查不到」的真凶：RequestUtils 的坑——构造时一旦传了 headers 字典，referer= 参数会被整个丢弃（SDK 源码 if headers: self._headers = headers，referer 只在默认头里拼）。于是请求一直不带 Referer，豆瓣 rexxar 全部返回 400 invalid_request_1284，get_json 把它吞成 None，再被当成「豆瓣没这部片」缓存了 3 天。之前 1.3.2 换接口、1.3.4 换 get 都治标不治本，因为 headers+referer 的传法本身就让 Referer 从未发出去过。修法：Referer 直接写进 headers 字典。容器内实测修正后《琅琊榜》9.4、4 个候选全命中；路由器与 NAS 容器网络本身全通（curl 200），问题只在插件请求头。",
-      "v1.3.7": "缓存版本号 3→4：1.3.5 之前用坏请求（无 Referer 的 400）存下的「未开分」空值还在缓存里且标着 rating_ver=3，会被当有效继续跳过；作废重查。"
+      "v1.3.7": "缓存版本号 3→4：1.3.5 之前用坏请求（无 Referer 的 400）存下的「未开分」空值还在缓存里且标着 rating_ver=3，会被当有效继续跳过；作废重查。",
+      "v1.3.8": "v1.3.6 的 Referer 修复方向对但仍拿不到分：RequestUtils.get 返回的是响应文本字符串（没有 status_code / json()），200 也被当成失败。改用 RequestUtils.request（返回 Response 对象，异常可用 raise_exception 直接抛出）。debug=2 探针同步修正。容器内实测 _get_json 返回《琅琊榜》9.4。"
     }
   },
   "MediaStreamPro": {

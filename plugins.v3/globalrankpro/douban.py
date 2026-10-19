@@ -86,9 +86,10 @@ def _trip(reason: str) -> None:
 def _get_json(url: str, params: Dict[str, Any]) -> Any:
     """带节流与熔断的 GET，失败一律返回 None（调用方按「没查到」处理）。
 
-    走 ``RequestUtils.get`` 而不是 ``get_json``：后者在「非 200 / 非 JSON」时一律返回
-    None，线上排障时分不清「豆瓣给的是空列表」和「被拦/重定向到验证页」。
-    这里把状态码与前 300 字留在 [last_raw] 里（只给 debug=1 看）。
+    必须走 ``RequestUtils.request``（返回 Response 对象）而不是 ``get`` / ``get_json``：
+    - ``get`` 返回的是**响应文本字符串**，没有 status_code / json()，200 也会被判成失败；
+    - ``get_json`` 在「非 200 / 非 JSON」时一律返回 None，排障时分不清「空列表」和「被拦」。
+    状态码与前 300 字留在 [last_raw]（只给 debug=1 看）。
     """
     global _last_request_at, last_raw
     if is_blocked():
@@ -102,20 +103,16 @@ def _get_json(url: str, params: Dict[str, Any]) -> Any:
             headers={"User-Agent": random.choice(_UAS), "Referer": _REFERER},
             proxies=getattr(settings, "PROXY", None),
         )
-        if hasattr(client, "get"):
-            res = client.get(url, params=params)
-            status = getattr(res, "status_code", None)
-            text = getattr(res, "text", "") or ""
-            last_raw = f"HTTP {status} | {text[:300]}"
-            if status and status != 200:
-                return None
-            try:
-                return res.json()
-            except Exception:
-                return None
-        data = client.get_json(url, params=params)
-        last_raw = data if data is not None else "get_json 返回 None"
-        return data
+        res = client.request("get", url, params=params, raise_exception=True)
+        status = getattr(res, "status_code", None)
+        text = getattr(res, "text", "") or ""
+        last_raw = f"HTTP {status} | {text[:300]}"
+        if status != 200:
+            return None
+        try:
+            return res.json()
+        except Exception:
+            return None
     except Exception as err:
         last_raw = f"EXC: {err}"
         _trip(str(err))
@@ -294,27 +291,17 @@ def probe() -> List[str]:
     )
     out: List[str] = []
     for name, url in targets:
-        for method in ("get", "get_json"):
-            try:
-                client = RequestUtils(
-                    headers={"User-Agent": random.choice(_UAS), "Referer": _REFERER},
-                    proxies=getattr(settings, "PROXY", None),
-                )
-                fn = getattr(client, method, None)
-                if fn is None:
-                    out.append(f"{name}.{method}=无此方法")
-                    continue
-                res = fn(url)
-                if res is None:
-                    out.append(f"{name}.{method}=None")
-                elif method == "get":
-                    status = getattr(res, "status_code", None)
-                    text = getattr(res, "text", "")
-                    out.append(f"{name}.{method}=HTTP{status}/len{len(text or '')}")
-                else:
-                    out.append(f"{name}.{method}=ok/{type(res).__name__}")
-            except Exception as err:
-                out.append(f"{name}.{method}=EXC:{type(err).__name__}")
+        try:
+            client = RequestUtils(
+                headers={"User-Agent": random.choice(_UAS), "Referer": _REFERER},
+                proxies=getattr(settings, "PROXY", None),
+            )
+            res = client.request("get", url, raise_exception=True)
+            status = getattr(res, "status_code", None)
+            text = getattr(res, "text", "") or ""
+            out.append(f"{name}.request=HTTP{status}/len{len(text)}")
+        except Exception as err:
+            out.append(f"{name}.request=EXC:{type(err).__name__}:{err}")
     return out
 
 
