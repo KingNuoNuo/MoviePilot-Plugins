@@ -99,9 +99,8 @@ def _get_json(url: str, params: Dict[str, Any]) -> Any:
     _last_request_at = time.monotonic()
     try:
         client = RequestUtils(
-            headers={"User-Agent": random.choice(_UAS)},
+            headers={"User-Agent": random.choice(_UAS), "Referer": _REFERER},
             proxies=getattr(settings, "PROXY", None),
-            referer=_REFERER,
         )
         if hasattr(client, "get"):
             res = client.get(url, params=params)
@@ -298,9 +297,8 @@ def probe() -> List[str]:
         for method in ("get", "get_json"):
             try:
                 client = RequestUtils(
-                    headers={"User-Agent": random.choice(_UAS)},
+                    headers={"User-Agent": random.choice(_UAS), "Referer": _REFERER},
                     proxies=getattr(settings, "PROXY", None),
-                    referer=_REFERER,
                 )
                 fn = getattr(client, method, None)
                 if fn is None:

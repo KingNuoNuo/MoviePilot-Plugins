@@ -1,6 +1,6 @@
 # TgtoDrive STRM 同步（TgtoDriveSync）
 
-> [← 返回插件一览](../../README.md#插件一览) · 版本 v1.7.1 · 目录 `plugins/tgtodrivesync`
+> [← 返回插件一览](../../README.md#插件一览) · 版本 v1.7.2 · 目录 `plugins/tgtodrivesync`
 
 MoviePilot 整理入库（`TransferComplete` 事件）后，自动调用 **TgtoDrive 官方 OpenAPI**
 触发生成网盘 STRM，等待生成完成后**刷新全部已配置的媒体服务器**，并发送通知。
@@ -14,6 +14,12 @@ MoviePilot →「设定 → 插件市场 → 添加市场」，填入
 
 本地部署也可把 `plugins/tgtodrivesync` 整个目录拷贝到 MoviePilot 的插件目录
 （容器内通常为 `/app/app/plugins/`，以你的实际部署为准），重启容器即可。
+
+## 界面
+
+插件**详情页**与**设置页**顶部各有一张 MoviePilotApp（安卓客户端）推荐卡，点击
+「下载 App」直达 Release。卡片与仓库内其他插件同款，内容由 `tools/gen_app_promo.py`
+统一生成，`app_promo.py` 请勿手改。
 
 ## 工作流程
 
