@@ -9,13 +9,17 @@
 宿主机网络更接近豆瓣，且结果可以持久缓存、全端共享，所以评分统一在插件里补好，
 随 ``/rank`` 一次性吐给 App（字段 ``vote_average``）。
 
-豆瓣接口的两个坑
-----------------
-- ``j/subject_suggest``（检索）**不带评分**，只给 id / 海报 / 标题，评分要再打一次
-  ``j/subject_abstract`` 才有 ``subject.rate``。因此**一条 = 2 个请求**，必须按轮
-  分摊 + 持久缓存，否则单次刷新就能把豆瓣打限流。
-- 两个接口都要带 ``Referer: https://movie.douban.com/``，且请求过密会返回空列表或
-  异常。这里做了全局节流与熔断：连续失败即整体收手一段时间，已拿到的照常落库。
+豆瓣接口的坑（2026-10 实测）
+---------------------------
+- **旧检索接口 ``movie.douban.com/j/subject_suggest`` 已失效**：无论查什么都返回
+  空数组 ``[]``（HTTP 200），看起来像「豆瓣没这部片」，其实是接口不再给数据。
+  ``movie.douban.com/j/search_subjects`` 还把 ``tag`` 当分类标签而不是关键词。
+- 现在用移动站的 **``m.douban.com/rexxar/api/v2/search``**：一次请求直接带
+  ``rating.value``，中文名 / 年份 / 封图都有 —— 不用再补第二次 ``subject_abstract``，
+  **一条 = 1 个请求**（旧方案是 2 个），限流风险和对豆瓣的压力都减半。
+- 必须带 ``Referer: https://m.douban.com/``；请求过密会被拦（表现为返回空或
+  「检测到异常请求」文案）。这里做了全局节流与熔断：连续失败即整体收手一段时间，
+  已拿到的照常落库。
 """
 from __future__ import annotations
 
@@ -29,18 +33,24 @@ from app.sdk.config import settings
 from app.sdk.logging import logger
 from app.sdk.network import RequestUtils
 
-_SUGGEST_URL = "https://movie.douban.com/j/subject_suggest"
-_ABSTRACT_URL = "https://movie.douban.com/j/subject_abstract"
-_REFERER = "https://movie.douban.com/"
+_SEARCH_URL = "https://m.douban.com/rexxar/api/v2/search"
+_REFERER = "https://m.douban.com/"
 
 # 请求间隔：连打会被拦（表现为返回空 / 抛异常），0.35s 实测稳定
 _REQUEST_INTERVAL = 0.35
-# 熔断冷却：一旦某次请求抛异常就认定被限流，这段时间内不再打豆瓣
+# 熔断冷却：一旦某次请求抛异常、或连续多次拿到空结果，这段时间内不再打豆瓣
 _BLOCK_COOLDOWN = 600.0
+# 连续多少次「查了但一条候选都没有」就认定被限流（正常检索几乎不会连空）
+_EMPTY_STREAK_LIMIT = 12
 
 # 评分缓存有效期：豆瓣评分变动很慢，30 天足够；还没开分的条目（新片）3 天后再试
 RATING_TTL = 30 * 86400
 RATING_TTL_MISS = 3 * 86400
+
+# 检索策略版本：换接口或换匹配规则时 +1，老缓存自动判过期重查。
+# v1 = movie.douban.com/j/subject_suggest（该接口已失效，之前存下来的空结果全是假的）
+# v2 = m.douban.com/rexxar/api/v2/search（一次请求带 rating.value）
+RATING_VER = 2
 
 _UAS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -53,6 +63,7 @@ _UAS = (
 
 _last_request_at = 0.0
 _blocked_until = 0.0
+_empty_streak = 0
 
 
 def is_blocked() -> bool:
@@ -61,8 +72,10 @@ def is_blocked() -> bool:
 
 
 def _trip(reason: str) -> None:
-    global _blocked_until
+    global _blocked_until, _empty_streak
     _blocked_until = time.monotonic() + _BLOCK_COOLDOWN
+    # 冷却结束从零计：不清的话冷却一过、第一条查不到就会立刻再次熔断
+    _empty_streak = 0
     logger.warning(
         f"豆瓣请求失败，{int(_BLOCK_COOLDOWN / 60)} 分钟内不再尝试：{reason}")
 
@@ -87,34 +100,70 @@ def _get_json(url: str, params: Dict[str, Any]) -> Any:
         return None
 
 
-def _suggest(keyword: str) -> List[dict]:
-    data = _get_json(_SUGGEST_URL, {"q": keyword})
-    if not isinstance(data, list):
-        return []
-    return [c for c in data if isinstance(c, dict)]
+def _rate_text(value: Any) -> str:
+    """把 rexxar 的 ``rating.value``（数字，0 表示未开分）收敛成 "8.4" / "9.0"。"""
+    try:
+        rate = float(value or 0)
+    except (TypeError, ValueError):
+        return ""
+    if rate <= 0:
+        return ""
+    return f"{rate:.1f}"
 
 
-def _rating(subject_id: str) -> str:
-    """取豆瓣评分（字符串，如 "8.7"）；未开分返回空串。"""
-    data = _get_json(_ABSTRACT_URL, {"subject_id": subject_id})
-    if not isinstance(data, dict):
-        return ""
-    subject = data.get("subject")
-    if not isinstance(subject, dict):
-        return ""
-    rate = str(subject.get("rate") or "").strip()
-    return rate if re.fullmatch(r"\d+(?:\.\d+)?", rate) else ""
+def _search(keyword: str) -> List[dict]:
+    """搜一次豆瓣，返回规范化候选（title / year / rate / kind / img / id）。
+
+    一次请求就带评分（``rating.value``），不再需要第二次 ``subject_abstract``。
+    """
+    global _empty_streak
+    data = _get_json(_SEARCH_URL, {"q": keyword, "start": 0, "count": 10})
+    items: Any = None
+    if isinstance(data, dict):
+        subjects = data.get("subjects")
+        if isinstance(subjects, dict):
+            items = subjects.get("items")
+    if not isinstance(items, list):
+        items = []
+    out: List[dict] = []
+    for item in items:
+        target = item.get("target") if isinstance(item, dict) else None
+        if not isinstance(target, dict):
+            continue
+        uri = str(target.get("uri") or "")
+        rating = target.get("rating")
+        if not isinstance(rating, dict):
+            rating = {}
+        out.append({
+            "id": str(target.get("id") or ""),
+            "title": str(target.get("title") or "").strip(),
+            "year": str(target.get("year") or "").strip(),
+            "img": str(target.get("cover_url") or ""),
+            # 类型只能从 uri 认（`douban://douban.com/tv/<id>`）；同名电影/剧集要靠它区分
+            "kind": "tv" if "/tv/" in uri else ("movie" if "/movie/" in uri else ""),
+            "rate": _rate_text(rating.get("value")),
+        })
+    # 连续拿到空结果 = 多半被限流（正常检索不会一直空），累计到阈值就熔断
+    if out:
+        _empty_streak = 0
+    else:
+        _empty_streak += 1
+        if _empty_streak >= _EMPTY_STREAK_LIMIT:
+            _trip(f"连续 {_empty_streak} 次检索为空")
+    return out
 
 
 def _pick(pool: Sequence[dict], title: str, prefer_tv: Optional[bool]) -> dict:
-    """从候选里挑一条：同名优先，剧集优先带集数标记的。"""
+    """从候选里挑一条：同名优先，再按电影/剧集偏好排序。"""
     same = [c for c in pool if str(c.get("title") or "").strip() == title]
     if same:
         pool = same
     if prefer_tv is True:
-        pool = sorted(pool, key=lambda c: 0 if c.get("episode") else 1)
+        pool = sorted(pool, key=lambda c: 0 if c.get("kind") == "tv" else 1)
+    elif prefer_tv is False:
+        pool = sorted(pool, key=lambda c: 0 if c.get("kind") == "movie" else 1)
     for candidate in pool:
-        if str(candidate.get("id") or "").isdigit():
+        if str(candidate.get("id") or ""):
             return candidate
     return {}
 
@@ -122,8 +171,8 @@ def _pick(pool: Sequence[dict], title: str, prefer_tv: Optional[bool]) -> dict:
 def _poster_of(candidate: dict) -> str:
     img = candidate.get("img")
     if isinstance(img, str) and img.startswith("http"):
-        # suggest 给的是缩略图，换成中等尺寸，避免 App 里糊掉
-        return img.replace("/s_ratio_poster/", "/m_ratio_poster/")
+        # rexxar 给的是大图（cover_url 已带签名），直接用
+        return img
     return ""
 
 
@@ -150,9 +199,9 @@ def lookup(
     :param title: 榜单原始标题（用于同名判定与日志）
     :param keywords: 检索词优先级列表；Netflix 这类英文片名传 `[中文名, 英文名]` 命中率最高
     :param year: 年份，用于「截短检索」时的严格校验（宁可空缺也不张冠李戴）
-    :param prefer_tv: True 表示剧集，候选排序时优先带集数标记的
-    :param need_poster: 需要海报（缺图兜底）时才去解析 img
-    :param need_rating: 需要评分（会多打一次 abstract 接口）
+    :param prefer_tv: True 表示剧集、False 表示电影，同名候选按它排序
+    :param need_poster: 需要海报时才解析封图
+    :param need_rating: 需要评分（评分随搜索结果一起回来，不再额外请求）
 
     返回 ``{"id", "rate", "poster", "title"}``，查不到的项为空串。
     """
@@ -170,18 +219,17 @@ def lookup(
         queries.append(title)
 
     def settle(candidate: dict) -> Dict[str, Any]:
-        subject_id = str(candidate.get("id") or "")
-        result["id"] = subject_id
+        result["id"] = str(candidate.get("id") or "")
         result["title"] = _title_of(candidate)
         if need_poster:
             result["poster"] = _poster_of(candidate)
-        if need_rating and subject_id:
-            result["rate"] = _rating(subject_id)
+        if need_rating:
+            result["rate"] = str(candidate.get("rate") or "")
         return result
 
     # ① 整串检索：命中的都是原文匹配，直接采纳（不校验年份，同名已经足够严格）
     for query in queries:
-        pool = _suggest(query)
+        pool = _search(query)
         if not pool:
             continue
         candidate = _pick(pool, query, prefer_tv)
@@ -201,7 +249,7 @@ def lookup(
         keyword = " ".join(words[:size])
         if len(keyword) < 3:
             continue
-        matched = [c for c in _suggest(keyword) if _year_of(c) == year]
+        matched = [c for c in _search(keyword) if _year_of(c) == year]
         candidate = _pick(matched, keyword, prefer_tv)
         if candidate:
             logger.info(
@@ -214,7 +262,7 @@ def cache_key(title: str, year: str = "", media_type: str = "") -> str:
     """搜索评分缓存的键：标题 + 年份 + 类型。
 
     同一部片重拍要区分开（「射雕英雄传」有 1983 与 2017 两版），所以年份进键；
-    类型只影响「剧集优先带集数」的候选排序，也一并进键，避免剧/影互相覆盖。
+    类型只影响「剧集/电影候选排序」，也一并进键，避免剧/影互相覆盖。
     """
     return "|".join((
         str(title or "").strip().lower(),
@@ -224,8 +272,13 @@ def cache_key(title: str, year: str = "", media_type: str = "") -> str:
 
 
 def is_fresh(entry: Dict[str, Any], now_ts: float) -> bool:
-    """持久缓存里的评分是否还能用（命中 30 天 / 未开分 3 天）。"""
+    """持久缓存里的评分是否还能用（命中 30 天 / 未开分 3 天）。
+
+    检索策略版本不匹配的一律判过期：换接口后，旧版本存下来的「查不到」是假结论。
+    """
     if not isinstance(entry, dict) or "rating_ts" not in entry:
+        return False
+    if entry.get("rating_ver") != RATING_VER:
         return False
     try:
         ts = float(entry.get("rating_ts") or 0)
@@ -247,7 +300,7 @@ def fill_ratings(
 
     :param pairs: ``(榜单原始标题, 身份字典)`` 序列；身份字典里读 ``title_cn`` /
                   ``year`` / ``type`` 决定检索词与年份校验
-    :param budget: 本轮最多查多少条（每条 2 个请求，务必限量）
+    :param budget: 本轮最多查多少条（现在一条 = 1 个请求）
     :return: 实际消耗的额度
 
     已经缓存过且未过期的条目直接跳过，因此稳态下（榜单条目重复率极高）
@@ -271,11 +324,17 @@ def fill_ratings(
         keywords.append(title)
         year = str(entry.get("year") or "").strip()
         entry_type = str(entry.get("type") or "").strip().lower()
-        prefer_tv = True if entry_type in ("电视剧", "tv", "show") else None
+        if entry_type in ("电视剧", "tv", "show", "动漫", "anime"):
+            prefer_tv: Optional[bool] = True
+        elif entry_type in ("电影", "movie", "film"):
+            prefer_tv = False
+        else:
+            prefer_tv = None
         info = lookup(title, keywords=keywords, year=year,
                       prefer_tv=prefer_tv, need_poster=False, need_rating=True)
         used += 1
         entry["rating_ts"] = now_ts
+        entry["rating_ver"] = RATING_VER
         if info.get("rate"):
             entry["vote_average"] = info["rate"]
             logger.info(f"豆瓣评分补全：{title} -> {info['rate']}")

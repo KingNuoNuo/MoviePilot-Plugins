@@ -199,8 +199,8 @@ curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=
 - `board_type` 是统一层的「榜单种类」：猫眼取 `type`，Netflix 取地区代码（全球榜为 `global`），红果取榜单代码；
 - 条目字段是三源并集，与源无关的字段保持空值/0，调用方按 `source` 取自己关心的字段即可；
 - `vote_average` 是**豆瓣评分**（0 表示暂无）：猫眼与 Netflix 的原始数据都不带评分，由插件抓取时
-  用豆瓣检索补好（`j/subject_suggest` 拿词条 + `j/subject_abstract` 取 `rate`），结果按条目缓存
-  30 天、单轮限量分摊；红果用自己的官方评分（`score` 字段），这里保持 0；
+  用豆瓣检索补好（`m.douban.com/rexxar/api/v2/search`，一次请求直接带 `rating.value`），
+  结果按条目缓存 30 天、单轮限量分摊；红果用自己的官方评分（`score` 字段），这里保持 0；
 - `sources` 只包含本次真正返回了榜单的数据源；未启用的数据源会在 `message` 里说明。
 
 ### GET `/rank-list`
@@ -248,7 +248,7 @@ curl "http://<host>:3000/api/v1/plugin/GlobalRankPro/rank?apikey=<token>&source=
 | 参数 | 说明 |
 |---|---|
 | `q` | JSON 数组，每项 `{"t": 标题, "y": 年份, "k": 类型}`（后两项可省）；`urlencode` 后传入 |
-| `budget` | 本次最多请求豆瓣多少条（默认 10，上限 20）。豆瓣检索是**一条 2 个 HTTP**、全局 0.35s 节流，超出的条目留在下次再查 |
+| `budget` | 本次最多请求豆瓣多少条（默认 12，上限 30）。豆瓣检索**一条 = 1 个请求**、全局 0.35s 节流，超出的条目留在下次再查 |
 
 命中插件持久缓存（`douban_rating`，有分 30 天 / 未开分 3 天）立刻返回，不发外部请求；
 未命中的才按 `budget` 去豆瓣检索。返回：

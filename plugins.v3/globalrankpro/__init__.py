@@ -61,7 +61,7 @@ class GlobalRankPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/globalrank.png")
     # 插件版本
-    plugin_version = "1.3.1"
+    plugin_version = "1.3.2"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -550,7 +550,7 @@ class GlobalRankPro(_PluginBase):
         return schemas.Response(
             success=True, message=result.message, data=result)
 
-    def douban_ratings(self, q: str = "", budget: int = 10
+    def douban_ratings(self, q: str = "", budget: int = 12
                        ) -> schemas.Response[DoubanRatingResult]:
         """按标题批量查豆瓣评分（搜索结果页用）。
 
@@ -559,12 +559,12 @@ class GlobalRankPro(_PluginBase):
 
         - 命中插件持久缓存（``douban_rating``，30 天有效 / 未开分 3 天）立刻返回，
           不发任何外部请求；
-        - 未命中的按 ``budget`` 限量去豆瓣检索。豆瓣检索是**一条 2 个 HTTP**、
-          全局 0.35s 节流，所以单次额度压得比较低（默认 10 条 ≈ 8s），
-          超出的条目留在下次搜索时再补 —— 缓存是持久的，补过的不会再花钱。
+        - 未命中的按 ``budget`` 限量去豆瓣检索。豆瓣检索**一条 = 1 个请求**、
+          全局 0.35s 节流，所以单次 12 条约 4s；超出的条目留在下次搜索时再补
+          —— 缓存是持久的，补过的不会再花钱。
 
         :param q: JSON 数组，每项 ``{"t": 标题, "y": 年份, "k": 类型}``（后两项可省）
-        :param budget: 本次最多请求豆瓣多少条（0~20）
+        :param budget: 本次最多请求豆瓣多少条（0~30）
         """
         try:
             wanted = json.loads(q) if q else []
@@ -575,9 +575,9 @@ class GlobalRankPro(_PluginBase):
         if not isinstance(wanted, list):
             wanted = []
         try:
-            limit = max(0, min(int(budget), 20))
+            limit = max(0, min(int(budget), 30))
         except (TypeError, ValueError):
-            limit = 10
+            limit = 12
 
         cache = self.get_data("douban_rating") or {}
         if not isinstance(cache, dict):
@@ -613,7 +613,8 @@ class GlobalRankPro(_PluginBase):
                 prefer_tv=prefer_tv, need_poster=False, need_rating=True)
             used += 1
             cache[key] = {"vote_average": info.get("rate") or "",
-                          "rating_ts": now_ts}
+                          "rating_ts": now_ts,
+                          "rating_ver": douban.RATING_VER}
             changed = True
             if info.get("rate"):
                 rates[title] = info["rate"]
