@@ -51,7 +51,7 @@ RATING_TTL_MISS = 3 * 86400
 # v1 = movie.douban.com/j/subject_suggest（该接口已失效，之前存下来的空结果全是假的）
 # v2 = m.douban.com/rexxar/api/v2/search（一次请求带 rating.value）
 # v3 = 修好「rexxar 返回 None」的排障（v2 存下来的空值多半是拿不到响应，不是真没分）
-RATING_VER = 4
+RATING_VER = 5
 
 _UAS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
