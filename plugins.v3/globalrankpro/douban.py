@@ -50,7 +50,8 @@ RATING_TTL_MISS = 3 * 86400
 # 检索策略版本：换接口或换匹配规则时 +1，老缓存自动判过期重查。
 # v1 = movie.douban.com/j/subject_suggest（该接口已失效，之前存下来的空结果全是假的）
 # v2 = m.douban.com/rexxar/api/v2/search（一次请求带 rating.value）
-RATING_VER = 2
+# v3 = 修好「rexxar 返回 None」的排障（v2 存下来的空值多半是拿不到响应，不是真没分）
+RATING_VER = 3
 
 _UAS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -83,7 +84,12 @@ def _trip(reason: str) -> None:
 
 
 def _get_json(url: str, params: Dict[str, Any]) -> Any:
-    """带节流与熔断的 GET，失败一律返回 None（调用方按「没查到」处理）。"""
+    """带节流与熔断的 GET，失败一律返回 None（调用方按「没查到」处理）。
+
+    走 ``RequestUtils.get`` 而不是 ``get_json``：后者在「非 200 / 非 JSON」时一律返回
+    None，线上排障时分不清「豆瓣给的是空列表」和「被拦/重定向到验证页」。
+    这里把状态码与前 300 字留在 [last_raw] 里（只给 debug=1 看）。
+    """
     global _last_request_at, last_raw
     if is_blocked():
         return None
@@ -92,12 +98,24 @@ def _get_json(url: str, params: Dict[str, Any]) -> Any:
         time.sleep(_REQUEST_INTERVAL - gap)
     _last_request_at = time.monotonic()
     try:
-        data = RequestUtils(
+        client = RequestUtils(
             headers={"User-Agent": random.choice(_UAS)},
             proxies=getattr(settings, "PROXY", None),
             referer=_REFERER,
-        ).get_json(url, params=params)
-        last_raw = data
+        )
+        if hasattr(client, "get"):
+            res = client.get(url, params=params)
+            status = getattr(res, "status_code", None)
+            text = getattr(res, "text", "") or ""
+            last_raw = f"HTTP {status} | {text[:300]}"
+            if status and status != 200:
+                return None
+            try:
+                return res.json()
+            except Exception:
+                return None
+        data = client.get_json(url, params=params)
+        last_raw = data if data is not None else "get_json 返回 None"
         return data
     except Exception as err:
         last_raw = f"EXC: {err}"
