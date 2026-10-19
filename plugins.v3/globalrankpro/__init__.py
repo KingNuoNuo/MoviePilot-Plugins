@@ -61,7 +61,7 @@ class GlobalRankPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/globalrank.png")
     # 插件版本
-    plugin_version = "1.3.4"
+    plugin_version = "1.3.5"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -574,6 +574,12 @@ class GlobalRankPro(_PluginBase):
                 data=DoubanRatingResult())
         if not isinstance(wanted, list):
             wanted = []
+        # debug=2：只跑连通性探针，不查任何标题
+        if debug == 2:
+            return schemas.Response(
+                success=True,
+                message="｜".join(douban.probe()),
+                data=DoubanRatingResult())
         try:
             limit = max(0, min(int(budget), 30))
         except (TypeError, ValueError):

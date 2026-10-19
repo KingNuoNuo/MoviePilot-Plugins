@@ -42,6 +42,26 @@ from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
 from app.log import logger
 
+# App 推荐卡：内容由 tools/gen_app_promo.py 生成，与其余四个插件逐字节相同。
+#
+# 两种导入路径都试一遍，是因为 V1/V2 插件（本插件，package.json 里 "v2": true）
+# 在宿主里既可能作为包加载（``plugins.tgtodrivesync``，此时相对导入成立），也可能
+# 被按单文件 spec 加载（无包上下文，相对导入直接 ImportError）。都失败时降级成
+# 无卡片，插件其余功能照常 —— 一张推荐卡不值得让整个插件起不来。
+try:
+    from .app_promo import promo_card
+except ImportError:  # pragma: no cover - 取决于宿主加载方式
+    try:
+        from app_promo import promo_card
+    except ImportError:
+        promo_card = None
+        logger.warning("app_promo 模块未加载，MoviePilotApp 推荐卡将不显示")
+
+
+def _promo_nodes() -> List[dict]:
+    """App 推荐卡节点列表；app_promo 未就绪时返回空列表。"""
+    return [promo_card()] if promo_card else []
+
 # TgtoDrive 支持的 STRM 同步来源（取自前端 ORGANIZE_SOURCE_ORDER）
 STRM_SOURCES = [
     "123云盘",
@@ -223,9 +243,12 @@ class TgtoDriveSync(_PluginBase):
         ]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """拼装插件配置页面。"""
+        """拼装插件配置页面。
+
+        App 推荐卡置于设置页最顶部（表单项之前），与插件详情页位置保持一致。
+        """
         source_items = [{"title": s, "value": s} for s in STRM_SOURCES]
-        return [
+        return _promo_nodes() + [
             {
                 "component": "VForm",
                 "content": [
@@ -406,8 +429,11 @@ class TgtoDriveSync(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        """展示当前待刷新队列与最近的执行历史。"""
-        rows: List[dict] = []
+        """展示当前待刷新队列与最近的执行历史。
+
+        App 推荐卡固定排在最前，与设置页顶部位置一致，由同一个 ``promo_card()`` 渲染。
+        """
+        rows: List[dict] = _promo_nodes()
 
         # 顶部：当前待刷新队列（防抖窗口内已收下、还没刷新出去的文件）
         with self._lock:

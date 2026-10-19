@@ -281,6 +281,45 @@ def lookup(
     return result
 
 
+def probe() -> List[str]:
+    """连通性探针（``/rating?debug=2``）：把几种取数方式对几个豆瓣地址各打一次。
+
+    线上症状是「rexxar 拿不到任何东西，而 old suggest 接口至少还能返回 JSON 空数组」，
+    需要区分「域名不通 / 方法用错 / 被拦」这三件事，所以这里两种方法都试。
+    结果只用于排障，不写缓存、不参与限流判断。
+    """
+    targets = (
+        ("movie首页", "https://movie.douban.com/"),
+        ("m首页", "https://m.douban.com/"),
+        ("rexxar", f"{_SEARCH_URL}?q=test&start=0&count=1"),
+    )
+    out: List[str] = []
+    for name, url in targets:
+        for method in ("get", "get_json"):
+            try:
+                client = RequestUtils(
+                    headers={"User-Agent": random.choice(_UAS)},
+                    proxies=getattr(settings, "PROXY", None),
+                    referer=_REFERER,
+                )
+                fn = getattr(client, method, None)
+                if fn is None:
+                    out.append(f"{name}.{method}=无此方法")
+                    continue
+                res = fn(url)
+                if res is None:
+                    out.append(f"{name}.{method}=None")
+                elif method == "get":
+                    status = getattr(res, "status_code", None)
+                    text = getattr(res, "text", "")
+                    out.append(f"{name}.{method}=HTTP{status}/len{len(text or '')}")
+                else:
+                    out.append(f"{name}.{method}=ok/{type(res).__name__}")
+            except Exception as err:
+                out.append(f"{name}.{method}=EXC:{type(err).__name__}")
+    return out
+
+
 def cache_key(title: str, year: str = "", media_type: str = "") -> str:
     """搜索评分缓存的键：标题 + 年份 + 类型。
 

@@ -1,20 +1,24 @@
-"""生成四个插件里的 ``app_promo.py``（App 推荐卡）。
+"""生成各插件里的 ``app_promo.py``（App 推荐卡）。
 
-为什么是一份代码复制四份，而不是抽成公共包：
+为什么是一份代码复制多份，而不是抽成公共包：
 
     宿主的插件按目录隔离安装（``/app/app/plugins/<插件名>/``），插件之间的
     import 不保证可用，跨插件的相对导入在打包成 zip 后直接失效。共享代码只能
     各带一份。
 
-代价是四份副本可能漂移，所以这里用生成器兜底：**唯一来源是本脚本的 ``TEMPLATE``
-与 ``assets/moviepilot-logo.svg``**，四份文件逐字节相同。
+代价是副本之间可能漂移，所以这里用生成器兜底：**唯一来源是本脚本的 ``TEMPLATE``
+与 ``assets/moviepilot-logo.svg``**，所有副本逐字节相同。
 
 用法：
 
-    python tools/gen_app_promo.py           # 写入四个插件目录
-    python tools/gen_app_promo.py --check   # 只校验，四份不一致/过期时退出码 1
+    python tools/gen_app_promo.py           # 写入全部目标插件目录
+    python tools/gen_app_promo.py --check   # 只校验，副本不一致/过期时退出码 1
 
 改推荐卡文案 → 改下面的 ``TEMPLATE`` → 重跑本脚本。不要手改插件目录里的副本。
+
+⚠️ 目标插件分两类目录：``plugins.v3/<id>/``（V3 插件）与 ``plugins/<id>/``
+（V1/V2 插件，``package.json`` 里标 ``"v2": true`` 的那批）。两类的宿主加载
+方式不同，但「同目录多文件 + 相对导入」都成立，所以同一份文件可以通用。
 """
 from __future__ import annotations
 
@@ -27,18 +31,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 LOGO = ROOT / 'assets' / 'moviepilot-logo.svg'
 
-# 需要带这张卡片的插件目录（相对 plugins.v3/）
-PLUGINS = (
-    'globalrankpro',
-    'maoyanpro',
-    'netflixpro',
-    'mediastreampro',
+# 需要带这张卡片的插件：(宿主插件根目录, 插件目录名)。
+#
+# 两套根目录并存是宿主的历史包袱 —— V3 插件在 ``plugins.v3/``，V1/V2 插件在
+# ``plugins/``（``package.json`` 标 ``"v2": true``）。推荐卡与插件格式无关，
+# 所以两边都生成。
+TARGETS = (
+    ('plugins.v3', 'globalrankpro'),
+    ('plugins.v3', 'maoyanpro'),
+    ('plugins.v3', 'netflixpro'),
+    ('plugins.v3', 'mediastreampro'),
+    ('plugins', 'tgtodrivesync'),
 )
 
 # 横幅里写进源文件指纹，方便一眼看出某份副本是不是过期了
 BANNER = '''"""MoviePilotApp 推荐卡（本文件由 ``tools/gen_app_promo.py`` 生成，请勿手改）。
 
-四个插件各存一份，内容逐字节相同 —— 宿主按插件目录隔离安装，插件之间不能互相
+每个插件各存一份，内容逐字节相同 —— 宿主按插件目录隔离安装，插件之间不能互相
 import，共享代码只能各带一份。改文案请改 ``tools/gen_app_promo.py`` 里的
 ``TEMPLATE`` 再重跑生成器。
 
@@ -197,8 +206,8 @@ def main() -> int:
     check_only = '--check' in sys.argv[1:]
     content = build()
     stale = []
-    for name in PLUGINS:
-        target = ROOT / 'plugins.v3' / name / 'app_promo.py'
+    for root, name in TARGETS:
+        target = ROOT / root / name / 'app_promo.py'
         current = target.read_text(encoding='utf-8') if target.exists() else None
         if current == content:
             print('ok      {0}'.format(target.relative_to(ROOT)))
