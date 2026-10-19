@@ -64,6 +64,8 @@ _UAS = (
 _last_request_at = 0.0
 _blocked_until = 0.0
 _empty_streak = 0
+# 最近一次原始响应（只给 /rating?debug=1 排障用，正常路径不读）
+last_raw: Any = None
 
 
 def is_blocked() -> bool:
@@ -82,7 +84,7 @@ def _trip(reason: str) -> None:
 
 def _get_json(url: str, params: Dict[str, Any]) -> Any:
     """带节流与熔断的 GET，失败一律返回 None（调用方按「没查到」处理）。"""
-    global _last_request_at
+    global _last_request_at, last_raw
     if is_blocked():
         return None
     gap = time.monotonic() - _last_request_at
@@ -90,12 +92,15 @@ def _get_json(url: str, params: Dict[str, Any]) -> Any:
         time.sleep(_REQUEST_INTERVAL - gap)
     _last_request_at = time.monotonic()
     try:
-        return RequestUtils(
+        data = RequestUtils(
             headers={"User-Agent": random.choice(_UAS)},
             proxies=getattr(settings, "PROXY", None),
             referer=_REFERER,
         ).get_json(url, params=params)
+        last_raw = data
+        return data
     except Exception as err:
+        last_raw = f"EXC: {err}"
         _trip(str(err))
         return None
 

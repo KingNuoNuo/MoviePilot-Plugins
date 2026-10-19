@@ -550,7 +550,7 @@ class GlobalRankPro(_PluginBase):
         return schemas.Response(
             success=True, message=result.message, data=result)
 
-    def douban_ratings(self, q: str = "", budget: int = 12
+    def douban_ratings(self, q: str = "", budget: int = 12, debug: int = 0
                        ) -> schemas.Response[DoubanRatingResult]:
         """按标题批量查豆瓣评分（搜索结果页用）。
 
@@ -625,10 +625,21 @@ class GlobalRankPro(_PluginBase):
         logger.info(
             f"搜索评分：请求 {len(wanted[:40])} 条，缓存命中 {cached}，查豆瓣 {used}，"
             f"得分 {len(rates)}" + ("（豆瓣限流中）" if blocked else ""))
+        # debug=1 时把最后一次原始响应塞进 message：线上「一条都查不到」时，
+        # 用它区分「豆瓣限流静默返回空」和「我们解析错结构」，不用登 NAS 翻日志
+        detail = ""
+        if debug:
+            raw = douban.last_raw
+            if not isinstance(raw, str):
+                try:
+                    raw = json.dumps(raw, ensure_ascii=False)
+                except Exception:
+                    raw = str(raw)
+            detail = f"｜raw: {raw[:400]}"
         return schemas.Response(
             success=True,
             message=f"得分 {len(rates)} 条（缓存 {cached}，请求 {used}）"
-                    + ("，豆瓣限流中" if blocked else ""),
+                    + ("，豆瓣限流中" if blocked else "") + detail,
             data=DoubanRatingResult(rates=rates, cached=cached,
                                     queried=used, blocked=blocked),
         )
