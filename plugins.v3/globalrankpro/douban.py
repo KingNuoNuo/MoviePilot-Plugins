@@ -34,14 +34,27 @@ from app.sdk.logging import logger
 from app.sdk.network import RequestUtils
 
 _SEARCH_URL = "https://m.douban.com/rexxar/api/v2/search"
+# v1.4.0 两步兜底：rexxar /search 会被定向封禁（HTTP 403，IP 下所有 UA 全灭，
+# 但同域的 subject 详情接口仍然 200）。封禁期间改走
+# subject_suggest（拿 id/type，无评分）→ rexxar subject 详情（拿 rating.value）。
+_SUGGEST_URL = "https://movie.douban.com/j/subject_suggest"
+_SUBJECT_URL = "https://m.douban.com/rexxar/api/v2/{kind}/{sid}"
+# /search 被封后的跳过窗口：期间不浪费请求打它，直接走两步
+_SEARCH_DEAD_COOLDOWN = 1800.0
 _REFERER = "https://m.douban.com/"
 
 # 请求间隔：连打会被拦（表现为返回空 / 抛异常），0.35s 实测稳定
 _REQUEST_INTERVAL = 0.35
 # 熔断冷却：一旦某次请求抛异常、或连续多次拿到空结果，这段时间内不再打豆瓣
-_BLOCK_COOLDOWN = 600.0
-# 连续多少次「查了但一条候选都没有」就认定被限流（正常检索几乎不会连空）
-_EMPTY_STREAK_LIMIT = 12
+# v1.4.0：600→120 —— 榜单场景全是当年新片，「豆瓣真搜不到」的连空是常态不是限流，
+# 熔断 10 分钟会把能查到的片也一并断粮；120s 够穿过一次豆瓣的短暂拦截窗口
+_BLOCK_COOLDOWN = 120.0
+# 连续多少次「查了但一条候选都没有」才启动复核（正常检索几乎不会连空）
+# v1.4.0：12→20 —— 20 条的榜单里新片占一半以上，12 在真实场景必触发
+_EMPTY_STREAK_LIMIT = 20
+# 保底探针：一部豆瓣必有、常年有分的经典片。连空到阈值先拿它试一次，
+# 探针命中 = 豆瓣没拦我们，是这些新片真没有 → 清零继续；探针也空 = 真被限流 → 熔断
+_PROBE_TITLE = "霸王别姬"
 
 # 评分缓存有效期：豆瓣评分变动很慢，30 天足够；还没开分的条目（新片）3 天后再试
 RATING_TTL = 30 * 86400
@@ -51,7 +64,8 @@ RATING_TTL_MISS = 3 * 86400
 # v1 = movie.douban.com/j/subject_suggest（该接口已失效，之前存下来的空结果全是假的）
 # v2 = m.douban.com/rexxar/api/v2/search（一次请求带 rating.value）
 # v3 = 修好「rexxar 返回 None」的排障（v2 存下来的空值多半是拿不到响应，不是真没分）
-RATING_VER = 5
+# v4 = v1.4.0 两步兜底上线：今天 /search 被封期间按「真没有」缓存下来的空值全是假的，作废重查
+RATING_VER = 6
 
 _UAS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -65,8 +79,12 @@ _UAS = (
 _last_request_at = 0.0
 _blocked_until = 0.0
 _empty_streak = 0
+_probe_depth = 0
+_search_dead_until = 0.0
 # 最近一次原始响应（只给 /rating?debug=1 排障用，正常路径不读）
 last_raw: Any = None
+# 最近一次 HTTP 状态码（0 = 还没发过请求 / 抛了异常）
+last_status = 0
 
 
 def is_blocked() -> bool:
@@ -83,6 +101,38 @@ def _trip(reason: str) -> None:
         f"豆瓣请求失败，{int(_BLOCK_COOLDOWN / 60)} 分钟内不再尝试：{reason}")
 
 
+def _confirm_block() -> None:
+    """连空到阈值后的复核：拿保底片探一次，命中说明只是这些片真没有。
+
+    v1.4.0：新片榜单里「豆瓣真搜不到」的连空是常态，直接按限流熔断会把
+    后面能查到的片也一并断粮。只有探针也拿不到结果才真的熔断。
+    探针自身的空结果会再进 [_confirm_block]（streak 又 +1），用 [_probe_depth]
+    拦住：探针失败 = 实锤，直接熔断，不再递归。
+    """
+    global _empty_streak, _probe_depth
+    if _empty_streak < _EMPTY_STREAK_LIMIT:
+        return
+    if _probe_depth:
+        _trip(f"连续 {_empty_streak} 次检索为空（含保底探针）")
+        return
+    _probe_depth += 1
+    try:
+        probe_pool = _search(_PROBE_TITLE)
+        if not probe_pool:
+            # /search 被封的窗口里探针也拿不到，改走 suggest 两步 ——
+            # suggest+subject 能通就说明豆瓣没拦我们这个 IP
+            cand = _suggest_pick(_PROBE_TITLE, None)
+            if cand:
+                probe_pool = [_subject_rate(str(cand.get("type")), str(cand.get("id")))]
+    finally:
+        _probe_depth -= 1
+    if probe_pool:
+        logger.info(f"连续 {_empty_streak} 次检索为空，但保底探针命中，豆瓣未限流，继续")
+        _empty_streak = 0
+    else:
+        _trip(f"连续 {_empty_streak} 次检索为空且保底探针失效")
+
+
 def _get_json(url: str, params: Dict[str, Any]) -> Any:
     """带节流与熔断的 GET，失败一律返回 None（调用方按「没查到」处理）。
 
@@ -91,7 +141,7 @@ def _get_json(url: str, params: Dict[str, Any]) -> Any:
     - ``get_json`` 在「非 200 / 非 JSON」时一律返回 None，排障时分不清「空列表」和「被拦」。
     状态码与前 300 字留在 [last_raw]（只给 debug=1 看）。
     """
-    global _last_request_at, last_raw
+    global _last_request_at, last_raw, last_status
     if is_blocked():
         return None
     gap = time.monotonic() - _last_request_at
@@ -106,6 +156,7 @@ def _get_json(url: str, params: Dict[str, Any]) -> Any:
         res = client.request("get", url, params=params, raise_exception=True)
         status = getattr(res, "status_code", None)
         text = getattr(res, "text", "") or ""
+        last_status = int(status or 0)
         last_raw = f"HTTP {status} | {text[:300]}"
         if status != 200:
             return None
@@ -134,9 +185,18 @@ def _search(keyword: str) -> List[dict]:
     """搜一次豆瓣，返回规范化候选（title / year / rate / kind / img / id）。
 
     一次请求就带评分（``rating.value``），不再需要第二次 ``subject_abstract``。
+    v1.4.0：/search 被 403 封禁的窗口内直接返回空（不计连空，那不是豆瓣拦我们、
+    是这个端点被定向封了），调用方 [lookup] 会改走 suggest+subject 两步。
     """
-    global _empty_streak
+    global _empty_streak, _search_dead_until
+    if time.monotonic() < _search_dead_until:
+        return []
     data = _get_json(_SEARCH_URL, {"q": keyword, "start": 0, "count": 10})
+    if data is None and last_status in (403, 419):
+        _search_dead_until = time.monotonic() + _SEARCH_DEAD_COOLDOWN
+        logger.warning(
+            f"rexxar /search 返回 {last_status}，{_SEARCH_DEAD_COOLDOWN / 60:.0f} 分钟内改走 suggest+subject")
+        return []
     items: Any = None
     if isinstance(data, dict):
         subjects = data.get("subjects")
@@ -162,13 +222,12 @@ def _search(keyword: str) -> List[dict]:
             "kind": "tv" if "/tv/" in uri else ("movie" if "/movie/" in uri else ""),
             "rate": _rate_text(rating.get("value")),
         })
-    # 连续拿到空结果 = 多半被限流（正常检索不会一直空），累计到阈值就熔断
+    # 连续拿到空结果 = 多半被限流（正常检索不会一直空），到阈值先复核再熔断
     if out:
         _empty_streak = 0
     else:
         _empty_streak += 1
-        if _empty_streak >= _EMPTY_STREAK_LIMIT:
-            _trip(f"连续 {_empty_streak} 次检索为空")
+        _confirm_block()
     return out
 
 
@@ -197,6 +256,52 @@ def _poster_of(candidate: dict) -> str:
 
 def _title_of(candidate: dict) -> str:
     return str(candidate.get("title") or "").strip()
+
+
+def _suggest_pick(keyword: str, prefer_tv: Optional[bool]) -> dict:
+    """subject_suggest 检索：返回 ``{id, type, title, year}`` 候选（没有评分）。
+
+    v1.4.0 两步兜底的第一步。同名优先、再按电影/剧集偏好排序，与 [_pick] 同一思路。
+    """
+    data = _get_json(_SUGGEST_URL, {"q": keyword})
+    if not isinstance(data, list):
+        return {}
+    pool = [c for c in data if isinstance(c, dict)]
+    same = [c for c in pool if str(c.get("title") or "").strip() == keyword]
+    if same:
+        pool = same
+    if prefer_tv is True:
+        pool = sorted(pool, key=lambda c: 0 if c.get("type") == "tv" else 1)
+    elif prefer_tv is False:
+        pool = sorted(pool, key=lambda c: 0 if c.get("type") == "movie" else 1)
+    for candidate in pool:
+        sid = str(candidate.get("id") or "").strip()
+        kind = str(candidate.get("type") or "").strip()
+        if sid and kind in ("movie", "tv"):
+            return candidate
+    return {}
+
+
+def _subject_rate(kind: str, sid: str) -> dict:
+    """rexxar subject 详情：返回与 [_search] 同构的单条候选（带 ``rating.value``）。
+
+    v1.4.0 两步兜底的第二步。/search 被封时这个接口仍然 200 —— 封的是端点不是 IP。
+    """
+    data = _get_json(_SUBJECT_URL.format(kind=kind, sid=sid), {})
+    if not isinstance(data, dict):
+        return {}
+    rating = data.get("rating")
+    if not isinstance(rating, dict):
+        rating = {}
+    uri = str(data.get("uri") or "")
+    return {
+        "id": str(data.get("id") or sid),
+        "title": str(data.get("title") or "").strip(),
+        "year": str(data.get("year") or "").strip(),
+        "img": str(data.get("cover_url") or data.get("pic") or ""),
+        "kind": "tv" if "/tv/" in uri else ("movie" if "/movie/" in uri else kind),
+        "rate": _rate_text(rating.get("value")),
+    }
 
 
 def _year_of(candidate: dict) -> str:
@@ -254,6 +359,17 @@ def lookup(
         candidate = _pick(pool, query, prefer_tv)
         if candidate:
             return settle(candidate)
+
+    # ①.5 suggest 两步兜底（v1.4.0）：/search 被定向封禁（403）或整串搜不到时，
+    #     subject_suggest 拿 id/type → subject 详情拿评分。霸王别姬这类经典片必命中，
+    #     所以这一步失败基本可以断定「真没有」，不需要再截短。
+    for query in queries:
+        cand = _suggest_pick(query, prefer_tv)
+        if not cand:
+            continue
+        subject = _subject_rate(str(cand.get("type")), str(cand.get("id")))
+        if subject:
+            return settle(subject)
 
     # ② 截短检索：只对带年份的条目前瞻降级，且年份必须完全一致。
     #    长英文片名在豆瓣常常整串搜不到（实测「Chiikawa the Movie: The Secret of
