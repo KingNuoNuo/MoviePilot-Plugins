@@ -104,7 +104,7 @@ MAX_SCAN_DEPTH = 4
 # 清单条数上限：下载目录里全是视频的场景（电影库混用下载目录）也就几百个，防异常目录树拖死接口
 MAX_SCAN_FILES = 2000
 
-# ---------- STRM（v1.3.0） ----------
+# ---------- STRM（v1.3.0 起，v1.4.0 改为有 STRM 就优先走 STRM） ----------
 # 「跟随 TgtoDrive 插件」读到的 strm_dir 缓存秒数：避免每次播放都打一遍宿主本机 API
 STRM_FOLLOW_TTL = 60
 # 跟随模式的缓存（模块级，进程内共享）
@@ -159,7 +159,7 @@ class MediaStreamPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/mediastream.png")
     # 插件版本
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -467,7 +467,10 @@ class MediaStreamPro(_PluginBase):
         }
 
     def stream(self, request: Request, path: str = "") -> Any:
-        """返回视频文件流（Range 由 Starlette 的 FileResponse 处理）；STRM → 302 网盘直链。
+        """返回视频文件流（Range 由 Starlette 的 FileResponse 处理）。
+
+        配置了 STRM 目录时**优先 302 网盘直链**：只要能对上同名 .strm，哪怕本地
+        （网盘挂载）文件读得到也走直链，不占 NAS 流量；对不上才直读本地文件。
 
         ``path`` 是普通标量默认参数 → FastAPI 当成查询参数，不需要额外声明。
         ``request`` 只用来区分 GET / HEAD：HEAD 自己构造一个只有响应头的 200，
@@ -486,11 +489,15 @@ class MediaStreamPro(_PluginBase):
         if target.lower().endswith(STRM_EXTENSION):
             return self._stream_strm(request, target)
 
-        # 视频文件本地不存在 + 配了 STRM 目录 → 去 STRM 树里找同名 .strm
-        if not os.path.isfile(target):
+        # STRM 优先：配置了 STRM 目录且能对上同名 .strm → 一律 302 网盘直链，
+        # 哪怕本地（网盘挂载）文件读得到也不走 NAS 流量；对不上才直读本地。
+        if self.effective_strm_dir():
             strm_file = self._find_strm_for(target)
             if strm_file:
                 return self._stream_strm(request, strm_file)
+
+        # 走到这说明既没有 .strm 也没有可用直链：本地文件存在才回文件流
+        if not os.path.isfile(target):
             return JSONResponse(
                 {"success": False, "message": "文件不存在或已被移走"}, status_code=404
             )
@@ -582,7 +589,7 @@ class MediaStreamPro(_PluginBase):
         return strm_dir
 
     def _find_strm_for(self, target: str) -> Optional[str]:
-        """为本地缺失的媒体文件在 STRM 目录树里找同名 ``<文件名>.strm``。
+        """为媒体文件在 STRM 目录树里找同名 ``<文件名>.strm``（不论本地文件是否存在）。
 
         TgtoDrive 生成的 STRM 与媒体文件同名（``阿凡达.mkv`` → ``阿凡达.strm``），
         但目录结构镜像的是网盘而不是本地媒体库，所以先试同位置、再全树找一遍。

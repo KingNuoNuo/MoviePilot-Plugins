@@ -69,9 +69,9 @@
   },
   "MediaStreamPro": {
     "name": "媒体流播放",
-    "description": "把已整理入库与下载目录里的视频按原始文件流式传给客户端播放（支持拖动进度）；支持 STRM 网盘直链播放（302 跳转，流量不过 NAS）。自动跟随宿主「目录配置」里的媒体库与下载路径，STRM 目录可跟随 TgtoDrive 插件。",
+    "description": "把已整理入库与下载目录里的视频按原始文件流式传给客户端播放（支持拖动进度）；支持 STRM 网盘直链播放：有 STRM 就优先 302 跳转（流量不过 NAS），没有才直读本地。自动跟随宿主「目录配置」里的媒体库与下载路径，STRM 目录可跟随 TgtoDrive 插件。",
     "labels": "媒体库,播放",
-    "version": "1.3.0",
+    "version": "1.4.0",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/mediastream.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -84,7 +84,8 @@
       "v1.0.1": "修复：未实现基类的抽象方法 `stop_service`（本插件没有后台任务要停，但 `_PluginBase` 把它列成了抽象方法），宿主加载时直接抛 `Can't instantiate abstract class MediaStreamPro without an implementation for abstract method 'stop_service'` → 插件装不上。**发版前必须照  `_PluginBase` 的六个抽象方法逐个对一遍**：`init_plugin` / `get_state` / `get_api` / `get_form` / `get_page` / `stop_service`，缺任何一个都是「安装成功但加载失败」，宿主 Web 端只会报一句「加载失败」，真实原因在日志里。此版本内容与 v1.0.0 完全相同，仅补这个方法。",
       "v1.0.0": "首个版本：给客户端一条能直接喂播放器的视频流。GET /stream?path=<媒体库内绝对路径> 返回原始文件，走 Starlette FileResponse 自带 HTTP Range，客户端（MoviePilotApp 下载记录）可以拖进度；GET /ping 供客户端探测可用性与当前放行目录。放行的媒体库根目录不写死也不落配置，每次请求实时读宿主「目录配置」里的 library_path（只放行媒体库，下载目录刻意不放行），宿主改目录即刻生效；路径经 realpath 归一后按「根目录 + 分隔符」比较，挡住前缀串与 .. 穿越，扩展名限定视频容器。认证沿用宿主 bear 模式（JWT / API 令牌），插件不解析凭据、也不支持把 token 拼进 URL。插件没有开关与配置项，安装即生效，配置页只有一张说明卡。",
       "v1.2.0": "新增「下载完成」直接播放（v1.1.0 只放媒体库，v1.2.0 下载目录一并放行）：\n1. 放行目录实时读宿主「目录配置」的 download_path，与媒体库路径合并为 /stream 与 /season 的白名单 —— 下载完成但没整理（甚至整理失败）的文件也能直接播；\n2. 新增 GET /downloads：递归扫所有下载目录（限深度 4 层、上限 2000 条），返回磁盘上真实存在的视频文件（path/name/size/mtime），不缓存、每次现扫；\n3. 客户端拿 /downloads 的清单和下载历史的种子名按文件名匹配：匹配上 → ▶ 可播；匹配不上（文件在下载器里被删了）→ ▶ 换灰色「已删除」。",
-      "v1.3.0": "新增 **STRM 网盘直链播放**，App 整理记录里 STRM 模式的影片也能直接 ▶：① 请求路径是 .strm 文件时，读出里面的网盘直链（http/https）后 **302 跳转**给播放器，流量直接走 播放器 ↔ 网盘 CDN，不过 NAS，Range/拖动进度由播放器对直链续传；② 请求的是视频文件但本地不存在、且配置了「STRM 目录」时，自动去 STRM 目录树里找同名 <文件名>.strm（TgtoDrive 生成的 STRM 与媒体文件同名，先试同位置再全树找一遍），找到即跳转；③ STRM 目录两个来源：新增「跟随 TgtoDrive 插件」开关（打开后实时读「TgtoDrive STRM 同步」插件配置里的 STRM 目录，经宿主本机 API，缓存 60 秒），关闭则用本插件自己填的容器内路径；④ 生效的 STRM 目录加入 /stream、/season 的放行白名单，.strm 文件本身也可直接请求；/ping 增加 strm_dir 字段；/season 对 STRM 影片不做同季扫描（网盘直链没有目录结构可扫），只回它自己。本地文件播放行为完全不变。"
+      "v1.3.0": "新增 **STRM 网盘直链播放**，App 整理记录里 STRM 模式的影片也能直接 ▶：① 请求路径是 .strm 文件时，读出里面的网盘直链（http/https）后 **302 跳转**给播放器，流量直接走 播放器 ↔ 网盘 CDN，不过 NAS，Range/拖动进度由播放器对直链续传；② 请求的是视频文件但本地不存在、且配置了「STRM 目录」时，自动去 STRM 目录树里找同名 <文件名>.strm（TgtoDrive 生成的 STRM 与媒体文件同名，先试同位置再全树找一遍），找到即跳转；③ STRM 目录两个来源：新增「跟随 TgtoDrive 插件」开关（打开后实时读「TgtoDrive STRM 同步」插件配置里的 STRM 目录，经宿主本机 API，缓存 60 秒），关闭则用本插件自己填的容器内路径；④ 生效的 STRM 目录加入 /stream、/season 的放行白名单，.strm 文件本身也可直接请求；/ping 增加 strm_dir 字段；/season 对 STRM 影片不做同季扫描（网盘直链没有目录结构可扫），只回它自己。本地文件播放行为完全不变。",
+      "v1.4.0": "改为 **有 STRM 就优先走 STRM**：配置了 STRM 目录后，只要影片能对上同名 ``.strm``（先同位置、再全树找），``/stream`` 一律 302 网盘直链 —— 哪怕本地（网盘挂载）文件读得到也不再直读，播放流量直接走 播放器 ↔ 网盘 CDN，不占 NAS 带宽。对不上 ``.strm`` 的影片维持原来的本地直读；未配置 STRM 目录时行为与 1.3.0 完全一致。"
     }
   }
 }
