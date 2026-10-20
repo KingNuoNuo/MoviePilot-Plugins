@@ -39,6 +39,13 @@ _SEARCH_URL = "https://m.douban.com/rexxar/api/v2/search"
 # subject_suggest（拿 id/type，无评分）→ rexxar subject 详情（拿 rating.value）。
 _SUGGEST_URL = "https://movie.douban.com/j/subject_suggest"
 _SUBJECT_URL = "https://m.douban.com/rexxar/api/v2/{kind}/{sid}"
+# v1.4.1 三级兜底：suggest 也开始「200 + 空数组」式软封锁后，最后退到
+# m 站搜索页（服务端渲染，HTML 里内联 /subject/<id> 链接）→ subject 详情。
+_MSEARCH_URL = "https://m.douban.com/search/?query={q}"
+_MSEARCH_SID_RE = re.compile(r"/subject/(\d+)")
+# m 站搜索页要手机 UA 才出结果（桌面 UA 返回空壳页，实测）
+_MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+              "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
 # /search 被封后的跳过窗口：期间不浪费请求打它，直接走两步
 _SEARCH_DEAD_COOLDOWN = 1800.0
 _REFERER = "https://m.douban.com/"
@@ -65,7 +72,7 @@ RATING_TTL_MISS = 3 * 86400
 # v2 = m.douban.com/rexxar/api/v2/search（一次请求带 rating.value）
 # v3 = 修好「rexxar 返回 None」的排障（v2 存下来的空值多半是拿不到响应，不是真没分）
 # v4 = v1.4.0 两步兜底上线：今天 /search 被封期间按「真没有」缓存下来的空值全是假的，作废重查
-RATING_VER = 6
+RATING_VER = 7
 
 _UAS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -282,6 +289,51 @@ def _suggest_pick(keyword: str, prefer_tv: Optional[bool]) -> dict:
     return {}
 
 
+def _msearch_pick(keyword: str, prefer_tv: Optional[bool]) -> dict:
+    """m 站搜索页兜底（v1.4.1）：返回 ``{id, type, title, year}`` 候选（无评分）。
+
+    ``m.douban.com/search/?query=`` 是服务端渲染的，HTML 里直接内联 ``/subject/<id>``
+    链接（取前 3 个 sid 就够，多的是无关书影音）。需手机 UA，桌面 UA 返回空壳页。
+    返回的 sid 不知类型，交由 [_subject_rate] 按 movie/tv 各试一次。
+    """
+    global _last_request_at, last_raw
+    gap = time.monotonic() - _last_request_at
+    if gap < _REQUEST_INTERVAL:
+        time.sleep(_REQUEST_INTERVAL - gap)
+    _last_request_at = time.monotonic()
+    try:
+        client = RequestUtils(
+            headers={"User-Agent": _MOBILE_UA, "Referer": _REFERER},
+            proxies=getattr(settings, "PROXY", None),
+        )
+        res = client.request("get", _MSEARCH_URL.format(q=keyword), raise_exception=True)
+        status = getattr(res, "status_code", None)
+        html = getattr(res, "text", "") or ""
+        last_raw = f"HTTP {status} | {html[:300]}"
+        if status != 200:
+            return {}
+        sids: List[str] = []
+        for m in _MSEARCH_SID_RE.finditer(html):
+            sid = m.group(1)
+            if sid not in sids:
+                sids.append(sid)
+            if len(sids) >= 3:
+                break
+    except Exception as exc:
+        last_raw = f"EXC {exc}"
+        logger.info(f"m 站搜索页兜底失败：{exc}")
+        return {}
+    # 同名优先没有候选元数据可比，直接按第一个 sid 试；类型电影/剧集各打一次详情，
+    # prefer_tv 决定先试哪个 —— 详情接口会回真实 title 供上层校验
+    kinds = ("tv", "movie") if prefer_tv else ("movie", "tv")
+    for sid in sids:
+        for kind in kinds:
+            subject = _subject_rate(kind, sid)
+            if subject:
+                return {"id": sid, "type": kind, **subject}
+    return {}
+
+
 def _subject_rate(kind: str, sid: str) -> dict:
     """rexxar subject 详情：返回与 [_search] 同构的单条候选（带 ``rating.value``）。
 
@@ -369,6 +421,17 @@ def lookup(
             continue
         subject = _subject_rate(str(cand.get("type")), str(cand.get("id")))
         if subject:
+            return settle(subject)
+
+    # ①.6 m 站搜索页三级兜底（v1.4.1）：suggest 也被「200 + 空数组」软封锁时，
+    #     最后一条路 —— HTML 里抠 sid → subject 详情。真实 title 在详情里，
+    #     与检索词不同的（搜出幕后纪录片之类）不算命中，宁缺勿错。
+    for query in queries:
+        cand = _msearch_pick(query, prefer_tv)
+        if not cand:
+            continue
+        subject = _subject_rate(str(cand.get("type")), str(cand.get("id")))
+        if subject and _title_of(subject) == query:
             return settle(subject)
 
     # ② 截短检索：只对带年份的条目前瞻降级，且年份必须完全一致。
