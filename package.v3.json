@@ -47,7 +47,7 @@
     "name": "全球影视榜单",
     "description": "整合猫眼、Netflix 与红果短剧榜单，提供统一的榜单接口与推荐页数据源。",
     "labels": "榜单",
-    "version": "1.4.1",
+    "version": "1.4.2",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/globalrank.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -71,7 +71,8 @@
       "v1.3.1": "新增 /rating 接口：按标题批量查豆瓣评分，服务搜索页。搜索结果里绝大多数片子不在榜上，插件原有的评分只覆盖榜单条目；现在 App 搜索结果卡片的评分统一走豆瓣，先查插件持久缓存（有分 30 天 / 未开分 3 天有效，命中不发请求），未命中的按 budget 限量检索（每条 2 个 HTTP、全局 0.35s 节流，默认单次 10 条），补过的下次直接命中。缓存随「清理数据」一起清。",
       "v1.3.9": "修复「豆瓣评分一条都查不到」。根因有两个，都出在调用宿主 SDK 的方式上：\n1. RequestUtils 构造时一旦传了 headers 字典，referer= 参数就被丢弃 → 请求一直不带 Referer，豆瓣 rexxar 全部 400 invalid_request；\n2. RequestUtils.get 成功时返回的是响应文本字符串（没有 status_code），200 也被当成失败。\n现改为 headers 里直接带 Referer、用 RequestUtils.request 拿 Response 对象；缓存版本号作废坏数据。实测《霸王别姬》9.6、《琅琊榜》9.4、《流人》7.1。",
       "v1.4.0": "修复「电影榜大片没评分」与接口被拦后的查分链路。① 熔断放宽：新片在豆瓣检索不到是常态（榜单过半是未收录新片），连续连空不再按限流处理——连空到阈值先拿必命中片做探针复核，探针有结果就继续查，探针也空才真熔断；阈值 12→20。② rexxar /search 对部分出口返回 403 时自动降级两步链路：`j/subject_suggest` 拿词条 id 与类型，再打 `rexxar/api/v2/<type>/<id>` 详情取 `rating.value`；主链路恢复后自动切回。③ 检索词兜底扩展：原串→去年份括号→截短检索逐级尝试不变，两步链路复用同一套候选匹配规则。缓存版本号 +1 作废旧空值。实测：霸王别姬 9.6、飞驰人生3 7.1、惊天魔盗团3 5.5、碟中谍8 7.5。",
-      "v1.4.1": "豆瓣软封锁升级后的第三级兜底。suggest 接口也开始「200 + 空数组」式软封锁（连经典片都返回空，看着像「没这部片」其实是接口不给数据），现在整条检索链是：rexxar /search（JSON，最优）→ subject_suggest（拿 id）→ **m 站搜索页** `m.douban.com/search/?query=`（服务端渲染 HTML，正则抠 `/subject/<id>`，取前 3 个；需手机 UA，桌面 UA 返回空壳页）→ rexxar subject 详情拿评分。m 站兜底要求详情返回的真实标题与检索词完全一致才采纳（搜出幕后纪录片之类的同名近似结果一律不认，宁缺勿错）。缓存版本号 +1 作废软封锁期间写下的空值。实测：哪吒之魔童闹海 8.4、霸王别姬 9.6。"
+      "v1.4.1": "豆瓣软封锁升级后的第三级兜底。suggest 接口也开始「200 + 空数组」式软封锁（连经典片都返回空，看着像「没这部片」其实是接口不给数据），现在整条检索链是：rexxar /search（JSON，最优）→ subject_suggest（拿 id）→ **m 站搜索页** `m.douban.com/search/?query=`（服务端渲染 HTML，正则抠 `/subject/<id>`，取前 3 个；需手机 UA，桌面 UA 返回空壳页）→ rexxar subject 详情拿评分。m 站兜底要求详情返回的真实标题与检索词完全一致才采纳（搜出幕后纪录片之类的同名近似结果一律不认，宁缺勿错）。缓存版本号 +1 作废软封锁期间写下的空值。实测：哪吒之魔童闹海 8.4、霸王别姬 9.6。",
+      "v1.4.2": "新增豆瓣登录态：豆瓣对匿名爬取的封锁升级（搜索/详情/建议接口全量 403/400/「有异常请求请登录」页），匿名通道不再可靠。现在所有豆瓣请求自动携带 **CookieCloud 同步的豆瓣 Cookie**（宿主设置里配好 CookieCloud 后，浏览器装扩展同步一次即生效；Cookie 缓存 6 小时，浏览器重新同步即刷新，插件不用重启）。无 Cookie 时行为与 v1.4.1 完全一致（三级兜底链不变），有 Cookie 时走登录态配额，基本不再触发封锁。"
     }
   },
   "MediaStreamPro": {

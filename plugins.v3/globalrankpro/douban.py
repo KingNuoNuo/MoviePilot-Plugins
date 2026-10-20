@@ -52,6 +52,10 @@ _REFERER = "https://m.douban.com/"
 
 # 请求间隔：连打会被拦（表现为返回空 / 抛异常），0.35s 实测稳定
 _REQUEST_INTERVAL = 0.35
+# CookieCloud 取豆瓣 Cookie 的缓存时长（秒）；浏览器重新同步即生效，插件不用重启
+_COOKIE_TTL = 6 * 3600
+_cookie_cache: Optional[str] = None
+_cookie_ts = 0.0
 # 熔断冷却：一旦某次请求抛异常、或连续多次拿到空结果，这段时间内不再打豆瓣
 # v1.4.0：600→120 —— 榜单场景全是当年新片，「豆瓣真搜不到」的连空是常态不是限流，
 # 熔断 10 分钟会把能查到的片也一并断粮；120s 够穿过一次豆瓣的短暂拦截窗口
@@ -140,6 +144,38 @@ def _confirm_block() -> None:
         _trip(f"连续 {_empty_streak} 次检索为空且保底探针失效")
 
 
+def _douban_cookie() -> str:
+    """从 CookieCloud 取豆瓣登录 Cookie（v1.4.2），取不到返回空串。
+
+    豆瓣对匿名爬取的封锁越来越狠（403 / 400 / 「有异常请求请登录」页），带登录态
+    的请求走的是另一套宽容得多的配额。Cookie 数据 6 小时刷新一次 —— 浏览器那边
+    重新同步 CookieCloud 即可生效，插件不用重启。
+    """
+    global _cookie_cache, _cookie_ts
+    now = time.time()
+    if now - _cookie_ts < _COOKIE_TTL and _cookie_cache is not None:
+        return _cookie_cache
+    _cookie_ts = now
+    _cookie_cache = ""
+    try:
+        from app.helper.cookiecloud import CookieCloudHelper
+        data, err = CookieCloudHelper().download()
+        # data = {域名: 已拼好的 Cookie 字符串}；key 可能带端口等后缀，模糊匹配
+        cookie = ""
+        for domain, value in (data or {}).items():
+            if "douban.com" in str(domain) and isinstance(value, str) and value.strip():
+                cookie = value.strip()
+                break
+        if err:
+            logger.info(f"CookieCloud 未取到豆瓣 Cookie：{err}")
+        if cookie:
+            _cookie_cache = cookie
+            logger.info("CookieCloud 命中豆瓣 Cookie，豆瓣请求改走登录态")
+    except Exception as exc:
+        logger.info(f"CookieCloud 取豆瓣 Cookie 异常：{exc}")
+    return _cookie_cache
+
+
 def _get_json(url: str, params: Dict[str, Any]) -> Any:
     """带节流与熔断的 GET，失败一律返回 None（调用方按「没查到」处理）。
 
@@ -156,8 +192,12 @@ def _get_json(url: str, params: Dict[str, Any]) -> Any:
         time.sleep(_REQUEST_INTERVAL - gap)
     _last_request_at = time.monotonic()
     try:
+        headers = {"User-Agent": random.choice(_UAS), "Referer": _REFERER}
+        cookie = _douban_cookie()
+        if cookie:
+            headers["Cookie"] = cookie
         client = RequestUtils(
-            headers={"User-Agent": random.choice(_UAS), "Referer": _REFERER},
+            headers=headers,
             proxies=getattr(settings, "PROXY", None),
         )
         res = client.request("get", url, params=params, raise_exception=True)
@@ -302,8 +342,12 @@ def _msearch_pick(keyword: str, prefer_tv: Optional[bool]) -> dict:
         time.sleep(_REQUEST_INTERVAL - gap)
     _last_request_at = time.monotonic()
     try:
+        headers = {"User-Agent": _MOBILE_UA, "Referer": _REFERER}
+        cookie = _douban_cookie()
+        if cookie:
+            headers["Cookie"] = cookie
         client = RequestUtils(
-            headers={"User-Agent": _MOBILE_UA, "Referer": _REFERER},
+            headers=headers,
             proxies=getattr(settings, "PROXY", None),
         )
         res = client.request("get", _MSEARCH_URL.format(q=keyword), raise_exception=True)
