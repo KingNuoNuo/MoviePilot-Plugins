@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime
 import random
 import re
+import threading
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -77,6 +78,15 @@ RATING_TTL_MISS = 3 * 86400
 # v3 = 修好「rexxar 返回 None」的排障（v2 存下来的空值多半是拿不到响应，不是真没分）
 # v4 = v1.4.0 两步兜底上线：今天 /search 被封期间按「真没有」缓存下来的空值全是假的，作废重查
 RATING_VER = 7
+
+# 「未开分」空缺的缓存版本，独立于 RATING_VER：
+# 有分的条目走 RATING_VER（换检索策略才作废）；无分的空缺走 MISS_RATING_VER
+# —— 豆瓣瞬时不稳定（拦截窗口 / 偶发空池）会把「其实有分的片」误存成无分，
+# 这种毒缓存一存就是 RATING_TTL_MISS 三天，App 端怎么重试都被缓存挡回。
+# 缓存判定规则变化时 +1，即可只冲掉空缺缓存、保住 30 天的有效评分。
+# v8 (v1.4.3)：v1.4.2 期间豆瓣抖动，一批带年份键的假空缺被缓存（App 重试 4 轮全被挡），
+# 升一档全部作废重查；同时上线「空缺可信度」判定（见 [miss_cacheable]）。
+MISS_RATING_VER = 8
 
 _UAS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -544,19 +554,67 @@ def cache_key(title: str, year: str = "", media_type: str = "") -> str:
 def is_fresh(entry: Dict[str, Any], now_ts: float) -> bool:
     """持久缓存里的评分是否还能用（命中 30 天 / 未开分 3 天）。
 
-    检索策略版本不匹配的一律判过期：换接口后，旧版本存下来的「查不到」是假结论。
+    版本不匹配的一律判过期：换接口后，旧版本存下来的「查不到」是假结论。
+    有分与无分各走各的版本号（[RATING_VER] / [MISS_RATING_VER]）——
+    冲掉毒缓存时只作废空缺、不连累 30 天的有效评分。
     """
     if not isinstance(entry, dict) or "rating_ts" not in entry:
-        return False
-    if entry.get("rating_ver") != RATING_VER:
         return False
     try:
         ts = float(entry.get("rating_ts") or 0)
     except (TypeError, ValueError):
         return False
-    ttl = RATING_TTL if str(entry.get("vote_average") or "0") not in ("", "0", "0.0") \
-        else RATING_TTL_MISS
+    has_rate = str(entry.get("vote_average") or "0") not in ("", "0", "0.0")
+    if has_rate:
+        if entry.get("rating_ver") != RATING_VER:
+            return False
+        ttl = RATING_TTL
+    else:
+        if entry.get("rating_ver") != MISS_RATING_VER:
+            return False
+        ttl = RATING_TTL_MISS
     return now_ts - ts < ttl
+
+
+def miss_cacheable() -> bool:
+    """本轮「查了但没分」是否可信（可信才允许把空缺写进缓存）。
+
+    依据是 [_search] 维护的连空计数：空缺若发生在「搜索池整个是空」的请求之后
+    （``_empty_streak > 0``），大概率是豆瓣瞬时拦截/抖动，不是真没有 —— 这种空缺
+    一写就是 3 天，把有分的片也锁死。连空为 0 说明最后那次检索池非空，
+    空缺来自「有候选但标题没对上」（m 站兜底的宁缺勿错校验），这才可信。
+    """
+    return _empty_streak == 0
+
+
+# ---------------- 近期结果 memo（防并发重复查豆瓣） ----------------
+# App 同屏三个榜 + 搜索页会并发打多个 /rating，同一标题可能在几十秒内被重复查。
+# 这里按 cache_key 存最近的结果（含空缺），2 分钟内直接命中，不再发请求。
+# 与持久缓存的分工：持久缓存管「天」，这里只管「秒级并发的去重」。
+_RECENT_TTL = 120.0
+_recent: Dict[str, Tuple[float, str]] = {}
+_recent_lock = threading.Lock()
+
+
+def recent_get(key: str) -> Optional[str]:
+    """取近期查过的评分（``None`` = 没查过/已过期；空串 = 查过但无分）。"""
+    now = time.monotonic()
+    with _recent_lock:
+        hit = _recent.get(key)
+        if hit is None:
+            return None
+        if now - hit[0] >= _RECENT_TTL:
+            _recent.pop(key, None)
+            return None
+        return hit[1]
+
+
+def recent_put(key: str, rate: str) -> None:
+    """记下本轮查分结果（含空缺），供 2 分钟内的并发请求直接命中。"""
+    with _recent_lock:
+        if len(_recent) > 512:
+            _recent.clear()
+        _recent[key] = (time.monotonic(), str(rate or ""))
 
 
 def fill_ratings(
@@ -564,6 +622,8 @@ def fill_ratings(
     *,
     budget: int,
     now: Optional[datetime.datetime] = None,
+    store_get=None,
+    store_save=None,
 ) -> int:
     """
     给一批身份字典补豆瓣评分，原地写入 ``vote_average`` / ``rating_ts``。
@@ -571,6 +631,10 @@ def fill_ratings(
     :param pairs: ``(榜单原始标题, 身份字典)`` 序列；身份字典里读 ``title_cn`` /
                   ``year`` / ``type`` 决定检索词与年份校验
     :param budget: 本轮最多查多少条（现在一条 = 1 个请求）
+    :param store_get: 可选，返回共享评分缓存 dict 的回调（主类 ``douban_rating`` 键）。
+                  传入后与 ``/rating`` 接口共用同一份缓存 —— 同一标题在榜单补分和
+                  搜索查分两条路上只查一次豆瓣（v1.4.3 优化①）。
+    :param store_save: 可选，与 ``store_get`` 配对的写回回调 ``save(cache_dict)``。
     :return: 实际消耗的额度
 
     已经缓存过且未过期的条目直接跳过，因此稳态下（榜单条目重复率极高）
@@ -579,6 +643,15 @@ def fill_ratings(
     if budget <= 0:
         return 0
     now_ts = (now or datetime.datetime.now()).timestamp()
+    shared: Dict[str, Any] = {}
+    shared_dirty = False
+    if store_get is not None:
+        try:
+            loaded = store_get()
+            if isinstance(loaded, dict):
+                shared = loaded
+        except Exception as exc:
+            logger.warning(f"读取共享评分缓存失败，本轮不共用：{exc}")
     used = 0
     for title, entry in pairs:
         if used >= budget or is_blocked():
@@ -600,14 +673,47 @@ def fill_ratings(
             prefer_tv = False
         else:
             prefer_tv = None
+        key = cache_key(title, year, entry_type)
+        # 共享缓存命中（/rating 那边查过的）直接抄，不再打豆瓣
+        shared_entry = shared.get(key)
+        if is_fresh(shared_entry, now_ts):
+            entry["vote_average"] = str((shared_entry or {}).get("vote_average") or "")
+            entry["rating_ts"] = now_ts
+            entry["rating_ver"] = RATING_VER if entry["vote_average"] else MISS_RATING_VER
+            continue
+        # 秒级并发 memo：同一标题几分钟内刚查过（含空缺）也直接用
+        memo = recent_get(key)
+        if memo is not None:
+            entry["vote_average"] = memo
+            entry["rating_ts"] = now_ts
+            entry["rating_ver"] = RATING_VER if memo else MISS_RATING_VER
+            continue
         info = lookup(title, keywords=keywords, year=year,
                       prefer_tv=prefer_tv, need_poster=False, need_rating=True)
         used += 1
-        entry["rating_ts"] = now_ts
-        entry["rating_ver"] = RATING_VER
-        if info.get("rate"):
-            entry["vote_average"] = info["rate"]
-            logger.info(f"豆瓣评分补全：{title} -> {info['rate']}")
-        else:
+        rate = str(info.get("rate") or "")
+        recent_put(key, rate)
+        if rate:
+            entry["rating_ts"] = now_ts
+            entry["rating_ver"] = RATING_VER
+            entry["vote_average"] = rate
+            logger.info(f"豆瓣评分补全：{title} -> {rate}")
+        elif miss_cacheable():
+            # 空缺可信（检索池非空、只是标题没对上）才记「无分」，3 天后重试；
+            # 空缺可疑（豆瓣抖动/拦截窗口）什么都不写 —— 不留标记，下一轮自动重查，
+            # 避免把有分的片误存成无分锁死三天（2026-10-20 App 端全榜无分的根因）
+            entry["rating_ts"] = now_ts
+            entry["rating_ver"] = MISS_RATING_VER
             entry["vote_average"] = ""
+        # 镜像进共享缓存，/rating 那边就不用再查一遍
+        if (rate or miss_cacheable()) and store_save is not None:
+            shared[key] = {"vote_average": rate,
+                           "rating_ts": now_ts,
+                           "rating_ver": RATING_VER if rate else MISS_RATING_VER}
+            shared_dirty = True
+    if shared_dirty and store_save is not None:
+        try:
+            store_save(shared)
+        except Exception as exc:
+            logger.warning(f"写回共享评分缓存失败：{exc}")
     return used

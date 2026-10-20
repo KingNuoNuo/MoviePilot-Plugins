@@ -35,11 +35,13 @@
 """
 
 import datetime
+import hashlib
 import html as html_lib
 import json
 import re
 import time
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote, urlsplit
 
@@ -106,6 +108,26 @@ _POSTER_CACHE: "OrderedDict[str, Tuple[bytes, str]]" = OrderedDict()
 _POSTER_CACHE_MAX = 64
 # 海报是静态资源，让浏览器长期缓存，减少宿主回源
 _POSTER_CACHE_CONTROL = "public, max-age=604800"
+# 落盘缓存目录（v1.4.3 优化③）：v3 每次调度重建插件实例，内存 LRU 必丢；
+# 图放宿主 config 目录下，跨重启复用，服务端基本零回源
+_POSTER_DISK_DIR = None  # 惰性初始化（首次用到时创建）
+
+
+def _poster_disk_path(target: str):
+    """海报落盘路径：``<config>/cache/hongguo_posters/<sha1>.img`` + ``.meta``。
+
+    宿主拿不到可写目录时返回 ``None``（只走内存缓存）。``.meta`` 存 Content-Type。
+    """
+    global _POSTER_DISK_DIR
+    try:
+        if _POSTER_DISK_DIR is None:
+            config_dir = str(getattr(settings, "CONFIG_DIR", "") or "/config")
+            _POSTER_DISK_DIR = Path(config_dir) / "cache" / "hongguo_posters"
+        digest = hashlib.sha1(target.encode("utf-8")).hexdigest()
+        base = _POSTER_DISK_DIR / digest
+        return (base.with_suffix(".img"), base.with_suffix(".meta"))
+    except Exception:
+        return None
 
 
 def _safe_int(value, default: int = 0) -> int:
@@ -351,6 +373,25 @@ class HongguoSource(RankSource):
             return Response(content=cached[0], media_type=cached[1],
                             headers={"Cache-Control": _POSTER_CACHE_CONTROL})
 
+        # 落盘缓存（v1.4.3 优化③）：内存 LRU 在 v3 每次调度重建实例时必丢，
+        # 重启后同一张海报反复回字节图床下载。先查磁盘，命中就不出门。
+        disk = _poster_disk_path(target)
+        if disk is not None:
+            img_file, meta_file = disk
+            if img_file.exists() and meta_file.exists():
+                try:
+                    content = img_file.read_bytes()
+                    media_type = meta_file.read_text("utf-8").strip() or "image/jpeg"
+                    if content and media_type.startswith("image/"):
+                        _POSTER_CACHE[target] = (content, media_type)
+                        while len(_POSTER_CACHE) > _POSTER_CACHE_MAX:
+                            _POSTER_CACHE.popitem(last=False)
+                        return Response(
+                            content=content, media_type=media_type,
+                            headers={"Cache-Control": _POSTER_CACHE_CONTROL})
+                except Exception as e:
+                    logger.warning(f"红果海报读盘缓存失败，回源下载：{e}")
+
         try:
             response = RequestUtils(
                 headers={"User-Agent": _UA, "Referer": f"{SITE}/"},
@@ -381,6 +422,15 @@ class HongguoSource(RankSource):
         _POSTER_CACHE[target] = (content, media_type)
         while len(_POSTER_CACHE) > _POSTER_CACHE_MAX:
             _POSTER_CACHE.popitem(last=False)
+        # 写盘（失败不影响返回，内存缓存仍有效）
+        if disk is not None:
+            img_file, meta_file = disk
+            try:
+                img_file.parent.mkdir(parents=True, exist_ok=True)
+                img_file.write_bytes(content)
+                meta_file.write_text(media_type, "utf-8")
+            except Exception as e:
+                logger.warning(f"红果海报写盘缓存失败：{e}")
         return Response(content=content, media_type=media_type,
                         headers={"Cache-Control": _POSTER_CACHE_CONTROL})
 

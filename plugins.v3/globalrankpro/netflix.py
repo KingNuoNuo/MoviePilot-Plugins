@@ -522,7 +522,13 @@ class NetflixSource(RankSource):
         try:
             pairs = [(key.split("|", 1)[-1], entry)
                      for key, entry in cache.items() if isinstance(entry, dict)]
-            if douban.fill_ratings(pairs, budget=_RATING_LIMIT):
+            if douban.fill_ratings(
+                    pairs, budget=_RATING_LIMIT,
+                    # 共享 /rating 的 douban_rating 缓存（v1.4.3 优化①），
+                    # _host 直读主类键，不能走带前缀的 get_data
+                    store_get=lambda: self._host.get_data("douban_rating") or {},
+                    store_save=lambda c: self._host.save_data("douban_rating", c),
+            ):
                 dirty = True
         except Exception as e:
             logger.warning(f"Netflix 豆瓣评分补全失败，本轮跳过：{e}")

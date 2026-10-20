@@ -1100,6 +1100,11 @@ class MaoyanSource(RankSource):
                 list(self._resolved_identity.items()),
                 budget=self._RATING_LIMIT,
                 now=current_time,
+                # 共享 /rating 的 douban_rating 缓存：同一标题在榜单补分与
+                # 搜索查分两条路上只查一次豆瓣（v1.4.3 优化①）。
+                # 注意用 _host 直读主类键，不能走带前缀的 get_data
+                store_get=lambda: self._host.get_data("douban_rating") or {},
+                store_save=lambda c: self._host.save_data("douban_rating", c),
             )
             if used:
                 logger.info(f"豆瓣评分补全：本轮查询 {used} 条")

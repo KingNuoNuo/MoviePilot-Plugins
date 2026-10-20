@@ -14,6 +14,7 @@ MaoyanPro 与 NetflixPro 的抓取解析逻辑整体平移，红果为新增的 
 """
 import datetime
 import json
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
@@ -61,13 +62,16 @@ class GlobalRankPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/globalrank.png")
     # 插件版本
-    plugin_version = "1.4.2"
+    plugin_version = "1.4.3"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
     author_url = "https://github.com/KingNuoNuo"
     # 插件配置项ID前缀
     plugin_config_prefix = "globalrankpro_"
+    # 定时抓取最小间隔（秒）：cron 配得再密，距上次成功抓取不足 4 小时也跳过，
+    # 手动刷新不受限（v1.4.3 优化④）
+    _MIN_REFRESH_INTERVAL = 4 * 3600
     # 加载顺序
     plugin_order = 6
     # 可使用的用户级别：0 = 不做站点用户认证也能加载
@@ -245,14 +249,31 @@ class GlobalRankPro(_PluginBase):
 
     # ==================== 抓取 ====================
 
-    def __refresh_source(self, source_id: str) -> RankSourceRefresh:
-        """抓取单个数据源，把异常收敛成结果对象。"""
+    def __refresh_source(self, source_id: str, force: bool = True) -> RankSourceRefresh:
+        """抓取单个数据源，把异常收敛成结果对象。
+
+        :param force: True = 手动刷新，无条件重抓；False = 定时任务入口，
+                      距上次成功抓取不足 [_MIN_REFRESH_INTERVAL] 时跳过
+                      （v1.4.3 优化④：cron 配得再密也不会高频打上游）。
+        """
         source = self.sources.get(source_id)
         if source is None:
             return RankSourceRefresh(source=source_id, message="未知数据源")
         if not source.enabled:
             return RankSourceRefresh(
                 source=source_id, message="数据源未启用，跳过抓取")
+        if not force:
+            last = self.get_data(f"last_fetch_{source_id}") or 0
+            try:
+                elapsed = time.time() - float(last)
+            except (TypeError, ValueError):
+                elapsed = None
+            if elapsed is not None and 0 <= elapsed < _MIN_REFRESH_INTERVAL:
+                hours = _MIN_REFRESH_INTERVAL / 3600
+                return RankSourceRefresh(
+                    source=source_id,
+                    refreshed=False,
+                    message=f"距上次抓取不足 {hours:.0f} 小时，跳过（定时保护）")
         try:
             result = source.fetch() or {}
         except Exception as e:
@@ -261,6 +282,8 @@ class GlobalRankPro(_PluginBase):
                 source=source_id, message=f"刷新失败：{e}")
         board_count = int(result.get("board_count") or 0)
         item_count = int(result.get("item_count") or 0)
+        if board_count:
+            self.save_data(f"last_fetch_{source_id}", time.time())
         message = str(result.get("message") or "")
         if not message:
             # 数据源的 fetch 摘要不一定带 message，这里补一句可读结果，
@@ -278,10 +301,68 @@ class GlobalRankPro(_PluginBase):
         )
 
     def __refresh_all(self) -> RankRefreshResult:
-        """按顺序抓取全部已启用数据源（定时任务入口）。"""
-        results = [self.__refresh_source(sid)
+        """按顺序抓取全部已启用数据源（定时任务入口，带 4 小时最小间隔保护）。"""
+        results = [self.__refresh_source(sid, force=False)
                    for sid, s in self.sources.items() if s.enabled]
         return self.__aggregate(results)
+
+    def __backfill_ratings(self, rates: Dict[str, str]) -> None:
+        """把 /rating 查到的豆瓣评分回写进各源的身份缓存与快照条目。
+
+        匹配规则：/rating 的键是 App 发来的标题（中文名优先），所以条目的
+        ``title`` 与 ``title_cn`` 任一命中即可；只补空缺，不覆盖快照里已有的分。
+        写完身份缓存即可 —— 两个源组装 /rank 时都会从身份缓存把
+        ``vote_average`` 合并进条目，无需动快照结构。
+        """
+        if not rates:
+            return
+        keys = set(rates.keys())
+        for source_id in (SOURCE_MAOYAN, SOURCE_NETFLIX):
+            try:
+                cache = self.get_data(f"{source_id}_identity_cache")
+                if not isinstance(cache, dict):
+                    continue
+                dirty = False
+                for cache_key, entry in cache.items():
+                    if not isinstance(entry, dict) or entry.get("vote_average"):
+                        continue
+                    # maoyan 键 = 标题；netflix 键 = "kind|标题"
+                    title = str(cache_key).split("|", 1)[-1]
+                    if title in keys or str(entry.get("title_cn") or "") in keys:
+                        entry["vote_average"] = rates[
+                            title if title in keys else str(entry.get("title_cn"))]
+                        dirty = True
+                if dirty:
+                    self.save_data(f"{source_id}_identity_cache", cache)
+                    logger.info(f"评分回写 {source_id} 身份缓存")
+            except Exception as exc:
+                logger.warning(f"评分回写 {source_id} 失败：{exc}")
+            # 快照本体也要动：App 的 /rank 读的就是快照，只改身份缓存的话
+            # 要等下一轮抓取才生效，回写就白做了
+            try:
+                snapshot = self.get_data(f"{source_id}_snapshot")
+                if not isinstance(snapshot, dict) \
+                        or not isinstance(snapshot.get("boards"), list):
+                    continue
+                snap_dirty = False
+                for board in snapshot["boards"]:
+                    if not isinstance(board, dict):
+                        continue
+                    for item in board.get("items") or []:
+                        if not isinstance(item, dict) or item.get("vote_average"):
+                            continue
+                        t = str(item.get("title") or "")
+                        tc = str(item.get("title_cn") or "")
+                        if t in keys and rates[t]:
+                            item["vote_average"] = rates[t]
+                            snap_dirty = True
+                        elif tc in keys and rates[tc]:
+                            item["vote_average"] = rates[tc]
+                            snap_dirty = True
+                if snap_dirty:
+                    self.save_data(f"{source_id}_snapshot", snapshot)
+            except Exception as exc:
+                logger.warning(f"评分回写 {source_id} 快照失败：{exc}")
 
     @staticmethod
     def __aggregate(results: List[RankSourceRefresh]) -> RankRefreshResult:
@@ -614,19 +695,37 @@ class GlobalRankPro(_PluginBase):
                 continue
             prefer_tv = True if media_type.lower() in (
                 "电视剧", "tv", "show", "动漫", "anime") else None
+            # 秒级并发 memo：另一路（榜单补分 / 并发请求）几分钟内刚查过的直接用
+            memo = douban.recent_get(key)
+            if memo is not None:
+                if memo:
+                    rates[title] = memo
+                continue
             info = douban.lookup(
                 title, keywords=[title], year=year,
                 prefer_tv=prefer_tv, need_poster=False, need_rating=True)
             used += 1
-            cache[key] = {"vote_average": info.get("rate") or "",
-                          "rating_ts": now_ts,
-                          "rating_ver": douban.RATING_VER}
-            changed = True
-            if info.get("rate"):
-                rates[title] = info["rate"]
+            rate = str(info.get("rate") or "")
+            douban.recent_put(key, rate)
+            if rate or douban.miss_cacheable():
+                cache[key] = {"vote_average": rate,
+                              "rating_ts": now_ts,
+                              "rating_ver": douban.RATING_VER if rate else douban.MISS_RATING_VER}
+                changed = True
+            if rate:
+                rates[title] = rate
 
         if changed:
             self.save_data("douban_rating", cache)
+        if rates:
+            # 回写快照（v1.4.3 优化②）：App 进榜时对缺分条目查 /rating，查到的分
+            # 只进 douban_rating 的话，快照里的 vote_average 还是空，App 每次进榜
+            # 都要重问一遍。这里把结果同步进各源身份缓存与快照条目，下次 /rank
+            # 直接带分，App 端不再重复请求。
+            try:
+                self.__backfill_ratings(rates)
+            except Exception as exc:
+                logger.warning(f"评分回写快照失败（不影响本次返回）：{exc}")
         blocked = douban.is_blocked()
         logger.info(
             f"搜索评分：请求 {len(wanted[:40])} 条，缓存命中 {cached}，查豆瓣 {used}，"
