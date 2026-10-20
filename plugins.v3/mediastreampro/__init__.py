@@ -12,6 +12,17 @@ v1.3.0 起 **支持 STRM 播放**（网盘直链模式）：
 - STRM 目录两个来源：「跟随 TgtoDrive 插件」开关打开时，实时读 TgtoDriveSync 插件
   配置里的 ``strm_dir``（经宿主本机 API，结果缓存 60 秒）；关闭时用本插件自己填的路径。
 
+v1.5.0 起 **STRM 直链替客户端解析**（默认开）：
+
+- STRM 里的直链 host 常是容器名（如 ``TgtoDrive``），手机和 MoviePilot 容器都解析不了，
+  导致 302 给手机后手机 DNS 失败、播不了。现在默认由插件**先请求直链、跟随 302 跳转链**
+  （最多 ``MAX_STRM_HOPS`` 跳），拿到最终的公网 CDN 直链再 302 给手机 —— 这正是
+  Emby / Jellyfin 服务端在 NAS 上做的事，手机最终连的是公网 CDN（如
+  ``vip-download-cdn.123295.com``），内外网都能播、流量不过 NAS。
+- ``strm_resolve_host`` 配置项：STRM 直链里的 host 在容器内 ``getaddrinfo`` 失败时，
+  先替换成这个地址（如运行 TgtoDrive 的主机内网 IP ``10.0.0.4``）再请求。
+- ``strm_follow_redirect`` 开关：关掉则退回 v1.4.0 行为（直接 302 原始直链）。
+
 设计取向（都是刻意的）：
 
 - **放行目录实时读宿主「目录配置」**（``systemconfig["Directories"]``）：
@@ -110,6 +121,10 @@ STRM_FOLLOW_TTL = 60
 # 跟随模式的缓存（模块级，进程内共享）
 _strm_follow_cache = {"ts": 0.0, "dir": ""}
 _strm_follow_lock = threading.Lock()
+# 解析直链时最多跟随的 302 跳数（TgtoDrive→CDN→真实源，3 跳封顶）
+MAX_STRM_HOPS = 4
+# 解析直链时单跳请求超时（秒）
+STRM_RESOLVE_TIMEOUT = 6
 
 
 def parse_season_episode(filename: str) -> Optional[Tuple[Optional[int], int]]:
@@ -153,13 +168,14 @@ class MediaStreamPro(_PluginBase):
     plugin_name = "媒体流播放"
     # 插件描述
     plugin_desc = ("把已整理入库与下载目录里的视频按原始文件流式传给客户端播放（支持拖动进度）；"
-                   "支持 STRM 网盘直链播放（302 跳转，流量不过 NAS）。"
+                   "支持 STRM 网盘直链播放（插件替客户端解析容器名、跟随跳转到最终 CDN，"
+                   "302 跳转后流量不过 NAS）。"
                    "自动跟随宿主「目录配置」里的媒体库与下载路径，STRM 目录可跟随 TgtoDrive 插件。")
     # 插件图标
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/mediastream.png")
     # 插件版本
-    plugin_version = "1.4.0"
+    plugin_version = "1.5.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -176,6 +192,10 @@ class MediaStreamPro(_PluginBase):
         # STRM 配置（init_plugin 会覆盖；给默认值防请求先于初始化）
         self._strm_dir: str = ""
         self._strm_follow: bool = False
+        # STRM 直链里 host 是容器/手机都解析不了的名字（如 TgtoDrive）时替换成的地址
+        self._strm_resolve_host: str = ""
+        # 是否由插件先走完 302 跳转链、把最终 CDN 直链给手机（默认开）
+        self._strm_follow_redirect: bool = True
 
     # ---------- 生命周期 ----------
 
@@ -190,6 +210,9 @@ class MediaStreamPro(_PluginBase):
         config = config or {}
         self._strm_dir = str(config.get("strm_dir") or "").strip()
         self._strm_follow = bool(config.get("strm_follow_tgtodrive"))
+        self._strm_resolve_host = str(config.get("strm_resolve_host") or "").strip()
+        # strm_follow_redirect 默认开：未在配置里显式关闭时视为 True
+        self._strm_follow_redirect = config.get("strm_follow_redirect", True) is not False
         roots = self.media_roots()
         strm_dir = self.effective_strm_dir()
         if roots:
@@ -258,6 +281,47 @@ class MediaStreamPro(_PluginBase):
                                                 "model": "strm_dir",
                                                 "label": "STRM 目录（容器内路径，可选）",
                                                 "placeholder": "例如 /media-strm（未开跟随开关时生效）",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12},
+                                    "content": [
+                                        {
+                                            "component": "VSwitch",
+                                            "props": {
+                                                "model": "strm_follow_redirect",
+                                                "label": "替客户端解析网盘直链",
+                                                "hint": "默认开。开启后由插件先请求 STRM 里的直链、跟随跳转拿到最终 CDN 地址再 302 给客户端——手机不用解析容器名（如 TgtoDrive），内外网都能播",
+                                                "persistent-hint": True,
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12},
+                                    "content": [
+                                        {
+                                            "component": "VTextField",
+                                            "props": {
+                                                "model": "strm_resolve_host",
+                                                "label": "直链主机名替换（可选）",
+                                                "placeholder": "如 TgtoDrive 在容器里解析不了，填 10.0.0.4 会把直链里的 host 换成它",
+                                                "hint": "STRM 直链里写的是容器名 TgtoDrive，手机与 MoviePilot 容器都解析不了。填运行 TgtoDrive 的主机内网 IP（如 10.0.0.4），插件请求直链时会先把它替换掉，再跟随跳转拿到最终 CDN 地址。",
+                                                "persistent-hint": True,
                                             },
                                         }
                                     ],
@@ -535,6 +599,11 @@ class MediaStreamPro(_PluginBase):
         刻意选 302 而不是代理转发：网盘直链的流量直接走 播放器 ↔ 网盘 CDN，
         不占 NAS 带宽，Range / 拖动进度由播放器对直链续传。TgtoDrive 生成的
         直链本来就是给 Emby / Jellyfin 直接 GET 的，无需带任何特殊头。
+
+        v1.5.0 起：STRM 里的直链 host 常是容器名（如 ``TgtoDrive``），手机和
+        MoviePilot 容器都解析不了。默认由插件**先走完跳转链**（经可替换的 host
+        请求第一跳、跟随 302），拿到最终的公网 CDN 直链再 302 给手机 —— 这正是
+        Emby 服务端在 NAS 上做的事。若关闭「替客户端解析」，则退化为直接 302 原始直链。
         """
         url = self._read_strm_url(strm_file)
         if not url:
@@ -542,8 +611,103 @@ class MediaStreamPro(_PluginBase):
             return JSONResponse(
                 {"success": False, "message": "STRM 文件无效"}, status_code=404
             )
+
+        if self._strm_follow_redirect:
+            resolved = self._resolve_strm_url(url)
+            if resolved:
+                logger.info(
+                    f"媒体流播放 STRM 直链已解析：{os.path.basename(strm_file)}"
+                )
+                return RedirectResponse(resolved, status_code=302)
+            # 解析失败不致命：退回原始直链（跟老版本一致），至少内网/本机还能用
+            logger.warning(f"媒体流播放 STRM 直链解析失败，退回原始直链：{url[:80]}")
         logger.info(f"媒体流播放 STRM 跳转：{os.path.basename(strm_file)}")
         return RedirectResponse(url, status_code=302)
+
+    def _resolve_strm_url(self, url: str) -> Optional[str]:
+        """把 STRM 直链走完 302 跳转链，返回最终可直连的 CDN 地址。
+
+        - ``strm_resolve_host`` 非空时，先把直链里的 host（仅 hostname 部分）替换成该值：
+          TgtoDrive 这类容器名在 MoviePilot 容器里 ``getaddrinfo`` 都失败，必须换成
+          可达的地址（如运行 TgtoDrive 的主机内网 IP ``10.0.0.4``）。
+        - 然后逐跳请求（``allow_redirects=False``），最多 ``MAX_STRM_HOPS`` 次，
+          每次读 ``Location`` 继续跟，**直到没有 Location（走到链尾）才停**。
+          TgtoDrive→CDN→真实源 通常 2~3 跳，链尾就是公网 CDN 直链。
+        - 全程 HEAD 优先、失败退回 GET（只读头，不下载视频体），单跳超时
+          ``STRM_RESOLVE_TIMEOUT`` 秒，整体异常兜底返回 None（调用方退回原始直链）。
+        """
+        try:
+            from urllib.parse import urlsplit, urlunsplit, urljoin
+
+            current = url
+
+            # 替换 host：只动 hostname，保留协议/端口/路径/查询
+            if self._strm_resolve_host:
+                parts = urlsplit(current)
+                host = parts.hostname or ""
+                if host and self._is_container_host(host):
+                    # 解析不了 → 换成配置的地址（可为纯 IP 或 IP:端口）
+                    new_netloc = self._strm_resolve_host
+                    if ":" in new_netloc and not new_netloc.startswith("["):
+                        host_part, _, port_part = new_netloc.rpartition(":")
+                        if host_part and port_part.isdigit():
+                            netloc = f"{host_part}:{port_part}"
+                        else:
+                            netloc = new_netloc
+                    else:
+                        netloc = new_netloc + (
+                            f":{parts.port}" if parts.port else ""
+                        )
+                    current = urlunsplit(
+                        (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
+                    )
+
+            # 逐跳跟随，直到没有 Location（链尾）
+            for _ in range(MAX_STRM_HOPS):
+                resp = requests.request(
+                    "HEAD",
+                    current,
+                    allow_redirects=False,
+                    timeout=STRM_RESOLVE_TIMEOUT,
+                    headers={"User-Agent": "MediaStreamPro/1.5"},
+                )
+                # HEAD 不被支持时退回 GET（也只取头，stream=True 不读体）
+                if resp.status_code in (405, 501, 403):
+                    resp.close()
+                    resp = requests.request(
+                        "GET",
+                        current,
+                        allow_redirects=False,
+                        timeout=STRM_RESOLVE_TIMEOUT,
+                        stream=True,
+                        headers={"User-Agent": "MediaStreamPro/1.5"},
+                    )
+                location = resp.headers.get("Location")
+                resp.close()
+                if not location:
+                    # 没有下一跳，当前地址就是终点（可能是 CDN 直链或真实视频源）
+                    return current
+                current = urljoin(current, location)
+
+            # 跳数用尽，返回最后拿到的地址
+            return current
+        except Exception as error:
+            logger.warning(f"媒体流播放解析直链异常：{error}")
+            return None
+
+    @staticmethod
+    def _is_container_host(host: str) -> bool:
+        """粗判 host 是不是「容器名/内网主机名」这类需要替换的 host。
+
+        容器名（TgtoDrive）、mDNS 名（*.local）在容器里解析不了，需要替换；
+        公网域名、IP 不需要。判定：无点号的裸主机名、或 .local 结尾 → 容器名。
+        """
+        if not host:
+            return False
+        if host.endswith(".local"):
+            return True
+        # 无点号的裸主机名（TgtoDrive、mybridge 别名）→ 容器名
+        return "." not in host and ":" not in host
 
     # ---------- STRM ----------
 
