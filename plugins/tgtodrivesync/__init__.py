@@ -23,6 +23,13 @@ TgtoDrive 侧依赖：
     批量整理时防抖被反复重置而长时间不触发；队列与每次刷新的文件、受影响媒体库会在
     插件详情页、执行历史与通知中列出。
 
+STRM 目录（智能等待）：
+    TgtoDrive 无完成回调，默认只能「触发后固定等待 N 秒」。若把宿主的 STRM 生成目录
+    挂载进 MoviePilot 容器（如 -v /vol1/1000/media-strm:/media-strm），并把容器内路径
+    填到「STRM 目录」，插件会改为**轮询检查**：按本次入库文件名在目录树里找对应的
+    .strm 文件，全部找到即提前刷新；到「等待秒数」仍未找齐则按最佳努力刷新并注明。
+    未配置该目录时维持原固定等待。
+
 刷新范围判定：
     插件**自己**用实例的 get_librarys() + 路径前缀匹配来判定本次会命中哪些媒体库，
     命中才走单库刷新；否则整库刷新并注明原因（未匹配到 / 无法获取列表 / 不支持单库），
@@ -80,6 +87,9 @@ TRIGGER_RUNNING_HINTS = ("正在执行", "执行中", "稍后再试", "处理中
 # 合并队列最大长度（超出时丢弃最旧的，避免极端情况下无限增长）
 QUEUE_MAX = 200
 
+# 配置 STRM 目录后的轮询间隔（秒）
+STRM_POLL_INTERVAL = 5
+
 
 def _load_mediaserver_helper():
     """按 MoviePilot 版本加载 MediaServerHelper（v2 在 app.helper，v3 在 app.application）。"""
@@ -113,7 +123,7 @@ class TgtoDriveSync(_PluginBase):
     # 插件图标（使用官方图标库中的通用刷新图标）
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/refresh2.png"
     # 插件版本
-    plugin_version = "1.7.2"
+    plugin_version = "1.8.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -139,6 +149,9 @@ class TgtoDriveSync(_PluginBase):
     # ---- 媒体库刷新 ----
     _server_names: str = ""
     _max_wait_seconds: int = 300
+
+    # ---- STRM 目录（智能等待） ----
+    _strm_dir: str = ""
 
     # ---- 运行时状态 ----
     _executor: Optional[ThreadPoolExecutor] = None
@@ -171,6 +184,7 @@ class TgtoDriveSync(_PluginBase):
         self._notify = True
         self._server_names = ""
         self._max_wait_seconds = 300
+        self._strm_dir = ""
 
         if config:
             self._enabled = bool(config.get("enabled"))
@@ -182,6 +196,7 @@ class TgtoDriveSync(_PluginBase):
             self._notify = bool(config.get("notify", True))
             self._server_names = str(config.get("server_names") or "").strip()
             self._max_wait_seconds = self._safe_int(config.get("max_wait_seconds"), 300)
+            self._strm_dir = str(config.get("strm_dir") or "").strip()
 
         if self._source not in STRM_SOURCES:
             self._source = "123云盘"
@@ -192,10 +207,16 @@ class TgtoDriveSync(_PluginBase):
             logger.info(
                 f"TgtoDrive STRM 同步插件已启用：地址={self._tgtodrive_url or '(未配置)'}，"
                 f"来源={self._source}，等待={self._wait_seconds}s，"
+                f"STRM目录={self._strm_dir or '(未配置，固定等待)'}，"
                 f"刷新范围={self._server_names or '全部媒体服务器'}"
             )
             if not self._tgtodrive_url or not self._openapi_token:
                 logger.warning("TgtoDrive STRM 同步插件：TgtoDrive 地址或 OpenAPI Token 未配置，触发时将失败")
+            if self._strm_dir and not os.path.isdir(self._strm_dir):
+                logger.warning(
+                    f"TgtoDrive STRM 同步插件：STRM 目录 {self._strm_dir} 当前不存在或不可读，"
+                    f"请确认已挂载进容器；触发时将退回固定等待"
+                )
 
     @staticmethod
     def _safe_int(value: Any, default: int) -> int:
@@ -328,7 +349,7 @@ class TgtoDriveSync(_PluginBase):
                                 "content": [
                                     {"component": "VTextField",
                                      "props": {"model": "wait_seconds",
-                                               "label": "触发后等待秒数（等待 STRM 生成完成）",
+                                               "label": "触发后等待秒数（配置 STRM 目录后=轮询超时上限）",
                                                "placeholder": "60"}}
                                 ],
                             },
@@ -352,6 +373,44 @@ class TgtoDriveSync(_PluginBase):
                                                "placeholder": "300"}}
                                 ],
                             },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {"component": "VTextField",
+                                     "props": {"model": "strm_dir",
+                                               "label": "STRM 目录（容器内路径，可选，填了可智能等待）",
+                                               "placeholder": "例如 /media-strm"}}
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {"component": "VAlert",
+                                     "props": {
+                                         "type": "info",
+                                         "variant": "tonal",
+                                         "text": (
+                                             "STRM 目录：把宿主的 STRM 生成目录挂载进 MoviePilot 容器并填容器内路径，"
+                                             "例如 -v /vol1/1000/media-strm:/media-strm 后填 /media-strm。"
+                                             "填写后插件在触发同步时会轮询该目录，按本次入库的文件名查找对应 .strm 文件，"
+                                             "全部生成立即刷新媒体库（不必干等）；到「等待秒数」仍未找齐则按最佳努力刷新并注明。"
+                                             "留空则维持「触发后等待秒数」的固定等待。"
+                                         ),
+                                     }}
+                                ],
+                            }
                         ],
                     },
                     {
@@ -425,6 +484,7 @@ class TgtoDriveSync(_PluginBase):
             "wait_seconds": 60,
             "debounce_seconds": 30,
             "max_wait_seconds": 300,
+            "strm_dir": "",
             "server_names": "",
         }
 
@@ -665,8 +725,10 @@ class TgtoDriveSync(_PluginBase):
             logger.info(f"TgtoDrive STRM 同步触发结果：{state} - {trigger_msg}")
 
             if state != "failed":
-                # 2. 等待 STRM 生成
-                self._sleep_wait()
+                # 2. 等待 STRM 生成（配置了 STRM 目录时轮询确认，否则固定等待）
+                wait_msg = self._wait_for_strm(items)
+                record["message"] += f"\nSTRM 等待：{wait_msg}"
+                logger.info(f"STRM 等待结果：{wait_msg}")
 
                 # 若首次被拒（同一来源已有任务在执行），等原任务结束后重试一次，
                 # 以确保本次入库的内容也被生成
@@ -675,7 +737,8 @@ class TgtoDriveSync(_PluginBase):
                     record["message"] += f"\n重试触发：{retry_msg}"
                     logger.info(f"STRM 同步重试触发：{retry_state} - {retry_msg}")
                     if retry_state == "ok":
-                        self._sleep_wait()
+                        retry_wait = self._wait_for_strm(items)
+                        record["message"] += f"\n重试等待：{retry_wait}"
                     elif retry_state == "running":
                         record["message"] += "\n（仍被占用，按最佳努力刷新）"
 
@@ -712,10 +775,110 @@ class TgtoDriveSync(_PluginBase):
         return "成功" if record.get("trigger_ok") else "失败"
 
     def _sleep_wait(self):
-        """等待 STRM 生成（可配置秒数）。"""
+        """固定等待 STRM 生成（可配置秒数）。"""
         if self._wait_seconds > 0:
             logger.info(f"等待 {self._wait_seconds} 秒以便 TgtoDrive 完成 STRM 生成...")
             time.sleep(self._wait_seconds)
+
+    @staticmethod
+    def _strm_targets(items: List[dict]) -> Tuple[set, List[str]]:
+        """从待刷新条目推导要在 STRM 目录里确认的目标。
+
+        :return: (期望的 .strm 文件名集合, 期望的目录列表)。
+                 文件条目按「原文件名 + .strm」确认；目录条目在其子树内出现任意
+                 .strm 即算生成。两类都取不到时为空。
+        """
+        files: set = set()
+        dirs: List[str] = []
+        for item in items or []:
+            path = str(item.get("target_path") or "").strip()
+            if not path:
+                continue
+            path = path.replace("\\", "/").rstrip("/")
+            try:
+                is_dir = os.path.isdir(path)
+            except OSError:
+                is_dir = False
+            if is_dir:
+                if path not in dirs:
+                    dirs.append(path)
+            else:
+                base = os.path.basename(path)
+                if base:
+                    files.add(base + ".strm")
+        return files, dirs
+
+    @staticmethod
+    def _dir_matches(strm_dirpath: str, local_dir: str) -> bool:
+        """判断 STRM 树里的目录是否对应本地入库目录（按结构镜像做启发式匹配）。
+
+        要求**末两级目录名完全一致**才算命中（如 `电影/阿凡达 (2009)`、
+        `剧名/Season 1`），避免「Season 1」这类高频同名目录误判。
+        """
+        s = str(strm_dirpath).replace("\\", "/").rstrip("/").split("/")
+        d = str(local_dir).replace("\\", "/").rstrip("/").split("/")
+        return len(s) >= 2 and len(d) >= 2 and s[-2:] == d[-2:]
+
+    @staticmethod
+    def _scan_strm_targets(root: str, files: set, dirs: List[str]) -> Tuple[set, set]:
+        """在 STRM 目录树里扫一遍，返回 (已找到的文件名, 已命中的目录)。"""
+        found_files: set = set()
+        found_dirs: set = set()
+        for dirpath, _, filenames in os.walk(root):
+            if dirs and any(f.endswith(".strm") for f in filenames):
+                for d in dirs:
+                    if d not in found_dirs and TgtoDriveSync._dir_matches(dirpath, d):
+                        found_dirs.add(d)
+            if files:
+                hit = files.intersection(filenames)
+                if hit:
+                    found_files.update(hit)
+            if len(found_files) == len(files) and len(found_dirs) == len(dirs):
+                break
+        return found_files, found_dirs
+
+    def _wait_for_strm(self, items: List[dict]) -> str:
+        """等待 STRM 生成。
+
+        配置了「STRM 目录」且容器内可读时，按本次入库文件名轮询目录树，
+        全部找到即提前返回；到「等待秒数」仍未找齐则超时返回（最佳努力）。
+        未配置 / 目录不可读 / 无可核对目标时退回固定等待。
+
+        :return: 说明文本（写入执行记录与通知）。
+        """
+        if not self._strm_dir:
+            self._sleep_wait()
+            return f"未配置 STRM 目录，固定等待 {self._wait_seconds} 秒"
+
+        files, dirs = self._strm_targets(items)
+        if not files and not dirs:
+            self._sleep_wait()
+            return f"无本地路径可核对，固定等待 {self._wait_seconds} 秒"
+
+        if not os.path.isdir(self._strm_dir):
+            logger.warning(f"STRM 目录不存在或不可读：{self._strm_dir}，退回固定等待")
+            self._sleep_wait()
+            return f"STRM 目录不可读（{self._strm_dir}），固定等待 {self._wait_seconds} 秒"
+
+        total = len(files) + len(dirs)
+        deadline = time.time() + max(self._wait_seconds, 0)
+        polls = 0
+        while True:
+            polls += 1
+            found_files, found_dirs = self._scan_strm_targets(self._strm_dir, files, dirs)
+            files -= found_files
+            dirs = [d for d in dirs if d not in found_dirs]
+            if not files and not dirs:
+                return f"STRM 已全部生成（核对 {total} 个目标，轮询 {polls} 次），提前刷新"
+            if deadline <= 0 or time.time() >= deadline:
+                break
+            time.sleep(min(STRM_POLL_INTERVAL, max(1, int(deadline - time.time()))))
+
+        missing = sorted(files)[:5] + [f"{d}/（目录内无 .strm）" for d in sorted(dirs)[:5]]
+        return (
+            f"等待 {self._wait_seconds} 秒超时，{total} 个目标中仍有 "
+            f"{len(files) + len(dirs)} 个未生成：{'、'.join(missing)}，按最佳努力刷新"
+        )
 
     def _trigger_strm_sync(self) -> Tuple[str, str]:
         """调用 TgtoDrive OpenAPI 触发 STRM 同步。

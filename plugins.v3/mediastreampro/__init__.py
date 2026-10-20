@@ -3,40 +3,52 @@
 给客户端一条能直接喂播放器的视频流：``GET /stream?path=<媒体库内绝对路径>``，
 返回原始文件（``FileResponse``，Starlette 自带 Range 支持，可拖动进度）。
 
+v1.3.0 起 **支持 STRM 播放**（网盘直链模式）：
+
+- 请求路径以 ``.strm`` 结尾 → 读出文件里的网盘直链（http/https），**302 跳转**给播放器，
+  流量不过 NAS（Range / 拖动进度由播放器对网盘直链直接续传）；
+- 请求的是视频文件但**本地不存在**、且配置了「STRM 目录」→ 去 STRM 目录树里找
+  同名 ``<文件名>.strm``（TgtoDrive 生成的 STRM 与媒体文件同名），找到即按上面跳转；
+- STRM 目录两个来源：「跟随 TgtoDrive 插件」开关打开时，实时读 TgtoDriveSync 插件
+  配置里的 ``strm_dir``（经宿主本机 API，结果缓存 60 秒）；关闭时用本插件自己填的路径。
+
 设计取向（都是刻意的）：
 
-- **装好即用，没有开关**：本插件只做一件事，不需要配置项；``get_state()`` 恒为 True，
-  配置页只放一张说明卡。
 - **放行目录实时读宿主「目录配置」**（``systemconfig["Directories"]``）：
   **媒体库路径（library_path）+ 下载路径（download_path）都放行**。v1.1.0 只放媒体库，
   v1.2.0 起客户端要在「下载完成」页签直接播还没整理（甚至整理失败）的文件，下载目录一并放行。
   这样宿主里换了路径、加了新库，插件不用重装、不用重启、也不用再配一遍。
+  v1.3.0 起 STRM 目录（生效值）也加入放行范围，``.strm`` 文件本身可以直接请求。
 - **认证走宿主**：``auth="bear"``（JWT / API Key / token），插件自己不做任何 token 校验，
   也不接受把凭证明文拼进 URL。客户端用 ``Authorization: Bearer`` 头。
 - **路径白名单**：``realpath`` 归一后必须落在某个媒体库根目录内（按目录分隔符比较，
-  挡住 ``/DSM/media2`` 这类前缀串攻击），并且扩展名必须在视频白名单里。
+  挡住 ``/DSM/media2`` 这类前缀串攻击），并且扩展名必须是视频白名单或 ``.strm``。
 
-三个对外接口：
+四个对外接口：
 
-- ``GET /stream?path=...``：视频文件流（Range / 拖动进度）；
+- ``GET /stream?path=...``：视频文件流（Range / 拖动进度）；STRM → 302 网盘直链；
 - ``HEAD /stream?path=...``：只回头（文件长度、类型、是否支持 Range），供外部播放器
   或下载器先探一次再决定怎么播 —— 老版本没注册 HEAD，宿主路由直接 405；
 - ``GET /season?path=...``：**同一季的集列表**。客户端只靠宿主的整理记录拼不出完整选集
   （`/history/transfer` 只留得下最近几天，且逐集下载时每集是独立种子、没有共同的
   ``download_hash``），所以这里直接扫媒体库里这个文件所在的目录，按「剧名主干 + 季号」认亲。
   不递归、不跨目录：宿主整理规则默认就是「剧名/Season 2/」这种结构，同一季必定同目录。
-- ``GET /ping``：可用性探测 + 当前放行的媒体库目录（App 用它决定是否显示播放按钮）；
+  STRM 文件不做同季扫描（网盘直链没有目录结构可扫），只回它自己。
+- ``GET /ping``：可用性探测 + 当前放行的媒体库目录与生效的 STRM 目录
+  （App 用它决定是否显示播放按钮）；
 - ``GET /downloads``：递归扫下载目录里的视频文件清单（path/name/size/mtime），
   供客户端把「下载完成」历史记录按种子名匹配到磁盘上的真实文件 —— 文件被删了就匹配不到，
   客户端据此把 ▶ 换成「已删除」；
-- 无表单配置项。
 """
 import os
 import re
+import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
 from fastapi import Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
 from app.plugins import _PluginBase
 from app.sdk.logging import logger
@@ -49,6 +61,9 @@ VIDEO_EXTENSIONS = {
     ".avi", ".flv", ".wmv", ".rmvb", ".rm", ".mpg", ".mpeg",
     ".3gp", ".ogv",
 }
+
+# STRM 文件：不是视频容器，是「指向网盘直链的文本」—— /stream 读出直链后 302 跳转
+STRM_EXTENSION = ".strm"
 
 # 扩展名 → MIME。ExoPlayer 主要靠嗅探，但 Content-Type 给对能让部分客户端少走弯路
 MEDIA_TYPES = {
@@ -88,6 +103,13 @@ MAX_SEASON_FILES = 500
 MAX_SCAN_DEPTH = 4
 # 清单条数上限：下载目录里全是视频的场景（电影库混用下载目录）也就几百个，防异常目录树拖死接口
 MAX_SCAN_FILES = 2000
+
+# ---------- STRM（v1.3.0） ----------
+# 「跟随 TgtoDrive 插件」读到的 strm_dir 缓存秒数：避免每次播放都打一遍宿主本机 API
+STRM_FOLLOW_TTL = 60
+# 跟随模式的缓存（模块级，进程内共享）
+_strm_follow_cache = {"ts": 0.0, "dir": ""}
+_strm_follow_lock = threading.Lock()
 
 
 def parse_season_episode(filename: str) -> Optional[Tuple[Optional[int], int]]:
@@ -130,13 +152,14 @@ class MediaStreamPro(_PluginBase):
     # 插件名称
     plugin_name = "媒体流播放"
     # 插件描述
-    plugin_desc = ("把已整理入库与下载目录里的视频按原始文件流式传给客户端播放（支持拖动进度）。"
-                   "自动跟随宿主「目录配置」里的媒体库与下载路径，装好即用，无需配置。")
+    plugin_desc = ("把已整理入库与下载目录里的视频按原始文件流式传给客户端播放（支持拖动进度）；"
+                   "支持 STRM 网盘直链播放（302 跳转，流量不过 NAS）。"
+                   "自动跟随宿主「目录配置」里的媒体库与下载路径，STRM 目录可跟随 TgtoDrive 插件。")
     # 插件图标
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/mediastream.png")
     # 插件版本
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -150,21 +173,34 @@ class MediaStreamPro(_PluginBase):
 
     def __init__(self):
         super().__init__()
+        # STRM 配置（init_plugin 会覆盖；给默认值防请求先于初始化）
+        self._strm_dir: str = ""
+        self._strm_follow: bool = False
 
     # ---------- 生命周期 ----------
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """无配置项：功能常开。
+        """读 STRM 配置；其余功能无开关常开。
 
-        这里刻意不读 ``config["enabled"]`` —— 插件没有开关，安装即生效。
-        媒体库根目录也不缓存（宿主随时可能在「目录配置」里改路径），见 [media_roots]。
+        媒体库根目录不缓存（宿主随时可能在「目录配置」里改路径），见 [media_roots]。
+        STRM 目录的「生效值」每次请求实时算（跟随模式要拿 TgtoDriveSync 的最新配置），
+        这里只保存本插件自己的配置项。
         """
         self._enabled = True
+        config = config or {}
+        self._strm_dir = str(config.get("strm_dir") or "").strip()
+        self._strm_follow = bool(config.get("strm_follow_tgtodrive"))
         roots = self.media_roots()
+        strm_dir = self.effective_strm_dir()
         if roots:
             logger.info(f"媒体流播放已就绪，放行目录：{'、'.join(roots)}")
         else:
             logger.warning("媒体流播放未读到任何媒体库目录，请在宿主「设置 → 目录」里配置媒体库路径")
+        if strm_dir:
+            source = "TgtoDrive 插件（跟随）" if self._strm_follow and not self._strm_dir else "本插件配置"
+            logger.info(f"媒体流播放 STRM 目录已启用：{strm_dir}（{source}）")
+        else:
+            logger.info("媒体流播放未配置 STRM 目录，仅支持本地文件播放")
 
     def get_state(self) -> bool:
         """恒为运行中：本插件没有开关。"""
@@ -182,7 +218,7 @@ class MediaStreamPro(_PluginBase):
         """
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
-        """配置页只有两件事：App 推荐卡 + 「装好即用」说明，没有可配项。"""
+        """配置页：App 推荐卡 + STRM 配置 + 说明卡。"""
         return (
             [
                 promo_card(),
@@ -197,32 +233,76 @@ class MediaStreamPro(_PluginBase):
                                     "props": {"cols": 12},
                                     "content": [
                                         {
+                                            "component": "VSwitch",
+                                            "props": {
+                                                "model": "strm_follow_tgtodrive",
+                                                "label": "跟随 TgtoDrive 插件的 STRM 目录",
+                                                "hint": "开启后自动使用「TgtoDrive STRM 同步」插件里配置的 STRM 目录，下方路径可不填",
+                                                "persistent-hint": True,
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12},
+                                    "content": [
+                                        {
+                                            "component": "VTextField",
+                                            "props": {
+                                                "model": "strm_dir",
+                                                "label": "STRM 目录（容器内路径，可选）",
+                                                "placeholder": "例如 /media-strm（未开跟随开关时生效）",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12},
+                                    "content": [
+                                        {
                                             "component": "VAlert",
                                             "props": {
                                                 "type": "info",
                                                 "variant": "tonal",
                                                 "density": "comfortable",
                                                 "class": "mb-3",
-                                                "title": "装好即用，无需配置",
-                                                "text": ("本插件把已整理入库的视频按原始文件流式转发给客户端，"
-                                                         "支持拖动进度。放行的目录自动取自宿主"
-                                                         "「设置 → 目录」里的媒体库路径，"
-                                                         "改了目录即刻生效，不用重装或重启。"),
+                                                "title": "放行目录自动跟随宿主，STRM 可选",
+                                                "text": ("本插件把已整理入库与下载目录里的视频按原始文件流式转发给客户端，"
+                                                         "支持拖动进度。放行目录自动取自宿主「设置 → 目录」里的媒体库与下载路径，"
+                                                         "改了即刻生效。配置 STRM 目录（或开启跟随 TgtoDrive 插件）后，"
+                                                         "整理记录里的 STRM 影片也能播：插件读出网盘直链后 302 跳转，"
+                                                         "流量不过 NAS。"),
                                             },
                                         }
                                     ],
                                 }
                             ],
-                        }
+                        },
                     ],
-                }
+                },
             ],
-            {},
+            {
+                "strm_follow_tgtodrive": False,
+                "strm_dir": "",
+            },
         )
 
     def get_page(self) -> Optional[List[dict]]:
-        """详情页：App 推荐卡 + 当前放行的媒体库目录与用法。"""
+        """详情页：App 推荐卡 + 当前放行的媒体库目录、STRM 状态与用法。"""
         roots = self.media_roots()
+        strm_dir = self.effective_strm_dir()
         rows = [
             {
                 "component": "VListItem",
@@ -246,6 +326,20 @@ class MediaStreamPro(_PluginBase):
                 },
             }
         ]
+        rows.append(
+            {
+                "component": "VListItem",
+                "props": {"density": "compact"},
+                "content": [
+                    {
+                        "component": "VListItemTitle",
+                        "props": {"class": "text-body-2 text-medium-emphasis"},
+                        "text": f"STRM：{strm_dir or '未配置（不支持 STRM 播放）'}"
+                                + ("（跟随 TgtoDrive 插件）" if strm_dir and self._strm_follow else ""),
+                    }
+                ],
+            }
+        )
 
         return [
             promo_card(),
@@ -296,12 +390,13 @@ class MediaStreamPro(_PluginBase):
                                     {
                                         "component": "VCardText",
                                         "props": {"class": "text-body-2 text-medium-emphasis"},
-                                        "text": ("GET /stream?path=<媒体文件绝对路径>"
+                                                "text": ("GET /stream?path=<媒体文件绝对路径>"
                                                  "（需在请求头带 Authorization: Bearer <token>，"
-                                                 "返回支持 Range 的文件流；HEAD 只回头不回文件体）"
+                                                 "返回支持 Range 的文件流；STRM 文件或配置了 STRM 目录时的缺失文件，"
+                                                 "读出网盘直链后 302 跳转；HEAD 只回头不回文件体）"
                                                  " ｜ GET /season?path=<媒体文件绝对路径>"
                                                  "（返回同一季还有哪些集，供客户端做选集）"
-                                                 " —— 两者都放行媒体库与下载目录（宿主「设置 → 目录」）。"),
+                                                 " —— 两者都放行媒体库与下载目录（宿主「设置 → 目录」）与 STRM 目录。"),
                                     },
                                 ],
                             }
@@ -367,11 +462,12 @@ class MediaStreamPro(_PluginBase):
             "data": {
                 "version": self.plugin_version,
                 "roots": self.media_roots(),
+                "strm_dir": self.effective_strm_dir(),
             },
         }
 
     def stream(self, request: Request, path: str = "") -> Any:
-        """返回视频文件流（Range 由 Starlette 的 FileResponse 处理）。
+        """返回视频文件流（Range 由 Starlette 的 FileResponse 处理）；STRM → 302 网盘直链。
 
         ``path`` 是普通标量默认参数 → FastAPI 当成查询参数，不需要额外声明。
         ``request`` 只用来区分 GET / HEAD：HEAD 自己构造一个只有响应头的 200，
@@ -385,10 +481,20 @@ class MediaStreamPro(_PluginBase):
             return JSONResponse(
                 {"success": False, "message": "路径不在可播放范围内"}, status_code=403
             )
+
+        # STRM：请求的就是 .strm 文件 → 读出直链 302 跳转
+        if target.lower().endswith(STRM_EXTENSION):
+            return self._stream_strm(request, target)
+
+        # 视频文件本地不存在 + 配了 STRM 目录 → 去 STRM 树里找同名 .strm
         if not os.path.isfile(target):
+            strm_file = self._find_strm_for(target)
+            if strm_file:
+                return self._stream_strm(request, strm_file)
             return JSONResponse(
                 {"success": False, "message": "文件不存在或已被移走"}, status_code=404
             )
+
         ext = os.path.splitext(target)[1].lower()
         media_type = MEDIA_TYPES.get(ext, "application/octet-stream")
         headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-store"}
@@ -416,6 +522,105 @@ class MediaStreamPro(_PluginBase):
             headers=headers,
         )
 
+    def _stream_strm(self, request: Request, strm_file: str) -> Any:
+        """STRM 播放：读出网盘直链后 302 跳转（GET / HEAD 同样处理）。
+
+        刻意选 302 而不是代理转发：网盘直链的流量直接走 播放器 ↔ 网盘 CDN，
+        不占 NAS 带宽，Range / 拖动进度由播放器对直链续传。TgtoDrive 生成的
+        直链本来就是给 Emby / Jellyfin 直接 GET 的，无需带任何特殊头。
+        """
+        url = self._read_strm_url(strm_file)
+        if not url:
+            logger.warning(f"媒体流播放 STRM 无效（读不出直链）：{strm_file}")
+            return JSONResponse(
+                {"success": False, "message": "STRM 文件无效"}, status_code=404
+            )
+        logger.info(f"媒体流播放 STRM 跳转：{os.path.basename(strm_file)}")
+        return RedirectResponse(url, status_code=302)
+
+    # ---------- STRM ----------
+
+    def effective_strm_dir(self) -> str:
+        """生效的 STRM 目录：跟随模式优先取 TgtoDriveSync 的配置，取不到退回本插件填写值。"""
+        if self._strm_follow:
+            followed = self._tgtodrive_strm_dir()
+            if followed:
+                return followed
+        return self._strm_dir
+
+    def _tgtodrive_strm_dir(self) -> str:
+        """读「TgtoDrive STRM 同步」插件配置里的 strm_dir（宿主本机 API，缓存 60 秒）。
+
+        为什么走本机 API 而不是直接翻宿主存储：插件配置的落盘位置/键名属于宿主内部
+        实现，跨版本不稳；``GET /api/v1/plugin/{id}`` 是宿主对外契约，v2/v3 一致。
+        apikey 从宿主 settings 读，不落日志不进配置。
+        """
+        with _strm_follow_lock:
+            cached = _strm_follow_cache
+            if cached["dir"] and time.time() - cached["ts"] < STRM_FOLLOW_TTL:
+                return cached["dir"]
+        try:
+            from app.core.config import settings
+
+            # 容器内自调必须走 uvicorn 的监听口（settings.PORT，通常 3001），
+            # 不是 nginx 对外口（NGINX_PORT=3000）——实测宿主 env：PORT=3001
+            port = getattr(settings, "PORT", None) or 3001
+            token = getattr(settings, "API_TOKEN", "") or ""
+            resp = requests.get(
+                f"http://127.0.0.1:{port}/api/v1/plugin/TgtoDriveSync",
+                params={"apikey": token},
+                timeout=5,
+            )
+            data = (resp.json() or {}).get("data") or {}
+            strm_dir = str(data.get("strm_dir") or "").strip()
+        except Exception as error:
+            logger.warning(f"读取 TgtoDrive 插件 STRM 目录失败：{error}")
+            strm_dir = ""
+        if strm_dir:
+            with _strm_follow_lock:
+                _strm_follow_cache.update({"ts": time.time(), "dir": strm_dir})
+        return strm_dir
+
+    def _find_strm_for(self, target: str) -> Optional[str]:
+        """为本地缺失的媒体文件在 STRM 目录树里找同名 ``<文件名>.strm``。
+
+        TgtoDrive 生成的 STRM 与媒体文件同名（``阿凡达.mkv`` → ``阿凡达.strm``），
+        但目录结构镜像的是网盘而不是本地媒体库，所以先试同位置、再全树找一遍。
+        找不到返回 None（调用方维持 404）。
+        """
+        strm_dir = self.effective_strm_dir()
+        if not strm_dir or not os.path.isdir(strm_dir):
+            return None
+        want = os.path.splitext(os.path.basename(target))[0] + STRM_EXTENSION
+        # 快路径：STRM 树与请求路径同构时一步命中
+        direct = os.path.join(strm_dir, want)
+        if os.path.isfile(direct):
+            return direct
+        # 慢路径：整树扫一遍（只在播放时触发一次，量级可接受）
+        try:
+            for dirpath, _, filenames in os.walk(strm_dir):
+                if want in filenames:
+                    return os.path.join(dirpath, want)
+        except OSError as error:
+            logger.warning(f"扫描 STRM 目录失败：{error}")
+        return None
+
+    @staticmethod
+    def _read_strm_url(strm_file: str) -> Optional[str]:
+        """读 STRM 文件内容，返回第一条 http(s) 直链；注释行跳过，读不了/不是 URL 返回 None。"""
+        try:
+            with open(strm_file, "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.lower().startswith(("http://", "https://")):
+                        return line
+                    return None
+        except OSError as error:
+            logger.warning(f"媒体流播放读取 STRM 失败：{error}")
+        return None
+
     # ---------- 内部 ----------
 
     def season(self, path: str = "") -> Any:
@@ -434,6 +639,15 @@ class MediaStreamPro(_PluginBase):
                 {"success": False, "message": "路径不在可播放范围内"}, status_code=403
             )
         if not os.path.isfile(target):
+            # 本地文件缺失：若能在 STRM 目录里对上同名 .strm，说明是网盘直链模式，
+            # 没有「同季同目录」可扫 —— 只回它自己，客户端按单片/单集处理
+            if self._find_strm_for(target) or target.lower().endswith(STRM_EXTENSION):
+                parsed = parse_season_episode(target)
+                season_no, episode_no = parsed if parsed else (None, None)
+                return {
+                    "success": True,
+                    "data": {"season": season_no, "episodes": [self._episode_item(target, episode_no)]},
+                }
             return JSONResponse(
                 {"success": False, "message": "文件不存在或已被移走"}, status_code=404
             )
@@ -625,15 +839,26 @@ class MediaStreamPro(_PluginBase):
         return roots
 
     def resolve(self, raw_path: str) -> Optional[str]:
-        """把请求路径归一成可播放的绝对路径；不在白名单内返回 None。"""
+        """把请求路径归一成可播放的绝对路径；不在白名单内返回 None。
+
+        v1.3.0 起同时放行 ``.strm`` 文件（读出直链后跳转），并把生效的 STRM 目录
+        加入白名单 —— STRM 树不一定挂在宿主「目录配置」的媒体库/下载路径下面。
+        """
         raw = (raw_path or "").strip()
         if not raw or "\x00" in raw or not os.path.isabs(raw):
             return None
         # realpath 会消掉 ``..``、重复分隔符与符号链接，之后的前缀比较才有意义
         target = os.path.realpath(raw)
-        if os.path.splitext(target)[1].lower() not in VIDEO_EXTENSIONS:
+        ext = os.path.splitext(target)[1].lower()
+        if ext != STRM_EXTENSION and ext not in VIDEO_EXTENSIONS:
             return None
-        for root in self.play_roots():
+        roots = self.play_roots()
+        strm_dir = self.effective_strm_dir()
+        if strm_dir:
+            root = os.path.realpath(strm_dir)
+            if root not in roots:
+                roots.append(root)
+        for root in roots:
             # 用 root + 分隔符 比较，挡住 /DSM/media2 被 /DSM/media 放行这种前缀串
             if target == root or target.startswith(root + os.sep):
                 return target
