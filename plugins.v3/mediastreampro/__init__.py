@@ -48,6 +48,8 @@ v1.5.0 起 **STRM 直链替客户端解析**（默认开）：
   STRM 文件不做同季扫描（网盘直链没有目录结构可扫），只回它自己。
 - ``GET /ping``：可用性探测 + 当前放行的媒体库目录与生效的 STRM 目录
   （App 用它决定是否显示播放按钮）；
+- ``POST /strm-check``：批量判断一批媒体库路径是否有对应 STRM（App 打 STRM 标识用）。
+  默认额外做「起播测试」——实际解析一次直链，解析不出可播地址的不标 STRM；
 - ``GET /downloads``：递归扫下载目录里的视频文件清单（path/name/size/mtime），
   供客户端把「下载完成」历史记录按种子名匹配到磁盘上的真实文件 —— 文件被删了就匹配不到，
   客户端据此把 ▶ 换成「已删除」；
@@ -126,6 +128,10 @@ _strm_follow_lock = threading.Lock()
 MAX_STRM_HOPS = 4
 # 解析直链时单跳请求超时（秒）
 STRM_RESOLVE_TIMEOUT = 6
+# /strm-check 起播测试的单跳超时（秒）：比播放解析更短，避免批量接口被单条慢直链拖死
+STRM_PROBE_TIMEOUT = 4
+# /strm-check 起播测试的并发上限：几十条路径同时解析网盘直链，压住并发不打爆宿主与网盘
+STRM_PROBE_CONCURRENCY = 6
 
 
 def parse_season_episode(filename: str) -> Optional[Tuple[Optional[int], int]]:
@@ -176,7 +182,7 @@ class MediaStreamPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/mediastream.png")
     # 插件版本
-    plugin_version = "1.5.3"
+    plugin_version = "1.5.4"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -197,6 +203,8 @@ class MediaStreamPro(_PluginBase):
         self._strm_resolve_host: str = ""
         # 是否由插件先走完 302 跳转链、把最终 CDN 直链给手机（默认开）
         self._strm_follow_redirect: bool = True
+        # /strm-check 是否对「有 .strm」的条目做起播测试（默认开）：解析不出可播直链的不标 STRM
+        self._strm_check_probe: bool = True
 
     # ---------- 生命周期 ----------
 
@@ -214,6 +222,8 @@ class MediaStreamPro(_PluginBase):
         self._strm_resolve_host = str(config.get("strm_resolve_host") or "").strip()
         # strm_follow_redirect 默认开：未在配置里显式关闭时视为 True
         self._strm_follow_redirect = config.get("strm_follow_redirect", True) is not False
+        # strm_check_probe 默认开：未在配置里显式关闭时视为 True
+        self._strm_check_probe = config.get("strm_check_probe", True) is not False
         roots = self.media_roots()
         strm_dir = self.effective_strm_dir()
         if roots:
@@ -316,6 +326,26 @@ class MediaStreamPro(_PluginBase):
                                     "props": {"cols": 12},
                                     "content": [
                                         {
+                                            "component": "VSwitch",
+                                            "props": {
+                                                "model": "strm_check_probe",
+                                                "label": "STRM 标识起播测试",
+                                                "hint": "默认开。整理记录里打 STRM 标识前，先实际解析一次直链，解析不出可播地址的（直链失效/网盘临时挂）不标 STRM，避免点进去才发现播不了",
+                                                "persistent-hint": True,
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12},
+                                    "content": [
+                                        {
                                             "component": "VTextField",
                                             "props": {
                                                 "model": "strm_resolve_host",
@@ -361,6 +391,7 @@ class MediaStreamPro(_PluginBase):
             {
                 "strm_follow_tgtodrive": False,
                 "strm_dir": "",
+                "strm_check_probe": True,
             },
         )
 
@@ -535,6 +566,10 @@ class MediaStreamPro(_PluginBase):
         POST JSON ``{"paths": [...]}``（媒体库内绝对路径）。对每条路径先 resolve 放行，
         再复用 [_find_strm_for] 判是否有同名 ``.strm``；路径本身就是 ``.strm`` 也算有。
         返回 ``{path: bool}`` 映射。未配置 STRM 目录时返回空映射（客户端自然不画标识）。
+
+        开了「起播测试」（``strm_check_probe``，默认开）时，对有 .strm 的条目进一步
+        实际解析直链，解析不出可播地址的**不标 STRM**（避免点进去才 404）。解析走线程池
+        并发（限流 ``STRM_PROBE_CONCURRENCY``），同步 requests 不阻塞事件循环。
         """
         strm_dir = self.effective_strm_dir()
         if not strm_dir:
@@ -554,6 +589,8 @@ class MediaStreamPro(_PluginBase):
             raw = []
 
         result: Dict[str, bool] = {}
+        # 先快判「有没有同名 .strm」，把需要起播测试的收齐再并发解析
+        probe_targets: Dict[str, str] = {}
         for path in raw:
             if not isinstance(path, str) or not path:
                 continue
@@ -562,11 +599,43 @@ class MediaStreamPro(_PluginBase):
                 # 越权路径：不放进结果，客户端拿不到就当非 strm
                 continue
             if target.lower().endswith(STRM_EXTENSION):
+                strm_file = target
+            else:
+                strm_file = self._find_strm_for(target)
+                if strm_file is None:
+                    result[path] = False
+                    continue
+            if self._strm_check_probe:
+                probe_targets[path] = strm_file
+            else:
                 result[path] = True
-                continue
-            result[path] = self._find_strm_for(target) is not None
+
+        # 起播测试：并发解析直链，失败的不标 STRM
+        if probe_targets:
+            await self._probe_strm_batch(probe_targets, result)
 
         return {"success": True, "data": {"strm": result}}
+
+    async def _probe_strm_batch(
+        self, probe_targets: Dict[str, str], result: Dict[str, bool]
+    ) -> None:
+        """并发做起播测试，结果写回 ``result``。同步解析丢线程池，信号量限流。"""
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        sem = asyncio.Semaphore(STRM_PROBE_CONCURRENCY)
+
+        async def probe_one(path: str, strm_file: str) -> None:
+            async with sem:
+                playable = await loop.run_in_executor(
+                    None, self._probe_strm_playable, strm_file
+                )
+            result[path] = playable
+
+        await asyncio.gather(
+            *(probe_one(p, f) for p, f in probe_targets.items()),
+            return_exceptions=True,
+        )
 
     def ping(self) -> Any:
         """可用性探测：客户端进下载页时探一次，决定是否显示播放按钮。"""
@@ -673,7 +742,7 @@ class MediaStreamPro(_PluginBase):
         logger.info(f"媒体流播放 STRM 跳转：{os.path.basename(strm_file)}")
         return RedirectResponse(url, status_code=302)
 
-    def _resolve_strm_url(self, url: str) -> Optional[str]:
+    def _resolve_strm_url(self, url: str, timeout: Optional[int] = None) -> Optional[str]:
         """把 STRM 直链走完 302 跳转链，返回最终可直连的 CDN 地址。
 
         - ``strm_resolve_host`` 非空时，先把直链里的 host（仅 hostname 部分）替换成该值：
@@ -683,8 +752,10 @@ class MediaStreamPro(_PluginBase):
           每次读 ``Location`` 继续跟，**直到没有 Location（走到链尾）才停**。
           TgtoDrive→CDN→真实源 通常 2~3 跳，链尾就是公网 CDN 直链。
         - 全程 HEAD 优先、失败退回 GET（只读头，不下载视频体），单跳超时
-          ``STRM_RESOLVE_TIMEOUT`` 秒，整体异常兜底返回 None（调用方退回原始直链）。
+          ``timeout``（默认 ``STRM_RESOLVE_TIMEOUT``）秒，整体异常兜底返回 None
+          （调用方退回原始直链）。``timeout`` 供起播测试传更短的值，避免批量拖死。
         """
+        hop_timeout = timeout if timeout is not None else STRM_RESOLVE_TIMEOUT
         try:
             from urllib.parse import urlsplit, urlunsplit, urljoin
 
@@ -717,7 +788,7 @@ class MediaStreamPro(_PluginBase):
                     "HEAD",
                     current,
                     allow_redirects=False,
-                    timeout=STRM_RESOLVE_TIMEOUT,
+                    timeout=hop_timeout,
                     headers={"User-Agent": "MediaStreamPro/1.5"},
                 )
                 # HEAD 不被支持时退回 GET（也只取头，stream=True 不读体）
@@ -727,7 +798,7 @@ class MediaStreamPro(_PluginBase):
                         "GET",
                         current,
                         allow_redirects=False,
-                        timeout=STRM_RESOLVE_TIMEOUT,
+                        timeout=hop_timeout,
                         stream=True,
                         headers={"User-Agent": "MediaStreamPro/1.5"},
                     )
@@ -843,6 +914,19 @@ class MediaStreamPro(_PluginBase):
         except OSError as error:
             logger.warning(f"媒体流播放读取 STRM 失败：{error}")
         return None
+
+    def _probe_strm_playable(self, strm_file: str) -> bool:
+        """起播测试：读 STRM 里的直链并解析，能拿到最终可直连地址才算「真能播」。
+
+        只做解析（HEAD/GET 读头，跟随 302 链），**不下载视频体**；单跳超时
+        ``STRM_PROBE_TIMEOUT`` 秒（比播放解析更短），失败/异常一律返回 False。
+        这样「直链失效 / 网盘临时挂 / 容器名解析不了又没配替换」的 STRM 就不会被
+        客户端标成可播的 STRM，点进去才 404。
+        """
+        url = self._read_strm_url(strm_file)
+        if not url:
+            return False
+        return self._resolve_strm_url(url, timeout=STRM_PROBE_TIMEOUT) is not None
 
     # ---------- 内部 ----------
 
