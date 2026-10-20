@@ -69,9 +69,9 @@
   },
   "MediaStreamPro": {
     "name": "媒体流播放",
-    "description": "把已整理入库的视频按原始文件流式传给客户端播放（支持拖动进度）。自动跟随宿主「目录配置」里的媒体库目录，装好即用，无需配置。",
+    "description": "把已整理入库与下载目录里的视频按原始文件流式传给客户端播放（支持拖动进度）。自动跟随宿主「目录配置」里的媒体库与下载路径，装好即用，无需配置。",
     "labels": "媒体库,播放",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/mediastream.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -82,7 +82,8 @@
       "v1.1.0": "新增 `GET /season?path=<媒体库内某个视频的绝对路径>`：**返回同一季还有哪些集**，供客户端拼选集。为什么由服务端给：客户端只能从宿主整理记录里拼（`/history/transfer` 只保留最近几天），而逐集下载时每集是独立种子、没有共同的 `download_hash` —— 两头都会漏集。本接口直接扫这个文件**所在的那一个目录**（不递归、不跨目录，宿主整理规则默认「剧名/Season 2/」，同一季必定同目录），按「剧名主干 + 季号」认亲：文件名先抹掉 `S02E05` / `EP05` / `第5集` 及其后的规格（2160p / WEB-DL / 字幕组），只保留字母数字与汉字再比，所以 `某剧.S02E05.2160p.WEB-DL.mkv` 与 `某剧 第05集.mkv` 都能落到 `某剧`。同一集有多个版本时按集号去重（正在播的那份优先，否则留体积最大的）。认不出集号的（电影/花絮）只回它自己。路径校验与 `/stream` 同一套：realpath 归一 + 媒体库根前缀比较 + 扩展名白名单，符号链接逃出媒体库的也挡。另外，设置页与详情页顶部新增 App 推荐卡（官方 logo + 下载入口），与另外三个插件共用同一份实现。",
       "v1.0.2": "新增 HEAD 支持：`/stream` 之前只注册了 GET，宿主路由对外部播放器/下载器的 HEAD 探测回 405。现在 `methods` 里显式带上 HEAD，HEAD 请求只回响应头（`Content-Type`、`Content-Length`、`Accept-Ranges: bytes`），不打开文件读数据、也不回文件体；鉴权、路径白名单、扩展名白名单与 GET 完全一致（越权依旧 403、文件不存在依旧 404）。GET 行为不变，Range 拖动照旧。App 侧新增的「用系统播放器打开」就是靠本机中转转发这条流（token 只在 App 内存里，不进 URL）。",
       "v1.0.1": "修复：未实现基类的抽象方法 `stop_service`（本插件没有后台任务要停，但 `_PluginBase` 把它列成了抽象方法），宿主加载时直接抛 `Can't instantiate abstract class MediaStreamPro without an implementation for abstract method 'stop_service'` → 插件装不上。**发版前必须照  `_PluginBase` 的六个抽象方法逐个对一遍**：`init_plugin` / `get_state` / `get_api` / `get_form` / `get_page` / `stop_service`，缺任何一个都是「安装成功但加载失败」，宿主 Web 端只会报一句「加载失败」，真实原因在日志里。此版本内容与 v1.0.0 完全相同，仅补这个方法。",
-      "v1.0.0": "首个版本：给客户端一条能直接喂播放器的视频流。GET /stream?path=<媒体库内绝对路径> 返回原始文件，走 Starlette FileResponse 自带 HTTP Range，客户端（MoviePilotApp 下载记录）可以拖进度；GET /ping 供客户端探测可用性与当前放行目录。放行的媒体库根目录不写死也不落配置，每次请求实时读宿主「目录配置」里的 library_path（只放行媒体库，下载目录刻意不放行），宿主改目录即刻生效；路径经 realpath 归一后按「根目录 + 分隔符」比较，挡住前缀串与 .. 穿越，扩展名限定视频容器。认证沿用宿主 bear 模式（JWT / API 令牌），插件不解析凭据、也不支持把 token 拼进 URL。插件没有开关与配置项，安装即生效，配置页只有一张说明卡。"
+      "v1.0.0": "首个版本：给客户端一条能直接喂播放器的视频流。GET /stream?path=<媒体库内绝对路径> 返回原始文件，走 Starlette FileResponse 自带 HTTP Range，客户端（MoviePilotApp 下载记录）可以拖进度；GET /ping 供客户端探测可用性与当前放行目录。放行的媒体库根目录不写死也不落配置，每次请求实时读宿主「目录配置」里的 library_path（只放行媒体库，下载目录刻意不放行），宿主改目录即刻生效；路径经 realpath 归一后按「根目录 + 分隔符」比较，挡住前缀串与 .. 穿越，扩展名限定视频容器。认证沿用宿主 bear 模式（JWT / API 令牌），插件不解析凭据、也不支持把 token 拼进 URL。插件没有开关与配置项，安装即生效，配置页只有一张说明卡。",
+      "v1.2.0": "新增「下载完成」直接播放（v1.1.0 只放媒体库，v1.2.0 下载目录一并放行）：\n1. 放行目录实时读宿主「目录配置」的 download_path，与媒体库路径合并为 /stream 与 /season 的白名单 —— 下载完成但没整理（甚至整理失败）的文件也能直接播；\n2. 新增 GET /downloads：递归扫所有下载目录（限深度 4 层、上限 2000 条），返回磁盘上真实存在的视频文件（path/name/size/mtime），不缓存、每次现扫；\n3. 客户端拿 /downloads 的清单和下载历史的种子名按文件名匹配：匹配上 → ▶ 可播；匹配不上（文件在下载器里被删了）→ ▶ 换灰色「已删除」。"
     }
   }
 }

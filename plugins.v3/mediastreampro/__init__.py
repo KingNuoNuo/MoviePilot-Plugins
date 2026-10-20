@@ -7,10 +7,10 @@
 
 - **装好即用，没有开关**：本插件只做一件事，不需要配置项；``get_state()`` 恒为 True，
   配置页只放一张说明卡。
-- **媒体库根目录不写死、也不落配置**：每次请求实时读宿主的「目录配置」
-  （``systemconfig["Directories"][*].library_path``）。这样宿主里换了媒体库路径、
-  加了一个新库，插件不用重装、不用重启、也不用再配一遍。
-  ``download_path`` 刻意**不放行** —— 播放只面向已整理入库的文件，权限面最小。
+- **放行目录实时读宿主「目录配置」**（``systemconfig["Directories"]``）：
+  **媒体库路径（library_path）+ 下载路径（download_path）都放行**。v1.1.0 只放媒体库，
+  v1.2.0 起客户端要在「下载完成」页签直接播还没整理（甚至整理失败）的文件，下载目录一并放行。
+  这样宿主里换了路径、加了新库，插件不用重装、不用重启、也不用再配一遍。
 - **认证走宿主**：``auth="bear"``（JWT / API Key / token），插件自己不做任何 token 校验，
   也不接受把凭证明文拼进 URL。客户端用 ``Authorization: Bearer`` 头。
 - **路径白名单**：``realpath`` 归一后必须落在某个媒体库根目录内（按目录分隔符比较，
@@ -26,6 +26,9 @@
   ``download_hash``），所以这里直接扫媒体库里这个文件所在的目录，按「剧名主干 + 季号」认亲。
   不递归、不跨目录：宿主整理规则默认就是「剧名/Season 2/」这种结构，同一季必定同目录。
 - ``GET /ping``：可用性探测 + 当前放行的媒体库目录（App 用它决定是否显示播放按钮）；
+- ``GET /downloads``：递归扫下载目录里的视频文件清单（path/name/size/mtime），
+  供客户端把「下载完成」历史记录按种子名匹配到磁盘上的真实文件 —— 文件被删了就匹配不到，
+  客户端据此把 ▶ 换成「已删除」；
 - 无表单配置项。
 """
 import os
@@ -80,6 +83,12 @@ _EPISODE_CN = re.compile(r"第\s*(\d{1,4})\s*[集话話]")
 # 一次最多回多少集：防着有人把整季库塞进一个目录（正常一部剧一季几十集）
 MAX_SEASON_FILES = 500
 
+# ---------- 下载目录扫描（/downloads 用） ----------
+# 递归最大深度：qB 的保存目录一般是「下载根/种子名/文件」两层，4 层兜住再套一层盘符的部署
+MAX_SCAN_DEPTH = 4
+# 清单条数上限：下载目录里全是视频的场景（电影库混用下载目录）也就几百个，防异常目录树拖死接口
+MAX_SCAN_FILES = 2000
+
 
 def parse_season_episode(filename: str) -> Optional[Tuple[Optional[int], int]]:
     """从文件名解析 ``(季号, 集号)``；认不出集号返回 None。
@@ -121,13 +130,13 @@ class MediaStreamPro(_PluginBase):
     # 插件名称
     plugin_name = "媒体流播放"
     # 插件描述
-    plugin_desc = ("把已整理入库的视频按原始文件流式传给客户端播放（支持拖动进度）。"
-                   "自动跟随宿主「目录配置」里的媒体库目录，装好即用，无需配置。")
+    plugin_desc = ("把已整理入库与下载目录里的视频按原始文件流式传给客户端播放（支持拖动进度）。"
+                   "自动跟随宿主「目录配置」里的媒体库与下载路径，装好即用，无需配置。")
     # 插件图标
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/mediastream.png")
     # 插件版本
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -292,7 +301,7 @@ class MediaStreamPro(_PluginBase):
                                                  "返回支持 Range 的文件流；HEAD 只回头不回文件体）"
                                                  " ｜ GET /season?path=<媒体文件绝对路径>"
                                                  "（返回同一季还有哪些集，供客户端做选集）"
-                                                 " —— 两者都只放行媒体库目录，下载目录不放行。"),
+                                                 " —— 两者都放行媒体库与下载目录（宿主「设置 → 目录」）。"),
                                     },
                                 ],
                             }
@@ -331,6 +340,15 @@ class MediaStreamPro(_PluginBase):
                 "description": "按 path（媒体库内某个视频的绝对路径）扫它所在目录，"
                                "返回同一部剧同一季的其它集，供客户端拼选集。"
                                "按「剧名主干 + 季号」认亲，不递归、不跨目录。",
+            },
+            {
+                "path": "/downloads",
+                "endpoint": self.downloads,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "下载目录视频清单",
+                "description": "递归扫所有下载目录（限深度与条数），返回磁盘上真实存在的视频文件，"
+                               "供客户端把「下载完成」历史按种子名匹配到文件；文件被删则匹配不到。",
             },
             {
                 "path": "/ping",
@@ -431,10 +449,10 @@ class MediaStreamPro(_PluginBase):
             # 文件名里除了集号什么都没有，没法认亲，同样只回自己
             return {"success": True, "data": {"season": season_no, "episodes": [self._episode_item(target, episode_no)]}}
 
-        roots = self.media_roots()
+        roots = self.play_roots()
 
         def allowed(candidate: str) -> bool:
-            """realpath 后仍在某个媒体库根内（挡符号链接逃逸），复用 /stream 同一套口径。"""
+            """realpath 后仍在某个放行根内（挡符号链接逃逸），复用 /stream 同一套口径。"""
             return any(
                 candidate == root or candidate.startswith(root + os.sep) for root in roots
             )
@@ -482,6 +500,54 @@ class MediaStreamPro(_PluginBase):
         logger.debug(f"同季集列表：{stem} S{season_no} 共 {len(episodes)} 集")
         return {"success": True, "data": {"season": season_no, "stem": stem, "episodes": episodes}}
 
+    def downloads(self) -> Any:
+        """下载目录里的视频清单：递归扫所有 ``download_path``，返回磁盘上真实存在的文件。
+
+        客户端拿它和「下载完成」历史（``torrent_name``）做文件名匹配：
+        匹配得上 → 可播；匹配不上 → 文件多半已被删（下载器删种带文件、手动清理），
+        客户端把 ▶ 换成「已删除」。所以这里**只回现存文件**，不做任何缓存 ——
+        刚删完文件就该立刻反映出来。
+
+        限制：深度 [MAX_SCAN_DEPTH] 层、总量 [MAX_SCAN_FILES] 条，超了就截断
+        （正常部署远用不满；截断只影响极端目录树，不影响播放权限 —— /stream 仍按白名单校验）。
+        """
+        found: List[Dict[str, Any]] = []
+        roots = self.download_roots()
+        for root in roots:
+            self._scan_videos(root, 0, found)
+            if len(found) >= MAX_SCAN_FILES:
+                break
+        logger.debug(f"下载目录扫描：{len(roots)} 个根，{len(found)} 个视频文件")
+        return {"success": True, "data": {"files": found[:MAX_SCAN_FILES]}}
+
+    def _scan_videos(self, directory: str, depth: int, out: List[Dict[str, Any]]) -> None:
+        """递归收集 [directory] 下的视频文件（限深度；条数超限即止）。"""
+        if depth > MAX_SCAN_DEPTH or len(out) >= MAX_SCAN_FILES:
+            return
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if len(out) >= MAX_SCAN_FILES:
+                        return
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            self._scan_videos(entry.path, depth + 1, out)
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        if os.path.splitext(entry.name)[1].lower() not in VIDEO_EXTENSIONS:
+                            continue
+                        out.append({
+                            "path": os.path.realpath(entry.path),
+                            "name": entry.name,
+                            "size": entry.stat(follow_symlinks=False).st_size,
+                            "mtime": int(entry.stat(follow_symlinks=False).st_mtime),
+                        })
+                    except OSError:
+                        continue
+        except OSError as error:
+            logger.warning(f"扫描下载目录失败：{directory}：{error}")
+
     @staticmethod
     def _episode_item(file_path: str, episode: Optional[int]) -> Dict[str, Any]:
         """一条选集项：客户端只用 ``path`` 与 ``label``，``size`` 留给同集多版本去重。"""
@@ -525,6 +591,39 @@ class MediaStreamPro(_PluginBase):
                     roots.append(root)
         return roots
 
+    def download_roots(self) -> List[str]:
+        """当前放行的下载根目录（实时读宿主「目录配置」里的 download_path，去重保序）。
+
+        v1.2.0 起「下载完成」页签要直接播没整理的文件，下载目录与媒体库一并放行；
+        读不到（配置未就绪 / 一个下载目录都没配）就返回空列表 —— 不搞兜底，
+        下载目录猜错了放行反而危险。
+        """
+        roots: List[str] = []
+        try:
+            directories = self.systemconfig.get("Directories") or []
+        except Exception as error:
+            logger.warning(f"读取宿主目录配置失败：{error}")
+            directories = []
+
+        for directory in directories:
+            if not isinstance(directory, dict):
+                continue
+            raw = (directory.get("download_path") or "").strip()
+            if not raw:
+                continue
+            root = os.path.realpath(raw)
+            if os.path.isdir(root) and root not in roots:
+                roots.append(root)
+        return roots
+
+    def play_roots(self) -> List[str]:
+        """/stream 与 /season 的放行目录 = 媒体库 + 下载目录（去重保序）。"""
+        roots = self.media_roots()
+        for root in self.download_roots():
+            if root not in roots:
+                roots.append(root)
+        return roots
+
     def resolve(self, raw_path: str) -> Optional[str]:
         """把请求路径归一成可播放的绝对路径；不在白名单内返回 None。"""
         raw = (raw_path or "").strip()
@@ -534,7 +633,7 @@ class MediaStreamPro(_PluginBase):
         target = os.path.realpath(raw)
         if os.path.splitext(target)[1].lower() not in VIDEO_EXTENSIONS:
             return None
-        for root in self.media_roots():
+        for root in self.play_roots():
             # 用 root + 分隔符 比较，挡住 /DSM/media2 被 /DSM/media 放行这种前缀串
             if target == root or target.startswith(root + os.sep):
                 return target
