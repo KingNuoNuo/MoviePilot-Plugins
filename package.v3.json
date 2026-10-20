@@ -47,7 +47,7 @@
     "name": "全球影视榜单",
     "description": "整合猫眼、Netflix 与红果短剧榜单，提供统一的榜单接口与推荐页数据源。",
     "labels": "榜单",
-    "version": "1.4.4",
+    "version": "1.4.5",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/globalrank.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -55,6 +55,7 @@
     "release": false,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.4.5": "豆瓣查分加全局限流闸：等间隔与发请求整段持锁串行，请求间隔 0.35s→1.2s。修复 App 三榜并发补分时 60+ 条查询两秒内同时砸向豆瓣触发瞬时限流、整批查空的问题 —— 现在并发请求自动排队摊平，单条虽慢但条条有效。",
       "v1.4.4": "修复 v1.4.3 的评分缓存降级漏洞：榜单补分路径重查失败时，会把 /rating 刚查到的好分覆盖成「无分」并缓存 3 天，App 端大量条目再次看不到评分。现在空缺只有在共享缓存里没有更新鲜的好分时才允许写入；同时「无分」缓存版本号 +1，已积压的假空缺全部自动作废重查。",
       "v1.4.3": "修复「榜单全无评分」+ 请求降频优化。修复：豆瓣瞬时抖动（拦截窗口）期间查到的空结果被当成「真没分」缓存 3 天，App 端重试全被缓存挡回 —— 空缺只有可信（检索池非空、仅标题没对上）才落缓存，可疑空缺不落、下次自动重查；「无分」改用独立缓存版本号，升档冲掉已积压的假空缺，已有评分不受影响。优化：① 豆瓣检索结果统一缓存 —— 榜单补分（fill_ratings）与 /rating 查分共用 douban_rating 一份缓存，同一标题两条路只查一次豆瓣；② /rating 查到的分回写猫眼/Netflix 身份缓存与快照条目，下次 /rank 直接带分，App 不再重复请求；③ 红果海报代理加落盘缓存（config/cache/hongguo_posters），跨重启复用不再反复回字节图床；④ 定时抓取加 4 小时最小间隔保护（cron 配得再密也不会高频打上游，手动刷新不受限）；⑤ 豆瓣查分加 2 分钟近期结果 memo，App 同屏多榜并发的重复请求直接合并。",
       "v1.2.4": "v1.0.0~v1.2.4 功能合并说明。把猫眼榜单（MaoyanPro）与 Netflix 榜单（NetflixPro）合并为一个插件，对外统一三套接口：/rank（榜单快照，source=maoyan/netflix/hongguo/all，board_type 按源语义过滤，Netflix 全球榜对外回传 global）、/rank-list（媒体信息列表）、/refresh（手动抓取），统一 bear 认证与 schemas.Response 信封。设置页拆「运行 / 猫眼榜单 / Netflix 榜单 / 红果短剧」分区，Netflix 抓取地区覆盖全球+美国/日本/韩国/中国香港/中国台湾/新加坡七地；猫眼支持「平台专项榜」多选（腾讯视频/爱奇艺/芒果TV/优酷，勾选的平台榜进快照），自动订阅分「全网 / 平台榜」两组条数（0 = 只抓榜不订阅）。v1.1.0 新增红果短剧第三数据源：官网榜单页为服务端渲染，直接解析内联 JSON，无需签名与登录态；支持红果热播/真人剧/漫剧/AI 剧四个官方榜，每榜 20 条一页向上翻页，条目自带中文标题、竖版海报、热度/评分/题材与状态标签、简介及前 3 集 360p 试看直链；短剧不在 TMDB/豆瓣，本源不做媒体识别、不提供自动订阅。红果海报为字节图床外链、手机端经常整屏空白，固定经插件 GET /poster 匿名转发（只放行 *.byteimg.com 的 /novel-pic/ 地址，7 天 Cache-Control + 进程内 LRU 缓存，转发地址按 APP_DOMAIN → 请求 base_url → 原图逐级回落）。单榜抓取失败时按榜合并快照、沿用上一份数据并在响应里标 stale，不再出现「整榜消失/暂无数据」。详情页收敛为三张卡：MoviePilotApp 推荐卡 + 概览卡（各源榜数/条数/更新时间/刷新）+ 自动订阅记录；推荐页按源、平台与红果榜单各注册独立数据源。App 推荐卡为官方 logo 版式（「下载 App」主按钮直达 Releases），实现收敛到独立 app_promo.py，与 MaoyanPro / NetflixPro / MediaStreamPro 共用同一份代码（tools/gen_app_promo.py 生成）。",

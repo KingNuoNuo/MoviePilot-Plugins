@@ -52,7 +52,7 @@ _SEARCH_DEAD_COOLDOWN = 1800.0
 _REFERER = "https://m.douban.com/"
 
 # 请求间隔：连打会被拦（表现为返回空 / 抛异常），0.35s 实测稳定
-_REQUEST_INTERVAL = 0.35
+_REQUEST_INTERVAL = 1.2
 # CookieCloud 取豆瓣 Cookie 的缓存时长（秒）；浏览器重新同步即生效，插件不用重启
 _COOKIE_TTL = 6 * 3600
 _cookie_cache: Optional[str] = None
@@ -98,6 +98,9 @@ _UAS = (
 )
 
 _last_request_at = 0.0
+# 全局限流闸：等间隔 + 发请求必须在锁内完成，否则并发线程同时看到「间隔已到」
+# 一起放行，60 条并发查询两秒内全砸向豆瓣触发瞬时限流（2026-10-20 实锤）
+_RATE_LOCK = threading.Lock()
 _blocked_until = 0.0
 _empty_streak = 0
 _probe_depth = 0
@@ -197,34 +200,35 @@ def _get_json(url: str, params: Dict[str, Any]) -> Any:
     global _last_request_at, last_raw, last_status
     if is_blocked():
         return None
-    gap = time.monotonic() - _last_request_at
-    if gap < _REQUEST_INTERVAL:
-        time.sleep(_REQUEST_INTERVAL - gap)
-    _last_request_at = time.monotonic()
-    try:
-        headers = {"User-Agent": random.choice(_UAS), "Referer": _REFERER}
-        cookie = _douban_cookie()
-        if cookie:
-            headers["Cookie"] = cookie
-        client = RequestUtils(
-            headers=headers,
-            proxies=getattr(settings, "PROXY", None),
-        )
-        res = client.request("get", url, params=params, raise_exception=True)
-        status = getattr(res, "status_code", None)
-        text = getattr(res, "text", "") or ""
-        last_status = int(status or 0)
-        last_raw = f"HTTP {status} | {text[:300]}"
-        if status != 200:
-            return None
+    with _RATE_LOCK:
+        gap = time.monotonic() - _last_request_at
+        if gap < _REQUEST_INTERVAL:
+            time.sleep(_REQUEST_INTERVAL - gap)
+        _last_request_at = time.monotonic()
         try:
-            return res.json()
-        except Exception:
+            headers = {"User-Agent": random.choice(_UAS), "Referer": _REFERER}
+            cookie = _douban_cookie()
+            if cookie:
+                headers["Cookie"] = cookie
+            client = RequestUtils(
+                headers=headers,
+                proxies=getattr(settings, "PROXY", None),
+            )
+            res = client.request("get", url, params=params, raise_exception=True)
+            status = getattr(res, "status_code", None)
+            text = getattr(res, "text", "") or ""
+            last_status = int(status or 0)
+            last_raw = f"HTTP {status} | {text[:300]}"
+            if status != 200:
+                return None
+            try:
+                return res.json()
+            except Exception:
+                return None
+        except Exception as err:
+            last_raw = f"EXC: {err}"
+            _trip(str(err))
             return None
-    except Exception as err:
-        last_raw = f"EXC: {err}"
-        _trip(str(err))
-        return None
 
 
 def _rate_text(value: Any) -> str:
@@ -347,36 +351,37 @@ def _msearch_pick(keyword: str, prefer_tv: Optional[bool]) -> dict:
     返回的 sid 不知类型，交由 [_subject_rate] 按 movie/tv 各试一次。
     """
     global _last_request_at, last_raw
-    gap = time.monotonic() - _last_request_at
-    if gap < _REQUEST_INTERVAL:
-        time.sleep(_REQUEST_INTERVAL - gap)
-    _last_request_at = time.monotonic()
-    try:
-        headers = {"User-Agent": _MOBILE_UA, "Referer": _REFERER}
-        cookie = _douban_cookie()
-        if cookie:
-            headers["Cookie"] = cookie
-        client = RequestUtils(
-            headers=headers,
-            proxies=getattr(settings, "PROXY", None),
-        )
-        res = client.request("get", _MSEARCH_URL.format(q=keyword), raise_exception=True)
-        status = getattr(res, "status_code", None)
-        html = getattr(res, "text", "") or ""
-        last_raw = f"HTTP {status} | {html[:300]}"
-        if status != 200:
+    with _RATE_LOCK:
+        gap = time.monotonic() - _last_request_at
+        if gap < _REQUEST_INTERVAL:
+            time.sleep(_REQUEST_INTERVAL - gap)
+        _last_request_at = time.monotonic()
+        try:
+            headers = {"User-Agent": _MOBILE_UA, "Referer": _REFERER}
+            cookie = _douban_cookie()
+            if cookie:
+                headers["Cookie"] = cookie
+            client = RequestUtils(
+                headers=headers,
+                proxies=getattr(settings, "PROXY", None),
+            )
+            res = client.request("get", _MSEARCH_URL.format(q=keyword), raise_exception=True)
+            status = getattr(res, "status_code", None)
+            html = getattr(res, "text", "") or ""
+            last_raw = f"HTTP {status} | {html[:300]}"
+            if status != 200:
+                return {}
+            sids: List[str] = []
+            for m in _MSEARCH_SID_RE.finditer(html):
+                sid = m.group(1)
+                if sid not in sids:
+                    sids.append(sid)
+                if len(sids) >= 3:
+                    break
+        except Exception as exc:
+            last_raw = f"EXC {exc}"
+            logger.info(f"m 站搜索页兜底失败：{exc}")
             return {}
-        sids: List[str] = []
-        for m in _MSEARCH_SID_RE.finditer(html):
-            sid = m.group(1)
-            if sid not in sids:
-                sids.append(sid)
-            if len(sids) >= 3:
-                break
-    except Exception as exc:
-        last_raw = f"EXC {exc}"
-        logger.info(f"m 站搜索页兜底失败：{exc}")
-        return {}
     # 同名优先没有候选元数据可比，直接按第一个 sid 试；类型电影/剧集各打一次详情，
     # prefer_tv 决定先试哪个 —— 详情接口会回真实 title 供上层校验
     kinds = ("tv", "movie") if prefer_tv else ("movie", "tv")
