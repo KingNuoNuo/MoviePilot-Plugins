@@ -71,7 +71,7 @@
     "name": "媒体流播放",
     "description": "把已整理入库与下载目录里的视频按原始文件流式传给客户端播放（支持拖动进度）；支持 STRM 网盘直链播放：有 STRM 就优先 302 跳转（流量不过 NAS），默认替客户端解析容器名、跟随跳转到最终公网 CDN，内外网都能播。自动跟随宿主「目录配置」里的媒体库与下载路径，STRM 目录可跟随 TgtoDrive 插件。",
     "labels": "媒体库,播放",
-    "version": "1.5.4",
+    "version": "1.5.5",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/mediastream.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -90,7 +90,8 @@
       "v1.5.1": "新增 `POST /strm-check` 接口：按 ``{paths: [...]}`` 批量判断一批媒体库绝对路径是否能在 STRM 目录对上同名 ``.strm``（路径本身是 ``.strm`` 也算有），返回 ``{path: bool}`` 映射 —— 供 App 在整理记录列表里给可播的 STRM 影片打标识。未配置 STRM 目录时返回空映射（客户端自然不画标识），越权路径静默跳过。",
       "v1.5.2": "修复 `/strm-check` 始终返回空映射：Starlette 的 `request.json()` 是 async 方法，同步 endpoint 里直接调用拿到的是 coroutine 而非 dict，body 永远解析失败。改为 `async def` + `await request.json()`（与宿主其他 POST 插件接口一致）。",
       "v1.5.3": "修复「跟随 TgtoDrive」模式下 STRM 标识出现一会后全部消失：`_tgtodrive_strm_dir` 原先用 `requests.get('http://127.0.0.1:3001/api/v1/plugin/TgtoDriveSync')` 自调宿主本机 API，而宿主 uvicorn 是单 worker —— strm-check 请求进来时同步阻塞地请求同一个 127.0.0.1:3001，等于自己等自己，5 秒超时后 strm_dir 变空，且缓存只在成功时刷新 → 之后每次 strm-check 都死锁超时。改为走插件基类 `self.get_config('TgtoDriveSync')` 直接读宿主 SQLite 配置库（毫秒级、无网络、无死锁），并在读取失败时沿用上次缓存值（stale-while-error），不再因一次抖动清空目录。",
-      "v1.5.4": "`/strm-check` 新增「STRM 起播测试」（开关 `strm_check_probe`，默认开）：判断到有同名 `.strm` 后，进一步实际解析一次直链（复用 302 跳转链，只读头不下载视频体，单跳超时 4 秒），解析不出可播地址的（直链失效 / 网盘临时挂 / 容器名解析不了又没配替换）不标 STRM —— 避免 App 里标了 STRM、点进去才发现播不了。解析走线程池并发（限流 6 并发）+ 信号量，同步 requests 不阻塞宿主事件循环；关闭开关则退回 v1.5.3 的「只看有没有同名 .strm」行为。"
+      "v1.5.4": "`/strm-check` 新增「STRM 起播测试」（开关 `strm_check_probe`，默认开）：判断到有同名 `.strm` 后，进一步实际解析一次直链（复用 302 跳转链，只读头不下载视频体，单跳超时 4 秒），解析不出可播地址的（直链失效 / 网盘临时挂 / 容器名解析不了又没配替换）不标 STRM —— 避免 App 里标了 STRM、点进去才发现播不了。解析走线程池并发（限流 6 并发）+ 信号量，同步 requests 不阻塞宿主事件循环；关闭开关则退回 v1.5.3 的「只看有没有同名 .strm」行为。",
+      "v1.5.5": "修复 `/strm-check` 拖垮宿主（表现为「进下载页特别慢、播放按钮探测失败后消失」）。两个性能坑：① `_find_strm_for` 对每条路径都 `os.walk` 扫整棵 STRM 树，现场实测目录树 981 个目录 / 33559 个文件 / 11239 个 .strm，单次扫描 0.05~0.17 秒 —— 一次 30 条就是 30 次全树扫；② 这段扫描跑在 `async def strm_check` 里，是**同步**代码，把单 worker 宿主的事件循环整个卡住，期间 `/ping`、`/history/transfer` 全部排队，客户端因此探测超时、▶ 全消失。修法：新增「小写文件名 → 绝对路径」整树索引（`STRM_INDEX_TTL` 120 秒内复用），几十条查询只扫一次树；文件层面判断整体丢进线程池执行，事件循环不再被扫盘阻塞。另外给起播测试加结果缓存（成功缓存 10 分钟、失败 2 分钟），客户端反复轮询时不再反复打网盘 CDN。"
     }
   }
 }

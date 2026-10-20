@@ -132,6 +132,19 @@ STRM_RESOLVE_TIMEOUT = 6
 STRM_PROBE_TIMEOUT = 4
 # /strm-check 起播测试的并发上限：几十条路径同时解析网盘直链，压住并发不打爆宿主与网盘
 STRM_PROBE_CONCURRENCY = 6
+# STRM 目录索引缓存秒数：整棵树可能有上千目录、上万 .strm，逐条 os.walk 会把单 worker 拖死。
+# 建一次「小写文件名 → 绝对路径」索引后所有查询都是 O(1)，TTL 内复用。
+STRM_INDEX_TTL = 120
+# 索引缓存（模块级，进程内共享）：{"dir": 目录, "ts": 时间戳, "map": {小写文件名: 绝对路径}}
+_strm_index_cache = {"dir": "", "ts": 0.0, "map": {}}
+_strm_index_lock = threading.Lock()
+# 起播测试结果缓存秒数：客户端反复轮询时不该每次重打网盘 CDN
+STRM_PROBE_TTL = 600
+# 起播测试失败缓存秒数（更短）：网盘临时抽风时，别把「不可播」钉死太久
+STRM_PROBE_FAIL_TTL = 120
+# 起播测试缓存：{strm 绝对路径: (时间戳, 是否可播)}
+_strm_probe_cache = {}
+_strm_probe_lock = threading.Lock()
 
 
 def parse_season_episode(filename: str) -> Optional[Tuple[Optional[int], int]]:
@@ -182,7 +195,7 @@ class MediaStreamPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/mediastream.png")
     # 插件版本
-    plugin_version = "1.5.4"
+    plugin_version = "1.5.5"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -589,7 +602,32 @@ class MediaStreamPro(_PluginBase):
             raw = []
 
         result: Dict[str, bool] = {}
-        # 先快判「有没有同名 .strm」，把需要起播测试的收齐再并发解析
+        probe_targets: Dict[str, str] = {}
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        # 文件层面判断（首次会整树建索引）必须丢线程池：宿主是单 worker，
+        # 在事件循环里同步扫盘会把 /ping、/history/transfer 一起堵住。
+        try:
+            result, probe_targets = await loop.run_in_executor(
+                None, self._check_paths_sync, raw
+            )
+        except Exception as error:
+            logger.warning(f"STRM 批量判断失败：{error}")
+            result, probe_targets = {}, {}
+
+        # 起播测试：并发解析直链，失败的不标 STRM
+        if probe_targets:
+            await self._probe_strm_batch(probe_targets, result)
+
+        return {"success": True, "data": {"strm": result}}
+
+    def _check_paths_sync(self, raw: List[Any]) -> Tuple[Dict[str, bool], Dict[str, str]]:
+        """同步部分：逐个 resolve 放行 + 找同名 .strm。
+
+        返回 ``(直接结论, 待起播测试的 {原路径: strm 文件})``。整段在调用方的线程池里跑。
+        """
+        result: Dict[str, bool] = {}
         probe_targets: Dict[str, str] = {}
         for path in raw:
             if not isinstance(path, str) or not path:
@@ -609,12 +647,7 @@ class MediaStreamPro(_PluginBase):
                 probe_targets[path] = strm_file
             else:
                 result[path] = True
-
-        # 起播测试：并发解析直链，失败的不标 STRM
-        if probe_targets:
-            await self._probe_strm_batch(probe_targets, result)
-
-        return {"success": True, "data": {"strm": result}}
+        return result, probe_targets
 
     async def _probe_strm_batch(
         self, probe_targets: Dict[str, str], result: Dict[str, bool]
@@ -890,14 +923,40 @@ class MediaStreamPro(_PluginBase):
         direct = os.path.join(strm_dir, want)
         if os.path.isfile(direct):
             return direct
-        # 慢路径：整树扫一遍（只在播放时触发一次，量级可接受）
+        # 慢路径：整树建一次索引（TTL 内所有查询复用），之后按文件名 O(1) 命中
+        return self._strm_index(strm_dir).get(want.lower())
+
+    def _strm_index(self, strm_dir: str) -> Dict[str, str]:
+        """STRM 目录的「小写文件名 → 绝对路径」索引，``STRM_INDEX_TTL`` 内复用。
+
+        为什么要索引：实测现场 STRM 树 981 个目录 / 33559 个文件 / 11239 个 .strm，
+        单次 ``os.walk`` 约 0.05~0.17 秒。``/strm-check`` 一次几十条路径，逐条全树扫
+        要好几秒，而且它跑在 async endpoint 里 —— 单 worker 宿主的**事件循环**会被
+        整个卡住，其它请求（/ping、/history/transfer）全部排队，客户端表现为「进下载页
+        特别慢、播放按钮探测失败后消失」。建索引后几十条查询只扫一次树。
+        """
+        now = time.time()
+        with _strm_index_lock:
+            cached = _strm_index_cache
+            if (
+                cached["map"]
+                and cached["dir"] == strm_dir
+                and now - cached["ts"] < STRM_INDEX_TTL
+            ):
+                return cached["map"]
+        index: Dict[str, str] = {}
         try:
             for dirpath, _, filenames in os.walk(strm_dir):
-                if want in filenames:
-                    return os.path.join(dirpath, want)
+                for name in filenames:
+                    if not name.lower().endswith(STRM_EXTENSION):
+                        continue
+                    # 同名多份只留第一份（按 walk 顺序），与逐条扫的「命中即返回」一致
+                    index.setdefault(name.lower(), os.path.join(dirpath, name))
         except OSError as error:
             logger.warning(f"扫描 STRM 目录失败：{error}")
-        return None
+        with _strm_index_lock:
+            _strm_index_cache.update({"dir": strm_dir, "ts": now, "map": index})
+        return index
 
     @staticmethod
     def _read_strm_url(strm_file: str) -> Optional[str]:
@@ -923,10 +982,21 @@ class MediaStreamPro(_PluginBase):
         这样「直链失效 / 网盘临时挂 / 容器名解析不了又没配替换」的 STRM 就不会被
         客户端标成可播的 STRM，点进去才 404。
         """
+        now = time.time()
+        with _strm_probe_lock:
+            hit = _strm_probe_cache.get(strm_file)
+            if hit:
+                ttl = STRM_PROBE_TTL if hit[1] else STRM_PROBE_FAIL_TTL
+                if now - hit[0] < ttl:
+                    return hit[1]
         url = self._read_strm_url(strm_file)
         if not url:
-            return False
-        return self._resolve_strm_url(url, timeout=STRM_PROBE_TIMEOUT) is not None
+            playable = False
+        else:
+            playable = self._resolve_strm_url(url, timeout=STRM_PROBE_TIMEOUT) is not None
+        with _strm_probe_lock:
+            _strm_probe_cache[strm_file] = (now, playable)
+        return playable
 
     # ---------- 内部 ----------
 
