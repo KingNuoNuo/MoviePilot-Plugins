@@ -10,7 +10,8 @@ v1.3.0 起 **支持 STRM 播放**（网盘直链模式）：
 - 请求的是视频文件但**本地不存在**、且配置了「STRM 目录」→ 去 STRM 目录树里找
   同名 ``<文件名>.strm``（TgtoDrive 生成的 STRM 与媒体文件同名），找到即按上面跳转；
 - STRM 目录两个来源：「跟随 TgtoDrive 插件」开关打开时，实时读 TgtoDriveSync 插件
-  配置里的 ``strm_dir``（经宿主本机 API，结果缓存 60 秒）；关闭时用本插件自己填的路径。
+  配置里的 ``strm_dir``（走插件基类 ``get_config`` 直接读宿主配置库，结果缓存，失败
+  沿用旧值）；关闭时用本插件自己填的路径。
 
 v1.5.0 起 **STRM 直链替客户端解析**（默认开）：
 
@@ -175,7 +176,7 @@ class MediaStreamPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/mediastream.png")
     # 插件版本
-    plugin_version = "1.5.2"
+    plugin_version = "1.5.3"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -768,36 +769,39 @@ class MediaStreamPro(_PluginBase):
         return self._strm_dir
 
     def _tgtodrive_strm_dir(self) -> str:
-        """读「TgtoDrive STRM 同步」插件配置里的 strm_dir（宿主本机 API，缓存 60 秒）。
+        """读「TgtoDrive STRM 同步」插件配置里的 strm_dir（宿主插件配置库，缓存）。
 
-        为什么走本机 API 而不是直接翻宿主存储：插件配置的落盘位置/键名属于宿主内部
-        实现，跨版本不稳；``GET /api/v1/plugin/{id}`` 是宿主对外契约，v2/v3 一致。
-        apikey 从宿主 settings 读，不落日志不进配置。
+        为什么走 ``self.get_config`` 而不是宿主本机 API：v1.5.2 之前这里是
+        ``requests.get("http://127.0.0.1:3001/api/v1/plugin/TgtoDriveSync")`` 自调，
+        而宿主的 uvicorn 是**单 worker** —— 当 strm-check 请求进来时，它同步阻塞地
+        去请求同一个 127.0.0.1:3001，等于自己等自己，5 秒超时后 strm_dir 变空、
+        且缓存只在成功时刷新 → 之后每次 strm-check 都死锁超时，客户端拿到的 STRM
+        标识就「出现一会后全部消失」。改成走插件基类的 ``get_config``（直接读宿主
+        SQLite 的 plugininstance 表，毫秒级、无网络、无死锁）。
+        失败时保留旧缓存值（stale-while-error），不再因为一次抖动清空目录。
         """
         with _strm_follow_lock:
             cached = _strm_follow_cache
             if cached["dir"] and time.time() - cached["ts"] < STRM_FOLLOW_TTL:
                 return cached["dir"]
+        strm_dir = ""
         try:
-            from app.core.config import settings
-
-            # 容器内自调必须走 uvicorn 的监听口（settings.PORT，通常 3001），
-            # 不是 nginx 对外口（NGINX_PORT=3000）——实测宿主 env：PORT=3001
-            port = getattr(settings, "PORT", None) or 3001
-            token = getattr(settings, "API_TOKEN", "") or ""
-            resp = requests.get(
-                f"http://127.0.0.1:{port}/api/v1/plugin/TgtoDriveSync",
-                params={"apikey": token},
-                timeout=5,
-            )
-            data = (resp.json() or {}).get("data") or {}
-            strm_dir = str(data.get("strm_dir") or "").strip()
+            # 插件基类提供的跨插件配置读取：读本地 plugininstance 表，不经 HTTP
+            cfg = self.get_config("TgtoDriveSync") or {}
+            strm_dir = str(cfg.get("strm_dir") or "").strip()
         except Exception as error:
             logger.warning(f"读取 TgtoDrive 插件 STRM 目录失败：{error}")
             strm_dir = ""
         if strm_dir:
             with _strm_follow_lock:
                 _strm_follow_cache.update({"ts": time.time(), "dir": strm_dir})
+        else:
+            # 本次没读到：保留上次成功的缓存（哪怕已过期），避免一次抖动清空角标
+            with _strm_follow_lock:
+                prev = _strm_follow_cache["dir"]
+            if prev:
+                logger.info("未读到 TgtoDrive STRM 目录，沿用上次缓存值")
+                return prev
         return strm_dir
 
     def _find_strm_for(self, target: str) -> Optional[str]:
