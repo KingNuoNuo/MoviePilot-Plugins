@@ -86,7 +86,7 @@ RATING_VER = 7
 # 缓存判定规则变化时 +1，即可只冲掉空缺缓存、保住 30 天的有效评分。
 # v8 (v1.4.3)：v1.4.2 期间豆瓣抖动，一批带年份键的假空缺被缓存（App 重试 4 轮全被挡），
 # 升一档全部作废重查；同时上线「空缺可信度」判定（见 [miss_cacheable]）。
-MISS_RATING_VER = 8
+MISS_RATING_VER = 9
 
 _UAS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -705,8 +705,15 @@ def fill_ratings(
             entry["rating_ts"] = now_ts
             entry["rating_ver"] = MISS_RATING_VER
             entry["vote_average"] = ""
-        # 镜像进共享缓存，/rating 那边就不用再查一遍
-        if (rate or miss_cacheable()) and store_save is not None:
+        # 镜像进共享缓存，/rating 那边就不用再查一遍。
+        # ⚠️ 空缺只有在共享缓存里**没有更新鲜的好分**时才允许写 —— 否则身份缓存
+        # 条目丢了 rating 标记后重查失败，会把 /rating 刚查到的好分覆盖成空，
+        # App 端从此 3 天看不到这条的分（2026-10-20 下午二次毒缓存的根因）
+        se = shared.get(key)
+        shared_has_fresh_rate = bool(
+            se and str(se.get("vote_average") or "") and is_fresh(se, now_ts))
+        if (rate or (miss_cacheable() and not shared_has_fresh_rate)) \
+                and store_save is not None:
             shared[key] = {"vote_average": rate,
                            "rating_ts": now_ts,
                            "rating_ver": RATING_VER if rate else MISS_RATING_VER}
