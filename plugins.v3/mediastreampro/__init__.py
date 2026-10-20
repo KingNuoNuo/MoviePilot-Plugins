@@ -175,7 +175,7 @@ class MediaStreamPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/mediastream.png")
     # 插件版本
-    plugin_version = "1.5.1"
+    plugin_version = "1.5.2"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -528,7 +528,7 @@ class MediaStreamPro(_PluginBase):
             },
         ]
 
-    def strm_check(self, request: Request) -> Any:
+    async def strm_check(self, request: Request) -> Any:
         """批量判断一批媒体路径是否有对应 STRM（供客户端打 STRM 标识）。
 
         POST JSON ``{"paths": [...]}``（媒体库内绝对路径）。对每条路径先 resolve 放行，
@@ -542,7 +542,8 @@ class MediaStreamPro(_PluginBase):
 
         body: Dict[str, Any] = {}
         try:
-            payload = request.json() if hasattr(request, "json") else None
+            # Starlette 的 request.json() 是 async 方法，必须 await，否则拿到 coroutine
+            payload = await request.json() if hasattr(request, "json") else None
             if isinstance(payload, dict):
                 body = payload
         except Exception:

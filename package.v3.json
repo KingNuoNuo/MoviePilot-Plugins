@@ -71,7 +71,7 @@
     "name": "媒体流播放",
     "description": "把已整理入库与下载目录里的视频按原始文件流式传给客户端播放（支持拖动进度）；支持 STRM 网盘直链播放：有 STRM 就优先 302 跳转（流量不过 NAS），默认替客户端解析容器名、跟随跳转到最终公网 CDN，内外网都能播。自动跟随宿主「目录配置」里的媒体库与下载路径，STRM 目录可跟随 TgtoDrive 插件。",
     "labels": "媒体库,播放",
-    "version": "1.5.1",
+    "version": "1.5.2",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/mediastream.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -87,7 +87,8 @@
       "v1.3.0": "新增 **STRM 网盘直链播放**，App 整理记录里 STRM 模式的影片也能直接 ▶：① 请求路径是 .strm 文件时，读出里面的网盘直链（http/https）后 **302 跳转**给播放器，流量直接走 播放器 ↔ 网盘 CDN，不过 NAS，Range/拖动进度由播放器对直链续传；② 请求的是视频文件但本地不存在、且配置了「STRM 目录」时，自动去 STRM 目录树里找同名 <文件名>.strm（TgtoDrive 生成的 STRM 与媒体文件同名，先试同位置再全树找一遍），找到即跳转；③ STRM 目录两个来源：新增「跟随 TgtoDrive 插件」开关（打开后实时读「TgtoDrive STRM 同步」插件配置里的 STRM 目录，经宿主本机 API，缓存 60 秒），关闭则用本插件自己填的容器内路径；④ 生效的 STRM 目录加入 /stream、/season 的放行白名单，.strm 文件本身也可直接请求；/ping 增加 strm_dir 字段；/season 对 STRM 影片不做同季扫描（网盘直链没有目录结构可扫），只回它自己。本地文件播放行为完全不变。",
       "v1.4.0": "改为 **有 STRM 就优先走 STRM**：配置了 STRM 目录后，只要影片能对上同名 ``.strm``（先同位置、再全树找），``/stream`` 一律 302 网盘直链 —— 哪怕本地（网盘挂载）文件读得到也不再直读，播放流量直接走 播放器 ↔ 网盘 CDN，不占 NAS 带宽。对不上 ``.strm`` 的影片维持原来的本地直读；未配置 STRM 目录时行为与 1.3.0 完全一致。",
       "v1.5.0": "新增 **替客户端解析网盘直链**（默认开）：TgtoDrive 生成的 STRM 直链 host 是容器名 ``TgtoDrive``，手机和 MoviePilot 容器都解析不了，直接 302 给手机会 DNS 失败、播不了（Emby 能播是因为它服务端在 NAS 上先走完了跳转链）。现在插件默认先请求直链、逐跳跟随 302（最多 4 跳），把最终公网 CDN 直链（如 ``https://xxx.pd1.cjjd19.com/...``）302 给手机 —— 手机最终连公网 CDN，内外网都能播、流量不过 NAS。新增两个配置：①「替客户端解析网盘直链」开关（关掉退回 v1.4.0 直接 302 行为）；②「直链主机名替换」（直链 host 在容器里解析不了时先替换成该地址，TgtoDrive 是 host 网络模式，填它所在主机内网 IP 如 10.0.0.4 即可）。",
-      "v1.5.1": "新增 `POST /strm-check` 接口：按 ``{paths: [...]}`` 批量判断一批媒体库绝对路径是否能在 STRM 目录对上同名 ``.strm``（路径本身是 ``.strm`` 也算有），返回 ``{path: bool}`` 映射 —— 供 App 在整理记录列表里给可播的 STRM 影片打标识。未配置 STRM 目录时返回空映射（客户端自然不画标识），越权路径静默跳过。"
+      "v1.5.1": "新增 `POST /strm-check` 接口：按 ``{paths: [...]}`` 批量判断一批媒体库绝对路径是否能在 STRM 目录对上同名 ``.strm``（路径本身是 ``.strm`` 也算有），返回 ``{path: bool}`` 映射 —— 供 App 在整理记录列表里给可播的 STRM 影片打标识。未配置 STRM 目录时返回空映射（客户端自然不画标识），越权路径静默跳过。",
+      "v1.5.2": "修复 `/strm-check` 始终返回空映射：Starlette 的 `request.json()` 是 async 方法，同步 endpoint 里直接调用拿到的是 coroutine 而非 dict，body 永远解析失败。改为 `async def` + `await request.json()`（与宿主其他 POST 插件接口一致）。"
     }
   }
 }
