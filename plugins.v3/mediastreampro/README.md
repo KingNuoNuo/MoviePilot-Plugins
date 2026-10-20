@@ -74,6 +74,7 @@ v1.5.0 起本插件默认做同样的事：请求直链、逐跳跟随（最多 
 | `HEAD /api/v1/plugin/MediaStreamPro/stream?path=<媒体文件绝对路径>` | 只回头（`Content-Type`、`Content-Length`、`Accept-Ranges: bytes`），不打开文件读数据、不回文件体，供外部播放器/下载器探路；STRM 同样 302 |
 | `GET /api/v1/plugin/MediaStreamPro/ping` | 可用性探测，返回 `{success, data:{version, roots, strm_dir}}`，客户端用它决定是否显示播放入口 |
 | `GET /api/v1/plugin/MediaStreamPro/season?path=<媒体文件绝对路径>` | 返回**同一季还有哪些集**（`{season, stem, episodes:[{path, episode, label, name, size}]}`），供客户端做选集；STRM 影片不做同季扫描（网盘直链没有目录结构可扫），只回它自己 |
+| `POST /api/v1/plugin/MediaStreamPro/strm-check` | v1.5.1 起。body `{paths:[...]}`，批量判断一批媒体库绝对路径能否在 STRM 目录对上同名 `.strm`（路径本身是 `.strm` 也算有），返回 `{path: bool}` 映射，供客户端给可播的 STRM 影片打标识。未配置 STRM 目录时返回空映射 |
 
 认证走宿主 `bear` 模式（JWT / API 令牌 / token），插件自己不做任何凭据解析。
 

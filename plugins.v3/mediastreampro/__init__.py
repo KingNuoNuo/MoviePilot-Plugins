@@ -175,7 +175,7 @@ class MediaStreamPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/mediastream.png")
     # 插件版本
-    plugin_version = "1.5.0"
+    plugin_version = "1.5.1"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -510,6 +510,15 @@ class MediaStreamPro(_PluginBase):
                                "供客户端把「下载完成」历史按种子名匹配到文件；文件被删则匹配不到。",
             },
             {
+                "path": "/strm-check",
+                "endpoint": self.strm_check,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "批量判断是否 STRM 媒体",
+                "description": "POST JSON {paths: [...]}，逐个判断能否在 STRM 目录里对上同名 .strm，"
+                               "返回 {path: bool} 映射，供客户端在列表里打 STRM 标识。",
+            },
+            {
                 "path": "/ping",
                 "endpoint": self.ping,
                 "methods": ["GET"],
@@ -518,6 +527,44 @@ class MediaStreamPro(_PluginBase):
                 "description": "返回当前放行的媒体库目录，供客户端判断是否显示播放入口。",
             },
         ]
+
+    def strm_check(self, request: Request) -> Any:
+        """批量判断一批媒体路径是否有对应 STRM（供客户端打 STRM 标识）。
+
+        POST JSON ``{"paths": [...]}``（媒体库内绝对路径）。对每条路径先 resolve 放行，
+        再复用 [_find_strm_for] 判是否有同名 ``.strm``；路径本身就是 ``.strm`` 也算有。
+        返回 ``{path: bool}`` 映射。未配置 STRM 目录时返回空映射（客户端自然不画标识）。
+        """
+        strm_dir = self.effective_strm_dir()
+        if not strm_dir:
+            # 没配置 STRM 目录 → 空映射，客户端自然不画标识
+            return {"success": True, "data": {"strm": {}}}
+
+        body: Dict[str, Any] = {}
+        try:
+            payload = request.json() if hasattr(request, "json") else None
+            if isinstance(payload, dict):
+                body = payload
+        except Exception:
+            body = {}
+        raw = body.get("paths")
+        if not isinstance(raw, list):
+            raw = []
+
+        result: Dict[str, bool] = {}
+        for path in raw:
+            if not isinstance(path, str) or not path:
+                continue
+            target = self.resolve(path)
+            if target is None:
+                # 越权路径：不放进结果，客户端拿不到就当非 strm
+                continue
+            if target.lower().endswith(STRM_EXTENSION):
+                result[path] = True
+                continue
+            result[path] = self._find_strm_for(target) is not None
+
+        return {"success": True, "data": {"strm": result}}
 
     def ping(self) -> Any:
         """可用性探测：客户端进下载页时探一次，决定是否显示播放按钮。"""
