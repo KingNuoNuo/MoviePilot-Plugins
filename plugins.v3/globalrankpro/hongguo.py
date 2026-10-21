@@ -576,15 +576,46 @@ class HongguoSource(RankSource):
         if not self._boards:
             return {"board_count": 0, "item_count": 0,
                     "message": "未配置任何红果榜单"}
+        # 上一次快照：某个榜这次抓空时用它顶上，避免该榜在 App 里整个消失
+        prev: Dict[str, dict] = {}
+        try:
+            old = self.get_data("snapshot") or {}
+            for b in (old.get("boards") or []):
+                if isinstance(b, dict) and b.get("type") and b.get("items"):
+                    prev[str(b["type"])] = b
+        except Exception as e:
+            logger.warning(f"读取红果旧快照失败（忽略，按全新抓取处理）：{e}")
+
         boards: List[dict] = []
+        fresh: set = set()
         for code in self._boards:
-            try:
-                board = self.__fetch_board(code)
-            except Exception as e:
-                logger.error(f"红果{self._BOARD_NAMES.get(code, code)}抓取失败：{e}")
-                continue
+            name = self._BOARD_NAMES.get(code, code)
+            board = None
+            # 抓空重试一次：官网偶发返回空 rankList（限流 / SSR 抖动），
+            # 以前这里直接跳过 → 该榜从快照里消失，App 分榜栏跟着少一个
+            for attempt in range(2):
+                try:
+                    board = self.__fetch_board(code)
+                except Exception as e:
+                    logger.error(f"红果{name}抓取失败（第 {attempt + 1} 次）：{e}")
+                    board = None
+                if board:
+                    break
+                if attempt == 0:
+                    time.sleep(_PAGE_INTERVAL)
             if board:
                 boards.append(board)
+                fresh.add(code)
+            else:
+                kept = prev.get(code)
+                if kept:
+                    boards.append(kept)
+                    logger.warning(
+                        f"红果{name}本次未抓到条目，沿用上次快照"
+                        f"（{kept.get('updated_at')}，{len(kept.get('items') or [])} 条）"
+                    )
+                else:
+                    logger.warning(f"红果{name}本次未抓到条目，且没有可沿用的旧数据")
             time.sleep(_PAGE_INTERVAL)
         if not boards:
             logger.error("红果榜单未抓取到任何条目（网络异常或页面结构变化）")
@@ -595,14 +626,23 @@ class HongguoSource(RankSource):
         updated_at = now.strftime("%Y-%m-%d %H:%M:%S")
         total = sum(len(board["items"]) for board in boards)
         for board in boards:
-            board["updated_at"] = updated_at
+            # 只有真抓到条目的榜才盖新时间，沿用的旧榜保留它自己的时间戳，
+            # 免得 App 上把一天前的数据显示成「刚刚更新」
+            if str(board.get("type")) in fresh:
+                board["updated_at"] = updated_at
         self.save_data("snapshot", {
             "updated_at": updated_at,
             "total": total,
             "boards": boards,
         })
-        logger.info(f"红果榜单刷新完成：{len(boards)} 个榜单 {total} 条")
-        return {"board_count": len(boards), "item_count": total, "message": ""}
+        stale = [self._BOARD_NAMES.get(c, c) for c in self._boards if c not in fresh]
+        logger.info(
+            f"红果榜单刷新完成：{len(boards)} 个榜单 {total} 条"
+            + (f"（沿用旧数据：{'、'.join(stale)}）" if stale else "")
+        )
+        return {"board_count": len(boards), "item_count": total,
+                "message": (f"以下榜单未抓到条目，沿用上次数据：{'、'.join(stale)}"
+                            if stale else "")}
 
     # ==================== 对外接口 ====================
 

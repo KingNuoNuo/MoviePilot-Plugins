@@ -58,7 +58,7 @@ import os
 import re
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 from fastapi import Request
@@ -195,7 +195,7 @@ class MediaStreamPro(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/mediastream.png")
     # 插件版本
-    plugin_version = "1.5.5"
+    plugin_version = "1.5.7"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -533,7 +533,8 @@ class MediaStreamPro(_PluginBase):
                 "summary": "视频文件流",
                 "description": "按 path（媒体库内的绝对路径）返回原始视频文件，"
                                "支持 HTTP Range（客户端可拖动进度）；HEAD 只回头不回文件体。"
-                               "只放行宿主目录配置里媒体库路径下的视频文件。",
+                               "只放行宿主目录配置里媒体库路径下的视频文件。"
+                               "strm=0 时不走同名 .strm 直链，直读原文件（客户端「STRM 播放」关掉时用）。",
             },
             {
                 "path": "/season",
@@ -583,6 +584,10 @@ class MediaStreamPro(_PluginBase):
         开了「起播测试」（``strm_check_probe``，默认开）时，对有 .strm 的条目进一步
         实际解析直链，解析不出可播地址的**不标 STRM**（避免点进去才 404）。解析走线程池
         并发（限流 ``STRM_PROBE_CONCURRENCY``），同步 requests 不阻塞事件循环。
+
+        起播测试**整段异常**时降低要求：单条测试抛异常的条目不写结论，整批跑完后按
+        「本批有任意一个 strm 能起播 → 按有 .strm 算 True」补结论（宁可贵，不让 ▶
+        整片消失）；整段异常到连逐条降级都没跑成时，按「有 .strm 即 True」兜底。
         """
         strm_dir = self.effective_strm_dir()
         if not strm_dir:
@@ -618,7 +623,15 @@ class MediaStreamPro(_PluginBase):
 
         # 起播测试：并发解析直链，失败的不标 STRM
         if probe_targets:
-            await self._probe_strm_batch(probe_targets, result)
+            try:
+                await self._probe_strm_batch(probe_targets, result)
+            except Exception as error:
+                # 起播测试整段异常（连逐条降级都没跑成）：此时没有任何「能不能播」
+                # 的信号可查，按「有 .strm」即算可播兜底 —— 起播测试只是加分项，
+                # 不该让一次抽风把 ▶ 整片收走（点进去播不了还有原始直链兜底）。
+                logger.warning(f"STRM 起播测试整段异常，降级为有 .strm 即算可播：{error}")
+                for path in probe_targets:
+                    result.setdefault(path, True)
 
         return {"success": True, "data": {"strm": result}}
 
@@ -652,23 +665,61 @@ class MediaStreamPro(_PluginBase):
     async def _probe_strm_batch(
         self, probe_targets: Dict[str, str], result: Dict[str, bool]
     ) -> None:
-        """并发做起播测试，结果写回 ``result``。同步解析丢线程池，信号量限流。"""
+        """并发做起播测试，结果写回 ``result``。同步解析丢线程池，信号量限流。
+
+        单条测试**抛异常**时（网络瞬时抽风、执行器出岔子等），先前会被
+        ``gather(return_exceptions=True)`` 静默吞掉、结果里直接缺这个 key ——
+        客户端拿不到 key 就当非 STRM，▶ 连片消失。现在把这些异常条目集中起来，
+        整批跑完后按降级规则补结论：
+
+        - 本批里**只要有任意一个** strm 实测能起播 → 起播链路是通的，异常条目按
+          「有 .strm」算 True（宁可贵，不让 ▶ 整片消失）；
+        - 整批没有一个能播 → 链路真断了，异常条目算 False。
+        """
         import asyncio
 
         loop = asyncio.get_running_loop()
         sem = asyncio.Semaphore(STRM_PROBE_CONCURRENCY)
+        # 测试抛异常、还没有结论的路径；playable_any = 本批是否有任意一个真能播
+        unknown: Set[str] = set()
+        playable_any = False
 
         async def probe_one(path: str, strm_file: str) -> None:
+            nonlocal playable_any
             async with sem:
-                playable = await loop.run_in_executor(
-                    None, self._probe_strm_playable, strm_file
-                )
-            result[path] = playable
+                try:
+                    playable = await loop.run_in_executor(
+                        None, self._probe_strm_playable, strm_file
+                    )
+                except Exception as error:
+                    logger.warning(
+                        f"STRM 起播测试异常，转入降级判断：{os.path.basename(strm_file)}：{error}"
+                    )
+                    unknown.add(path)
+                    return
+            result[path] = bool(playable)
+            if playable:
+                playable_any = True
 
-        await asyncio.gather(
-            *(probe_one(p, f) for p, f in probe_targets.items()),
-            return_exceptions=True,
-        )
+        try:
+            await asyncio.gather(
+                *(probe_one(p, f) for p, f in probe_targets.items()),
+                return_exceptions=True,
+            )
+        except Exception as error:
+            # 保底：gather 自身出问题（子异常已被 return_exceptions 吃掉，基本不会到这）
+            logger.warning(f"STRM 起播测试整段异常，全部转入降级判断：{error}")
+            unknown.update(p for p in probe_targets if p not in result)
+
+        if unknown:
+            # 降级规则：本批有任意一个 strm 能起播 → 异常条目按「有 .strm」算 True；
+            # 整批没有一个能播 → 链路真断了，异常条目维持 False
+            for path in unknown:
+                result[path] = playable_any
+            if playable_any:
+                logger.info(
+                    f"STRM 起播测试 {len(unknown)} 条异常，按「本批有可播直链」降级放行"
+                )
 
     def ping(self) -> Any:
         """可用性探测：客户端进下载页时探一次，决定是否显示播放按钮。"""
@@ -681,11 +732,16 @@ class MediaStreamPro(_PluginBase):
             },
         }
 
-    def stream(self, request: Request, path: str = "") -> Any:
+    def stream(self, request: Request, path: str = "", strm: int = 1) -> Any:
         """返回视频文件流（Range 由 Starlette 的 FileResponse 处理）。
 
         配置了 STRM 目录时**优先 302 网盘直链**：只要能对上同名 .strm，哪怕本地
         （网盘挂载）文件读得到也走直链，不占 NAS 流量；对不上才直读本地文件。
+
+        ``strm=0``（客户端「播放 › STRM 播放」关掉时带上来）跳过「同名 .strm 优先」
+        这一支，直接读原文件 —— 留给「怀疑 strm 解析有问题、先确认原文件能不能播」
+        这种排查场景。注意**请求路径本身就是 .strm** 时不受该参数影响：那种文件只有
+        几十字节，跳过解析必然播不了，所以照旧解析直链。
 
         ``path`` 是普通标量默认参数 → FastAPI 当成查询参数，不需要额外声明。
         ``request`` 只用来区分 GET / HEAD：HEAD 自己构造一个只有响应头的 200，
@@ -700,13 +756,14 @@ class MediaStreamPro(_PluginBase):
                 {"success": False, "message": "路径不在可播放范围内"}, status_code=403
             )
 
-        # STRM：请求的就是 .strm 文件 → 读出直链 302 跳转
+        # STRM：请求的就是 .strm 文件 → 读出直链 302 跳转（不受 strm 开关影响）
         if target.lower().endswith(STRM_EXTENSION):
             return self._stream_strm(request, target)
 
         # STRM 优先：配置了 STRM 目录且能对上同名 .strm → 一律 302 网盘直链，
         # 哪怕本地（网盘挂载）文件读得到也不走 NAS 流量；对不上才直读本地。
-        if self.effective_strm_dir():
+        # 客户端把「STRM 播放」关掉（strm=0）时整段跳过，直读原文件。
+        if strm and self.effective_strm_dir():
             strm_file = self._find_strm_for(target)
             if strm_file:
                 return self._stream_strm(request, strm_file)
@@ -954,6 +1011,17 @@ class MediaStreamPro(_PluginBase):
                     index.setdefault(name.lower(), os.path.join(dirpath, name))
         except OSError as error:
             logger.warning(f"扫描 STRM 目录失败：{error}")
+        # 重建出来是空表（挂载抖了一下 / rclone 暂时没响应）时不要覆盖上一份索引：
+        # 空索引 = 所有路径都判「没有 .strm」，客户端整片 S 角标消失，且要等下次
+        # 重建（TTL 120s）才恢复 —— 用户看到的是「S 一会有一会没有」。
+        if not index:
+            with _strm_index_lock:
+                stale = _strm_index_cache
+                if stale["map"] and stale["dir"] == strm_dir:
+                    logger.warning(
+                        f"STRM 索引重建为空，沿用上一次的索引（{len(stale['map'])} 条）"
+                    )
+                    return stale["map"]
         with _strm_index_lock:
             _strm_index_cache.update({"dir": strm_dir, "ts": now, "map": index})
         return index
