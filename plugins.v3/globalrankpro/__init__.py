@@ -62,9 +62,12 @@ from . import page as page_ui
 # 后写完的覆盖先写完的（表现为抓到一半的榜单被另一轮覆盖掉）。
 _REFRESH_LOCKS: Dict[str, threading.Lock] = {}
 _REFRESH_LOCKS_GUARD = threading.Lock()
-# douban_rating 共享缓存的读改写互斥：/rating 并发请求各自读整份 dict 再写回，
-# 不加锁时后写的那份会把别的请求刚查到的评分覆盖掉
-_RATING_CACHE_LOCK = threading.Lock()
+# 共享评分缓存（douban_rating）的读-改写互斥。
+# 这份缓存有三个写入方：/rating 接口、猫眼榜单补分、Netflix 榜单补分 ——
+# 后两者经由 douban.fill_ratings 的回调写入，读-改写跨度是**整整一轮识别**
+# （几分钟、几十次网络请求）。三者必须共用同一把锁并「写前重读最新值」，
+# 否则先开始的那一路会拿几分钟前的旧副本覆盖掉别人刚写进去的评分。
+RATING_STORE_LOCK = douban.RATING_STORE_LOCK
 
 
 def _refresh_lock(source_id: str) -> threading.Lock:
@@ -816,8 +819,10 @@ class GlobalRankPro(_PluginBase):
         if updates:
             # 只把本轮新增的条目并进「当前最新」的缓存再整体写回：整份 dict
             # 读-改-写会用本轮开始时读到的旧副本覆盖别的请求刚写进去的评分
-            #（App 同屏会并发打多个 /rating，实测一次浏览就是十几并发）
-            with _RATING_CACHE_LOCK:
+            #（App 同屏会并发打多个 /rating，实测一次浏览就是十几并发）。
+            # 与榜单补分共用同一把锁（见 RATING_STORE_LOCK）：锁只能防同一把锁
+            # 保护的临界区互相踩，两条路各加各的仍会互相覆盖。
+            with douban.rating_store_lock():
                 latest = self.get_data("douban_rating")
                 if not isinstance(latest, dict):
                     latest = {}

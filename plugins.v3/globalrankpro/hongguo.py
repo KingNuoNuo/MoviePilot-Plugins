@@ -38,7 +38,9 @@ import datetime
 import hashlib
 import html as html_lib
 import json
+import os
 import re
+import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -111,11 +113,43 @@ _POSTER_ALLOWED = (
 # 进程内缓存：一屏 20 张、推荐页更多，翻页/回退会反复请求同一批图
 _POSTER_CACHE: "OrderedDict[str, Tuple[bytes, str]]" = OrderedDict()
 _POSTER_CACHE_MAX = 64
+# ⚠️ /poster 是**匿名可访问**的（<img> 带不了请求头），App 一屏十几张封面就是
+# 十几个并发请求打进同一个接口。OrderedDict 的 get → move_to_end → popitem
+# 不是一个原子操作，无锁时理论上存在「刚 get 到值、另一线程把该键淘汰、
+# 再 move_to_end」的窗口。加锁成本极低（只在命中/写入时短暂持有），
+# 换来的是一个确定不会抛 KeyError 的接口。
+_POSTER_LOCK = threading.Lock()
 # 海报是静态资源，让浏览器长期缓存，减少宿主回源
 _POSTER_CACHE_CONTROL = "public, max-age=604800"
 # 落盘缓存目录（v1.4.3 优化③）：v3 每次调度重建插件实例，内存 LRU 必丢；
 # 图放宿主 config 目录下，跨重启复用，服务端基本零回源
 _POSTER_DISK_DIR = None  # 惰性初始化（首次用到时创建）
+# 落盘时判定「这份缓存是否真的完整」所需的图片魔数：
+# 字节图床返回 JPEG（FF D8），电商 CDN 与 mzstatic 还有 PNG / GIF / WebP。
+# 只认魔数不认长度 —— 写盘中途被杀留下的半张图，长度不会异常但头部之后没有
+# 完整数据。判据取各格式的**最小可识别前缀**（不必是完整文件头）：
+# 既能认出「这是个图片」，也能认出「这连图片头都没写完」。
+_POSTER_MAGIC = (b"\xff\xd8",              # JPEG
+                 b"\x89PNG\r\n\x1a\n",     # PNG
+                 b"GIF87a", b"GIF89a",
+                 b"RIFF")                  # WebP 的容器头
+
+
+def _looks_like_image(content: bytes) -> bool:
+    """按魔数判断字节是不是一张完整写入的图片。
+
+    为什么需要：落盘时 ``img`` 与 ``meta`` 是两次写，不在同一事务里。写完 img、
+    崩在写 meta 之前时，下次进来两个文件都 ``exists()``（meta 是上一次留下的
+    旧值），于是半张图会被当成有效缓存返回，并按 7 天的 ``Cache-Control``
+    缓存给所有客户端 —— 一张坏图要等一周才消失。
+
+    真正的根治手段是写盘用临时文件 + ``os.replace``（见
+    [HongguoSource.__write_disk_poster]）；这里是给「原子写之前的旧版本残留」
+    兜一道底，判据用魔数而不是长度：半张图的字节数完全可能看起来正常。
+    """
+    if not content:
+        return False
+    return any(content.startswith(magic) for magic in _POSTER_MAGIC)
 
 
 def _poster_disk_path(target: str):
@@ -355,6 +389,11 @@ class HongguoSource(RankSource):
 
         只放行字节图床白名单里的图片，其余一律 403——这个接口是匿名可访问的，
         不做白名单就等于开放代理。
+
+        缓存三层：内存 LRU（带锁）→ 落盘缓存 → 回源。落盘写入是**原子**的
+        （先写临时文件再 ``os.replace``），且读取时校验图片魔数：img 与 meta
+        分两次写，写到一半被杀会留下「img 存在 + meta 是上一次的旧值」的组合，
+        两个 ``exists()`` 都成立却是一张半图。
         """
         from fastapi import HTTPException
         from fastapi.responses import Response
@@ -374,30 +413,24 @@ class HongguoSource(RankSource):
         if not allowed:
             raise HTTPException(status_code=403, detail="不允许代理该地址")
 
-        cached = _POSTER_CACHE.get(target)
-        if cached is not None:
-            _POSTER_CACHE.move_to_end(target)
-            return Response(content=cached[0], media_type=cached[1],
-                            headers={"Cache-Control": _POSTER_CACHE_CONTROL})
+        with _POSTER_LOCK:
+            cached = _POSTER_CACHE.get(target)
+            if cached is not None:
+                _POSTER_CACHE.move_to_end(target)
+                return Response(content=cached[0], media_type=cached[1],
+                                headers={"Cache-Control": _POSTER_CACHE_CONTROL})
 
         # 落盘缓存（v1.4.3 优化③）：内存 LRU 在 v3 每次调度重建实例时必丢，
         # 重启后同一张海报反复回字节图床下载。先查磁盘，命中就不出门。
         disk = _poster_disk_path(target)
         if disk is not None:
-            img_file, meta_file = disk
-            if img_file.exists() and meta_file.exists():
-                try:
-                    content = img_file.read_bytes()
-                    media_type = meta_file.read_text("utf-8").strip() or "image/jpeg"
-                    if content and media_type.startswith("image/"):
-                        _POSTER_CACHE[target] = (content, media_type)
-                        while len(_POSTER_CACHE) > _POSTER_CACHE_MAX:
-                            _POSTER_CACHE.popitem(last=False)
-                        return Response(
-                            content=content, media_type=media_type,
-                            headers={"Cache-Control": _POSTER_CACHE_CONTROL})
-                except Exception as e:
-                    logger.warning(f"红果海报读盘缓存失败，回源下载：{e}")
+            hit = self.__read_disk_poster(disk)
+            if hit is not None:
+                content, media_type = hit
+                self.__remember_poster(target, content, media_type)
+                return Response(
+                    content=content, media_type=media_type,
+                    headers={"Cache-Control": _POSTER_CACHE_CONTROL})
 
         try:
             response = RequestUtils(
@@ -425,21 +458,67 @@ class HongguoSource(RankSource):
             media_type = str(headers_obj.get("Content-Type") or media_type).split(";")[0]
         if not media_type.startswith("image/"):
             raise HTTPException(status_code=502, detail="海报响应不是图片")
+        content = bytes(content)
+        if not _looks_like_image(content):
+            raise HTTPException(status_code=502, detail="海报响应不是有效图片")
 
-        _POSTER_CACHE[target] = (content, media_type)
-        while len(_POSTER_CACHE) > _POSTER_CACHE_MAX:
-            _POSTER_CACHE.popitem(last=False)
+        self.__remember_poster(target, content, media_type)
         # 写盘（失败不影响返回，内存缓存仍有效）
         if disk is not None:
-            img_file, meta_file = disk
-            try:
-                img_file.parent.mkdir(parents=True, exist_ok=True)
-                img_file.write_bytes(content)
-                meta_file.write_text(media_type, "utf-8")
-            except Exception as e:
-                logger.warning(f"红果海报写盘缓存失败：{e}")
+            self.__write_disk_poster(disk, content, media_type)
         return Response(content=content, media_type=media_type,
                         headers={"Cache-Control": _POSTER_CACHE_CONTROL})
+
+    @staticmethod
+    def __remember_poster(target: str, content: bytes, media_type: str) -> None:
+        """写入内存 LRU 并淘汰超量条目（整段持锁）。"""
+        with _POSTER_LOCK:
+            _POSTER_CACHE[target] = (content, media_type)
+            _POSTER_CACHE.move_to_end(target)
+            while len(_POSTER_CACHE) > _POSTER_CACHE_MAX:
+                _POSTER_CACHE.popitem(last=False)
+
+    @staticmethod
+    def __read_disk_poster(disk) -> Optional[Tuple[bytes, str]]:
+        """读落盘缓存；文件缺失、读失败或内容不像图片时返回 None（走回源）。"""
+        img_file, meta_file = disk
+        if not (img_file.exists() and meta_file.exists()):
+            return None
+        try:
+            content = img_file.read_bytes()
+            media_type = meta_file.read_text("utf-8").strip() or "image/jpeg"
+        except Exception as e:
+            logger.warning(f"红果海报读盘缓存失败，回源下载：{e}")
+            return None
+        # 两个 exists() 成立不代表内容完整：写盘中途被杀会留下半张图，
+        # 而 meta 还是上一次留下的旧值（判据见 [_looks_like_image]）
+        if not content or not media_type.startswith("image/") \
+                or not _looks_like_image(content):
+            logger.warning("红果海报落盘缓存不完整，回源重下")
+            return None
+        return content, media_type
+
+    @staticmethod
+    def __write_disk_poster(disk, content: bytes, media_type: str) -> None:
+        """原子写盘：先写临时文件再 ``os.replace``，避免读到半张图。
+
+        ``write_bytes`` 是「打开 → 截断 → 逐块写」，并发读者或中途崩溃都能看到
+        不完整的文件；``os.replace`` 在同一文件系统内是原子的，读者要么看到旧
+        文件、要么看到完整的新文件。
+        """
+        img_file, meta_file = disk
+        try:
+            img_file.parent.mkdir(parents=True, exist_ok=True)
+            # meta 先写：它是「这份 img 的类型说明」，写在 img 之前，
+            # 保证「meta 存在」永远蕴含「对应 img 已完整落盘」
+            meta_tmp = meta_file.with_suffix(".meta.tmp")
+            meta_tmp.write_text(media_type, "utf-8")
+            os.replace(str(meta_tmp), str(meta_file))
+            img_tmp = img_file.with_suffix(".img.tmp")
+            img_tmp.write_bytes(content)
+            os.replace(str(img_tmp), str(img_file))
+        except Exception as e:
+            logger.warning(f"红果海报写盘缓存失败：{e}")
 
     def fetch(self) -> Dict[str, Any]:
         """执行一次红果榜单抓取，返回摘要字典。"""

@@ -28,6 +28,7 @@ import random
 import re
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.sdk.config import settings
@@ -106,6 +107,26 @@ _last_request_at = 0.0
 # 全局限流闸：等间隔 + 发请求必须在锁内完成，否则并发线程同时看到「间隔已到」
 # 一起放行，60 条并发查询两秒内全砸向豆瓣触发瞬时限流（2026-10-20 实锤）
 _RATE_LOCK = threading.Lock()
+# 共享评分缓存（插件数据键 douban_rating）的读-改-写互斥。
+# ⚠️ 这份缓存有**三个**写入方：/rating 接口、猫眼榜单补分、Netflix 榜单补分。
+# 后两者经由 [fill_ratings] 的 store_get / store_save 回调写入，读-改-写的跨度
+# 是整整一轮识别（几分钟、几十次网络请求）。共用一把锁 + 写前重读最新值，
+# 才不会让「几分钟前读到的旧副本」覆盖掉 App 刚查到的评分。
+RATING_STORE_LOCK = threading.Lock()
+
+
+@contextmanager
+def rating_store_lock():
+    """获取共享评分缓存的写锁（供 /rating 与 fill_ratings 共用）。
+
+    包成 context manager 是为了让「拿到锁之后抛异常」也不会把锁带死 ——
+    一次网络抖动就锁死整份缓存写回，比不锁更糟。
+    """
+    RATING_STORE_LOCK.acquire()
+    try:
+        yield
+    finally:
+        RATING_STORE_LOCK.release()
 _blocked_until = 0.0
 _empty_streak = 0
 _probe_depth = 0
@@ -702,7 +723,12 @@ def fill_ratings(
         return 0
     now_ts = (now or datetime.datetime.now()).timestamp()
     shared: Dict[str, Any] = {}
-    shared_dirty = False
+    # ⚠️ 只记「本轮新增/更新的键」，不直接改 store_get() 拿到的整份 dict：
+    # 这一轮要跑几分钟（每条 1 个请求、全局 1.2s 间隔），期间 App 的 /rating 请求
+    # 会往同一个键里写别的片的评分。写回时若拿开头那份旧副本整份覆盖，就把别人
+    # 刚查到的分抹掉了 —— 表现是「明明查到了，App 端下次进榜又变空」且反复出现。
+    # 写回阶段在 [rating_store_lock] 内重读最新值再只并入本轮的改动。
+    updates: Dict[str, Dict[str, Any]] = {}
     if store_get is not None:
         try:
             loaded = store_get()
@@ -746,10 +772,17 @@ def fill_ratings(
             entry["rating_ts"] = now_ts
             entry["rating_ver"] = RATING_VER if memo else MISS_RATING_VER
             continue
-        info = lookup(title, keywords=keywords, year=year,
-                      prefer_tv=prefer_tv, need_poster=False, need_rating=True)
+        # 单条查询异常不能掀翻整轮：榜单补分是「锦上添花」，网络抖一下不该让
+        # 猫眼/Netflix 整轮刷新的评分段报废（异常往上抛会被调用方的 try 吞掉，
+        # 表现是这轮所有条目都没补上分，且日志只有一行笼统的 warning）
+        try:
+            info = lookup(title, keywords=keywords, year=year,
+                          prefer_tv=prefer_tv, need_poster=False, need_rating=True)
+        except Exception as exc:
+            logger.warning(f"豆瓣评分补全异常（{title}），跳过该条：{exc}")
+            continue
         used += 1
-        rate = str(info.get("rate") or "")
+        rate = str((info or {}).get("rate") or "")
         recent_put(key, rate)
         if rate:
             entry["rating_ts"] = now_ts
@@ -763,22 +796,32 @@ def fill_ratings(
             entry["rating_ts"] = now_ts
             entry["rating_ver"] = MISS_RATING_VER
             entry["vote_average"] = ""
-        # 镜像进共享缓存，/rating 那边就不用再查一遍。
+        # 记进本轮改动（不直接改 shared 整份），写回时合并。
         # ⚠️ 空缺只有在共享缓存里**没有更新鲜的好分**时才允许写 —— 否则身份缓存
         # 条目丢了 rating 标记后重查失败，会把 /rating 刚查到的好分覆盖成空，
         # App 端从此 3 天看不到这条的分（2026-10-20 下午二次毒缓存的根因）
         se = shared.get(key)
         shared_has_fresh_rate = bool(
             se and str(se.get("vote_average") or "") and is_fresh(se, now_ts))
-        if (rate or (miss_cacheable() and not shared_has_fresh_rate)) \
-                and store_save is not None:
-            shared[key] = {"vote_average": rate,
-                           "rating_ts": now_ts,
-                           "rating_ver": RATING_VER if rate else MISS_RATING_VER}
-            shared_dirty = True
-    if shared_dirty and store_save is not None:
+        if rate or (miss_cacheable() and not shared_has_fresh_rate):
+            updates[key] = {"vote_average": rate,
+                             "rating_ts": now_ts,
+                             "rating_ver": RATING_VER if rate else MISS_RATING_VER}
+    if updates and store_save is not None:
+        # 与 /rating 共用同一把锁 + 写前重读：只把本轮改动并进「当前最新」，
+        # 绝不拿几分钟前读到的旧副本整份覆盖（见上面 updates 的说明）
         try:
-            store_save(shared)
+            with rating_store_lock():
+                latest: Dict[str, Any] = {}
+                if store_get is not None:
+                    try:
+                        loaded = store_get()
+                        if isinstance(loaded, dict):
+                            latest = loaded
+                    except Exception as exc:
+                        logger.warning(f"写回前重读共享评分缓存失败：{exc}")
+                latest.update(updates)
+                store_save(latest)
         except Exception as exc:
             logger.warning(f"写回共享评分缓存失败：{exc}")
     return used

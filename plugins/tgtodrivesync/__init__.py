@@ -164,16 +164,40 @@ class TgtoDriveSync(_PluginBase):
     _queue_since: Optional[float] = None
     # 是否有手动触发请求（远程命令 / 插件 API）
     _manual_pending: bool = False
+    # 运行代次：每次 init_plugin 自增。流水线启动时记下自己属于哪一代，
+    # 执行到刷新 / 通知 / 写历史前比对 —— 已被新配置取代的旧流水线就此收手，
+    # 不再重复触发外部副作用（见 __init_plugin 的说明）
+    _generation: int = 0
 
     def init_plugin(self, config: dict = None):
-        """加载配置并初始化运行状态。"""
+        """加载配置并初始化运行状态。
+
+        ⚠️ 宿主 v3 的 ``PluginManager.init_plugin`` → ``lifecycle.initialize``
+        会对**同一个实例**再调一次本方法（保存插件配置、启用/禁用开关都会走到），
+        而流水线中间有 ``time.sleep(wait_seconds)``（默认 60 秒），所以「保存配置」
+        完全可能落在流水线运行中途。
+
+        这里**不能**无条件 ``stop_service()`` + 把 ``_running`` 重置为 False：
+        ``ThreadPoolExecutor.shutdown(wait=False)`` 不会取消已在跑的任务，
+        于是旧流水线继续跑它的后半段，而 ``_running`` 被清掉后新事件又能提交
+        一条新流水线 —— 两条并发，重复触发 TgtoDrive 同步、重复整库刷新、
+        重复发通知，两者的 ``_save_history`` 还会互相覆盖。更糟的是旧流水线在
+        ``finally`` 里再写一次 ``_running = False``，把新流水线「正在运行」的
+        标记也清掉，第三条又能起来。
+
+        所以改成：``_running`` 只由流水线自己在起止时维护，``init_plugin``
+        不去动它；用 ``_generation`` 让旧流水线在下一个副作用节点自行退出。
+        """
         self.stop_service()
 
         with self._lock:
             self._pending_items = []
             self._manual_pending = False
-            self._running = False
             self._queue_since = None
+            # 代次自增：让正在跑的旧流水线知道自己已被取代。
+            # ⚠️ 刻意**不**重置 _running —— 那是流水线的运行态，不是配置态，
+            # 由 _dispatch 起、_run_pipeline 的 finally 落。
+            self._generation += 1
 
         self._enabled = False
         self._tgtodrive_url = ""
@@ -676,9 +700,10 @@ class TgtoDriveSync(_PluginBase):
             manual = self._manual_pending
             self._manual_pending = False
             self._running = True
+            generation = self._generation
         if self._executor is None:
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tgtodrive_sync")
-        self._executor.submit(self._run_pipeline, items, manual)
+        self._executor.submit(self._run_pipeline, items, manual, generation)
 
     @staticmethod
     def _item_key(item: dict) -> str:
@@ -697,8 +722,26 @@ class TgtoDriveSync(_PluginBase):
             return os.path.basename(str(path).rstrip("/\\"))
         return "未知条目"
 
-    def _run_pipeline(self, items: List[dict], manual: bool = False):
-        """执行完整流程：触发 STRM 同步 → 等待 → 刷新媒体服务器 → 通知。"""
+    def _is_superseded(self, generation: int) -> bool:
+        """本次流水线是否已被更新的配置取代（用户在运行中保存了配置）。
+
+        取代后仍继续跑完的话，会与新起的那条流水线重复触发外部副作用
+        （再次同步网盘、再次整库刷新、再次发通知）。这里在每个副作用节点前
+        检查一次：已取代就收手，只记日志不发通知、不刷新、不写历史。
+        """
+        with self._lock:
+            return generation != self._generation
+
+    def _run_pipeline(self, items: List[dict], manual: bool = False,
+                      generation: Optional[int] = None):
+        """执行完整流程：触发 STRM 同步 → 等待 → 刷新媒体服务器 → 通知。
+
+        :param generation: 启动时的配置代次；与当前代次不一致说明运行途中
+                           保存过配置，本轮不再做外部副作用（见 [_is_superseded]）。
+        """
+        if generation is None:
+            with self._lock:
+                generation = self._generation
         try:
             record = {
                 "time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -725,6 +768,13 @@ class TgtoDriveSync(_PluginBase):
             logger.info(f"TgtoDrive STRM 同步触发结果：{state} - {trigger_msg}")
 
             if state != "failed":
+                # 运行途中保存过配置：网盘同步已经触发过了，但**不再**刷新媒体库、
+                # 不发通知、不写历史 —— 这些副作用会让新起的那条流水线重复一遍。
+                # （STRM 同步本身不能撤销，所以这一步留给它自然跑完。）
+                if self._is_superseded(generation):
+                    logger.info("运行途中配置已更新，本次不再刷新媒体库与发送通知")
+                    return
+
                 # 2. 等待 STRM 生成（配置了 STRM 目录时轮询确认，否则固定等待）
                 wait_msg = self._wait_for_strm(items)
                 record["message"] += f"\nSTRM 等待：{wait_msg}"
@@ -743,6 +793,9 @@ class TgtoDriveSync(_PluginBase):
                         record["message"] += "\n（仍被占用，按最佳努力刷新）"
 
                 # 3. 刷新全部已配置的媒体服务器（用队列里的全部条目）
+                if self._is_superseded(generation):
+                    logger.info("运行途中配置已更新，本次不再刷新媒体库与发送通知")
+                    return
                 targets = self._refresh_media_servers(items)
                 record["targets"] = targets
                 record["refresh_ok"] = any(t.get("ok") for t in targets)
@@ -756,13 +809,23 @@ class TgtoDriveSync(_PluginBase):
                 record["libraries"] = libraries
 
             # 4. 发送通知
-            if self._notify:
+            if self._notify and not self._is_superseded(generation):
                 self._send_notice(record)
 
-            self._save_history(record)
+            if not self._is_superseded(generation):
+                self._save_history(record)
         except Exception as err:  # noqa: BLE001
             logger.error(f"TgtoDrive STRM 同步流程异常：{err}")
         finally:
+            # ⚠️ _running 表达的是「此刻有流水线在跑」这个**事实**，与配置代次无关，
+            # 所以这里必须无条件复位。若因为「代次已被取代」而跳过，_running 会
+            # 永远停在 True —— 之后每个入库事件都被 _dispatch 的「已有刷新任务在
+            # 执行」挡下，队列里的文件再也刷不出去（静默失效，且没有任何报错）。
+            #
+            # 那「旧流水线清掉新流水线的标记」这个担心怎么办？它不会发生：
+            # 新流水线要能起来，前提就是 _running 已经被清成 False，而清它
+            # 只能由上一条流水线的 finally 做 —— 同一时刻只有一条流水线在跑
+            # （_dispatch 是串行的：_running 为 True 时只 arm timer，不起新的）。
             with self._lock:
                 self._running = False
 
@@ -1128,10 +1191,19 @@ class TgtoDriveSync(_PluginBase):
             logger.error(f"发送通知失败：{err}")
 
     def _save_history(self, record: dict):
-        """保存执行历史（最多保留 100 条）。"""
-        history: List[dict] = self.get_data("history") or []
-        history.append(record)
-        self.save_data("history", history[-100:])
+        """保存执行历史（最多保留 100 条）。
+
+        读-改-写全程持锁：``get_data`` → ``append`` → ``save_data`` 是一串
+        非原子操作，两条流水线（重入、或手动触发与自动触发撞上）各自读到旧
+        副本时，后写的会把先写的整段丢掉。这里与 ``_dispatch`` 用同一把锁，
+        但两者不嵌套（``_run_pipeline`` 调它时并不持锁），不会死锁。
+        """
+        with self._lock:
+            history: List[dict] = self.get_data("history") or []
+            if not isinstance(history, list):
+                history = []
+            history.append(record)
+            self.save_data("history", history[-100:])
 
     # ---- 插件 API 实现 ----
     def api_trigger(self, apikey: str = "") -> Dict[str, Any]:

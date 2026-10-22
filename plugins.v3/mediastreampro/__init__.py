@@ -121,6 +121,10 @@ MAX_SCAN_FILES = 2000
 # ---------- STRM（v1.3.0 起，v1.4.0 改为有 STRM 就优先走 STRM） ----------
 # 「跟随 TgtoDrive 插件」读到的 strm_dir 缓存秒数：避免每次播放都打一遍宿主本机 API
 STRM_FOLLOW_TTL = 60
+# 读取失败（插件未装/被卸载/DB 异常）时的重试间隔：沿用上次成功的值，
+# 但不能按正常 TTL 等 60 秒 —— 那是给「成功读取」的间隔。失败往往持续存在
+# （例如目标插件根本没装），不单独记一次的话每个请求都会去读配置库。
+STRM_FOLLOW_FAIL_TTL = 10
 # 跟随模式的缓存（模块级，进程内共享）
 _strm_follow_cache = {"ts": 0.0, "dir": ""}
 _strm_follow_lock = threading.Lock()
@@ -132,6 +136,10 @@ STRM_RESOLVE_TIMEOUT = 6
 STRM_PROBE_TIMEOUT = 4
 # /strm-check 起播测试的并发上限：几十条路径同时解析网盘直链，压住并发不打爆宿主与网盘
 STRM_PROBE_CONCURRENCY = 6
+# /strm-check 单次最多处理多少条路径。App 一屏十几条，200 足够富余；
+# 不设上限的话一个畸形请求（几万条）会让单 worker 宿主在扫描 + 探测上
+# 挂到分钟级，把 /ping 一起堵住。
+STRM_CHECK_MAX_PATHS = 200
 # STRM 目录索引缓存秒数：整棵树可能有上千目录、上万 .strm，逐条 os.walk 会把单 worker 拖死。
 # 建一次「小写文件名 → 绝对路径」索引后所有查询都是 O(1)，TTL 内复用。
 STRM_INDEX_TTL = 120
@@ -142,9 +150,66 @@ _strm_index_lock = threading.Lock()
 STRM_PROBE_TTL = 600
 # 起播测试失败缓存秒数（更短）：网盘临时抽风时，别把「不可播」钉死太久
 STRM_PROBE_FAIL_TTL = 120
+# 起播测试缓存条目上限：键是 strm 绝对路径，只在 TTL 内被读取、从不删除，
+# 会随媒体库增长无界累积（条目本身很小，但结构无上限）。超过上限时整批清空，
+# 与 [recent_put] 的处理一致 —— 起播测试本来就有 10 分钟缓存，清一次的代价
+# 只是一轮重新探测，不值得引入 LRU 的额外状态。
+STRM_PROBE_CACHE_MAX = 20000
 # 起播测试缓存：{strm 绝对路径: (时间戳, 是否可播)}
 _strm_probe_cache = {}
 _strm_probe_lock = threading.Lock()
+
+
+def as_bool(value: Any, default: bool = False) -> bool:
+    """把配置值解析成布尔。
+
+    为什么不能用 ``bool()`` / ``is not False``：宿主表单正常提交的是真布尔，
+    但配置被手工改库、或从没有这些键的旧版本迁移上来时，值可能是字符串
+    ``"false"`` 或数字 ``0``。``bool("false")`` 是 True（开关意外打开），
+    ``0 is not False`` 也是 True（开关关不掉）—— 同一个插件里三种口径混用。
+
+    规则：``None`` 用默认值；真布尔直接用；数字按 ``!= 0``；字符串按
+    ``true/on/yes/1`` 这类真值词判定，其余（含空串、``"false"``、``"0"``）为假。
+    """
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if not text:
+        return False
+    if text in ("true", "on", "yes", "y", "1", "是", "开"):
+        return True
+    if text in ("false", "off", "no", "n", "0", "否", "关"):
+        return False
+    return bool(default)
+
+
+def redact_url(url: str, keep_query_keys: Tuple[str, ...] = ()) -> str:
+    """把 URL 里的 query 参数名与取值一起抹掉，只留路径。
+
+    TgtoDrive 生成的直链把签名 / 令牌放在 query（``?sign=xxx&token=yyy``），
+    而 ``requests`` 的异常 message **必然包含完整 URL**。日志里直接打 ``{err}``
+    等于把网盘访问凭据写进宿主日志。返回 ``scheme://host/path?…"``
+    —— 保留 host 与路径便于排障，query 只留键名（值统一替换为 ``***``），
+    这样「是哪个参数出的问题」还看得出来，凭据本身不会落盘。
+    """
+    text = str(url or "")
+    if not text or "?" not in text:
+        return text[:120]
+    try:
+        from urllib.parse import urlsplit, urlunsplit, parse_qsl
+
+        parts = urlsplit(text)
+        keys = []
+        for key, _value in parse_qsl(parts.query, keep_blank_values=True):
+            keys.append(key if key in keep_query_keys else f"{key}=***")
+        return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                           "&".join(keys), ""))
+    except Exception:  # noqa: BLE001 - 脱敏本身不能抛
+        return text.split("?", 1)[0] + "?***"
 
 
 def parse_season_episode(filename: str) -> Optional[Tuple[Optional[int], int]]:
@@ -231,12 +296,16 @@ class MediaStreamPro(_PluginBase):
         self._enabled = True
         config = config or {}
         self._strm_dir = str(config.get("strm_dir") or "").strip()
-        self._strm_follow = bool(config.get("strm_follow_tgtodrive"))
+        # 三个开关统一用 as_bool：值可能是字符串 "false" / 数字 0（手工改库、
+        # 旧版本迁移上来），bool() 与 `is not False` 都会把它们当成「开」
+        self._strm_follow = as_bool(config.get("strm_follow_tgtodrive"))
         self._strm_resolve_host = str(config.get("strm_resolve_host") or "").strip()
         # strm_follow_redirect 默认开：未在配置里显式关闭时视为 True
-        self._strm_follow_redirect = config.get("strm_follow_redirect", True) is not False
+        self._strm_follow_redirect = as_bool(
+            config.get("strm_follow_redirect", True), default=True)
         # strm_check_probe 默认开：未在配置里显式关闭时视为 True
-        self._strm_check_probe = config.get("strm_check_probe", True) is not False
+        self._strm_check_probe = as_bool(
+            config.get("strm_check_probe", True), default=True)
         roots = self.media_roots()
         strm_dir = self.effective_strm_dir()
         if roots:
@@ -605,6 +674,14 @@ class MediaStreamPro(_PluginBase):
         raw = body.get("paths")
         if not isinstance(raw, list):
             raw = []
+        # 条数上限：单条最坏耗时 = MAX_STRM_HOPS × STRM_PROBE_TIMEOUT（4×4s），
+        # 并发上限 6。App 一屏十几条，200 条已经远超正常用量；不设上限的话一个
+        # 畸形请求（几万条）能在单 worker 宿主上挂到分钟级，把 /ping 一起堵死。
+        if len(raw) > STRM_CHECK_MAX_PATHS:
+            logger.warning(
+                f"STRM 批量判断收到 {len(raw)} 条路径，超过上限，"
+                f"只处理前 {STRM_CHECK_MAX_PATHS} 条")
+            raw = raw[:STRM_CHECK_MAX_PATHS]
 
         result: Dict[str, bool] = {}
         probe_targets: Dict[str, str] = {}
@@ -642,17 +719,26 @@ class MediaStreamPro(_PluginBase):
         """
         result: Dict[str, bool] = {}
         probe_targets: Dict[str, str] = {}
+        # 放行根只解析一次：宿主 systemconfig.get("Directories") 返回整份配置的
+        # 深拷贝，逐条路径重算等于 N×2 次深拷贝（40 条路径实测 80 次），
+        # 且 resolve 内部还会再算一遍 effective_strm_dir。
+        roots = self.play_roots()
+        strm_dir = self.effective_strm_dir()
+        if strm_dir:
+            real_strm = os.path.realpath(strm_dir)
+            if real_strm not in roots:
+                roots.append(real_strm)
         for path in raw:
             if not isinstance(path, str) or not path:
                 continue
-            target = self.resolve(path)
+            target = self.resolve(path, roots=roots, strm_dir=strm_dir)
             if target is None:
                 # 越权路径：不放进结果，客户端拿不到就当非 strm
                 continue
             if target.lower().endswith(STRM_EXTENSION):
                 strm_file = target
             else:
-                strm_file = self._find_strm_for(target)
+                strm_file = self._find_strm_for(target, strm_dir=strm_dir)
                 if strm_file is None:
                     result[path] = False
                     continue
@@ -828,7 +914,9 @@ class MediaStreamPro(_PluginBase):
                 )
                 return RedirectResponse(resolved, status_code=302)
             # 解析失败不致命：退回原始直链（跟老版本一致），至少内网/本机还能用
-            logger.warning(f"媒体流播放 STRM 直链解析失败，退回原始直链：{url[:80]}")
+            # ⚠️ 日志绝不能带 query：TgtoDrive 直链的签名/令牌就在里面
+            logger.warning(
+                f"媒体流播放 STRM 直链解析失败，退回原始直链：{redact_url(url)}")
         logger.info(f"媒体流播放 STRM 跳转：{os.path.basename(strm_file)}")
         return RedirectResponse(url, status_code=302)
 
@@ -846,6 +934,9 @@ class MediaStreamPro(_PluginBase):
           （调用方退回原始直链）。``timeout`` 供起播测试传更短的值，避免批量拖死。
         """
         hop_timeout = timeout if timeout is not None else STRM_RESOLVE_TIMEOUT
+        # 当前正在请求的地址，供异常分支脱敏后打日志；它是入参的拷贝，
+        # 即使下面任何一步抛异常（连 urlsplit 导入失败）也一定有值可打
+        current = url
         try:
             from urllib.parse import urlsplit, urlunsplit, urljoin
 
@@ -902,7 +993,14 @@ class MediaStreamPro(_PluginBase):
             # 跳数用尽，返回最后拿到的地址
             return current
         except Exception as error:
-            logger.warning(f"媒体流播放解析直链异常：{error}")
+            # ⚠️ requests 的异常 message **必然包含完整 URL**（形如
+            # "Max retries exceeded with url: /p?sign=xxx&token=yyy"），而 TgtoDrive
+            # 直链的签名与令牌就在 query 里。直接把 {error} 打进日志等于把网盘
+            # 访问凭据写进宿主日志，所以这里只保留异常类型、直链的 host 与路径。
+            logger.warning(
+                f"媒体流播放解析直链异常（{type(error).__name__}）："
+                f"{redact_url(current)}"
+            )
             return None
 
     @staticmethod
@@ -943,7 +1041,11 @@ class MediaStreamPro(_PluginBase):
         """
         with _strm_follow_lock:
             cached = _strm_follow_cache
-            if cached["dir"] and time.time() - cached["ts"] < STRM_FOLLOW_TTL:
+            # 有过成功值按正常 TTL 判；一直失败（含目标插件没装、`dir` 始终为空）
+            # 按更短的失败间隔判 —— 否则 `cached["dir"]` 为空会让 TTL 判定恒不成立，
+            # 每个请求都去读一次宿主配置库。
+            ttl = STRM_FOLLOW_TTL if cached["dir"] else STRM_FOLLOW_FAIL_TTL
+            if time.time() - cached["ts"] < ttl:
                 return cached["dir"]
         strm_dir = ""
         try:
@@ -957,22 +1059,30 @@ class MediaStreamPro(_PluginBase):
             with _strm_follow_lock:
                 _strm_follow_cache.update({"ts": time.time(), "dir": strm_dir})
         else:
-            # 本次没读到：保留上次成功的缓存（哪怕已过期），避免一次抖动清空角标
+            # 本次没读到：保留上次成功的缓存（哪怕已过期），避免一次抖动清空角标。
+            # ⚠️ 失败也必须更新时间戳，否则 TTL 判定每次都失败 → 每个 /stream、
+            # /strm-check、/ping 请求都同步读一次宿主配置库（v3 下是一次 DB 查询）。
+            # 目标插件没装/被卸载这类失败往往是持续状态，所以按更短的失败间隔
+            # 重试（既保住了 stale-while-error 的意图，也保住了「不反复重试」）。
             with _strm_follow_lock:
                 prev = _strm_follow_cache["dir"]
+                _strm_follow_cache["ts"] = time.time()
             if prev:
                 logger.info("未读到 TgtoDrive STRM 目录，沿用上次缓存值")
                 return prev
         return strm_dir
 
-    def _find_strm_for(self, target: str) -> Optional[str]:
+    def _find_strm_for(self, target: str, strm_dir: Optional[str] = None) -> Optional[str]:
         """为媒体文件在 STRM 目录树里找同名 ``<文件名>.strm``（不论本地文件是否存在）。
 
         TgtoDrive 生成的 STRM 与媒体文件同名（``阿凡达.mkv`` → ``阿凡达.strm``），
         但目录结构镜像的是网盘而不是本地媒体库，所以先试同位置、再全树找一遍。
         找不到返回 None（调用方维持 404）。
+
+        :param strm_dir: 已解析好的 STRM 目录（批量调用时由调用方算一次传入）。
         """
-        strm_dir = self.effective_strm_dir()
+        if strm_dir is None:
+            strm_dir = self.effective_strm_dir()
         if not strm_dir or not os.path.isdir(strm_dir):
             return None
         want = os.path.splitext(os.path.basename(target))[0] + STRM_EXTENSION
@@ -995,9 +1105,11 @@ class MediaStreamPro(_PluginBase):
         now = time.time()
         with _strm_index_lock:
             cached = _strm_index_cache
+            # ⚠️ 判据是「目录没变 + TTL 未过」，**不能**再要求 `cached["map"]` 非空：
+            # 空索引同样是有效结果（目录确实是空的），把它当缓存未命中会让每个
+            # 请求都重扫一遍全树。
             if (
-                cached["map"]
-                and cached["dir"] == strm_dir
+                cached["dir"] == strm_dir
                 and now - cached["ts"] < STRM_INDEX_TTL
             ):
                 return cached["map"]
@@ -1021,6 +1133,9 @@ class MediaStreamPro(_PluginBase):
                     logger.warning(
                         f"STRM 索引重建为空，沿用上一次的索引（{len(stale['map'])} 条）"
                     )
+                    # ⚠️ 沿用旧索引必须**同时刷新时间戳**：否则 TTL 判定永远失败，
+                    # 挂载恢复前的每个请求都要再全树扫一遍（实测 0.05~0.17s/次）。
+                    stale["ts"] = now
                     return stale["map"]
         with _strm_index_lock:
             _strm_index_cache.update({"dir": strm_dir, "ts": now, "map": index})
@@ -1063,7 +1178,12 @@ class MediaStreamPro(_PluginBase):
         else:
             playable = self._resolve_strm_url(url, timeout=STRM_PROBE_TIMEOUT) is not None
         with _strm_probe_lock:
-            _strm_probe_cache[strm_file] = (now, playable)
+            # 缓存只在 TTL 内被读取、从不删除，会随媒体库增长无界累积。
+            # 超过上限整批清空（起播测试本来就有 10 分钟缓存，清一次的代价只是
+            # 一轮重新探测，不值得为此引入 LRU 的额外状态）。
+            if len(_strm_probe_cache) >= STRM_PROBE_CACHE_MAX:
+                _strm_probe_cache.clear()
+            _strm_probe_cache[strm_file] = (time.time(), playable)
         return playable
 
     # ---------- 内部 ----------
@@ -1189,18 +1309,25 @@ class MediaStreamPro(_PluginBase):
                     if len(out) >= MAX_SCAN_FILES:
                         return
                     try:
+                        # 目录不跟随符号链接（避免挂载里的环路导致无限递归），
+                        # 但**文件要跟随**：rclone / 部分 NAS 的挂载会把下载目录里
+                        # 的文件暴露成符号链接，用 follow_symlinks=False 过滤会让
+                        # 它们一个都进不了结果 —— 客户端据此把刚下完的片子显示成
+                        # 「已删除」。返回的路径本来就过 realpath，逃逸由 /stream
+                        # 的放行校验兜底。
                         if entry.is_dir(follow_symlinks=False):
                             self._scan_videos(entry.path, depth + 1, out)
                             continue
-                        if not entry.is_file(follow_symlinks=False):
+                        if not entry.is_file(follow_symlinks=True):
                             continue
                         if os.path.splitext(entry.name)[1].lower() not in VIDEO_EXTENSIONS:
                             continue
+                        stat = entry.stat(follow_symlinks=True)
                         out.append({
                             "path": os.path.realpath(entry.path),
                             "name": entry.name,
-                            "size": entry.stat(follow_symlinks=False).st_size,
-                            "mtime": int(entry.stat(follow_symlinks=False).st_mtime),
+                            "size": stat.st_size,
+                            "mtime": int(stat.st_mtime),
                         })
                     except OSError:
                         continue
@@ -1276,18 +1403,34 @@ class MediaStreamPro(_PluginBase):
         return roots
 
     def play_roots(self) -> List[str]:
-        """/stream 与 /season 的放行目录 = 媒体库 + 下载目录（去重保序）。"""
+        """/stream 与 /season 的放行目录 = 媒体库 + 下载目录（去重保序）。
+
+        ⚠️ **不跨请求缓存**：宿主 ``systemconfig.get("Directories")`` 返回的是
+        整份配置的**深拷贝**，本插件的放行目录是**实时读**的（宿主随时可能在
+        「目录配置」里改路径，改了即刻生效）—— 跨请求缓存会让人改完目录后
+        几秒内还播不了新目录下的文件。
+
+        真正的浪费在**一次请求内**：``/strm-check`` 提交 N 条路径时，
+        ``resolve()`` 每条都要算一遍放行根，于是 N×2 次配置深拷贝 + 每个根的
+        ``realpath`` + ``isdir``。所以缓存做成**请求级**：由调用方在循环外算
+        一次并传进 ``resolve()``（见 [MediaStreamPro._check_paths_sync]）。
+        """
         roots = self.media_roots()
         for root in self.download_roots():
             if root not in roots:
                 roots.append(root)
         return roots
 
-    def resolve(self, raw_path: str) -> Optional[str]:
+    def resolve(self, raw_path: str, roots: Optional[List[str]] = None,
+                strm_dir: Optional[str] = None) -> Optional[str]:
         """把请求路径归一成可播放的绝对路径；不在白名单内返回 None。
 
         v1.3.0 起同时放行 ``.strm`` 文件（读出直链后跳转），并把生效的 STRM 目录
         加入白名单 —— STRM 树不一定挂在宿主「目录配置」的媒体库/下载路径下面。
+
+        :param roots: 可选的放行根（调用方已算好时传入，省掉重复解析）。不传则按需
+                      调 [play_roots]。调用方传入前不应再改动宿主目录配置。
+        :param strm_dir: 同上，生效的 STRM 目录；传 ``""`` 表示已确认没有。
         """
         raw = (raw_path or "").strip()
         if not raw or "\x00" in raw or not os.path.isabs(raw):
@@ -1297,8 +1440,11 @@ class MediaStreamPro(_PluginBase):
         ext = os.path.splitext(target)[1].lower()
         if ext != STRM_EXTENSION and ext not in VIDEO_EXTENSIONS:
             return None
-        roots = self.play_roots()
-        strm_dir = self.effective_strm_dir()
+        if roots is None:
+            roots = self.play_roots()
+        if strm_dir is None:
+            strm_dir = self.effective_strm_dir()
+        roots = list(roots)
         if strm_dir:
             root = os.path.realpath(strm_dir)
             if root not in roots:
