@@ -1,7 +1,6 @@
 # 全球影视榜单
 
-把 **猫眼榜单**（原 [MaoyanPro](../maoyanpro/README.md)）、**Netflix 榜单**
-（原 [NetflixPro](../netflixpro/README.md)）与 **红果短剧榜单** 合并成一个插件
+把 **猫眼榜单**、**Netflix 榜单** 与 **红果短剧榜单** 合并成一个插件
 （MoviePilot v3），对外只暴露一套统一接口。
 
 ## 为什么要合并
@@ -18,8 +17,8 @@
 - **各自独立**：三个数据源在插件内部仍是独立对象（可分别开关、分别抓取），
   数据键带 `maoyan_` / `netflix_` / `hongguo_` 前缀，快照与识别缓存互不覆盖。
 
-> 原 `MaoyanPro` / `NetflixPro` 插件本仓库仍保留并继续可用，接口与配置不变。
-> 新部署建议直接用本插件。
+> 原先分立的 `MaoyanPro` / `NetflixPro` 两个插件已并入本插件并从市场下架，
+> 它们的接口与配置在这里以 `source` 参数区分。
 
 ## 数据源
 
@@ -40,9 +39,9 @@
 
 设置页（`get_form`）与详情页（`get_page`）顶部各有一张 **MoviePilotApp 推荐卡**：
 左侧是 MoviePilot 官方 logo，右侧「下载 App」直达 Releases 最新版、旁边是 GitHub
-仓库文字按钮。两个位置用同一个 `promo_card()` 渲染，与 MaoyanPro / NetflixPro /
-MediaStreamPro 完全一致（实现在 `app_promo.py`，由 `tools/gen_app_promo.py` 生成，
-四份逐字节相同）。详情页那张卡下面是三源概览卡，再往下才是猫眼订阅记录。
+仓库文字按钮。两个位置用同一个 `promo_card()` 渲染，与 MediaStreamPro
+完全一致（实现在 `app_promo.py`，由 `tools/gen_app_promo.py` 生成，
+各插件一份逐字节相同）。详情页那张卡下面是三源概览卡，再往下才是猫眼订阅记录。
 
 ## 配置
 
@@ -321,7 +320,9 @@ LRU 缓存。
 宿主推荐页与 App，页面只回答「抓到了多少、什么时候抓的、能不能订阅」。红果短剧
 不在 TMDB / 豆瓣里、没有订阅入口，但它同样只走接口，页面不为此单开一块。
 
-## 与旧插件的关系
+## 与旧插件的接口对应
+
+原先分立的 `MaoyanPro` / `NetflixPro` 已并入本插件，旧接口路径按下表换算：
 
 | 旧插件 | 本插件对应 |
 |---|---|

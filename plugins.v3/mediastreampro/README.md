@@ -19,9 +19,9 @@ MoviePilot 宿主自己没有「下载记录 → 视频直链」的接口：
 
 设置页（`get_form`）与详情页（`get_page`）顶部各有一张 **MoviePilotApp 推荐卡**：
 左侧是 MoviePilot 官方 logo，右侧「下载 App」直达 Releases 最新版、旁边是 GitHub
-仓库文字按钮。两个位置用同一个 `promo_card()` 渲染，与 MaoyanPro / NetflixPro /
-GlobalRankPro 完全一致（实现来自各插件目录下的 `app_promo.py`，由
-`tools/gen_app_promo.py` 生成，四份逐字节相同）。
+仓库文字按钮。两个位置用同一个 `promo_card()` 渲染，与 GlobalRankPro
+完全一致（实现来自各插件目录下的 `app_promo.py`，由
+`tools/gen_app_promo.py` 生成，各插件一份逐字节相同）。
 
 配置页有 STRM 相关配置项（见下节）；详情页显示当前放行的媒体库目录与生效的 STRM 目录。
 

@@ -38,8 +38,6 @@ LOGO = ROOT / 'assets' / 'moviepilot-logo.svg'
 # 所以两边都生成。
 TARGETS = (
     ('plugins.v3', 'globalrankpro'),
-    ('plugins.v3', 'maoyanpro'),
-    ('plugins.v3', 'netflixpro'),
     ('plugins.v3', 'mediastreampro'),
     ('plugins', 'tgtodrivesync'),
 )

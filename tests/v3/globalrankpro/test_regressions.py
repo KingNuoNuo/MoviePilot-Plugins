@@ -220,3 +220,37 @@ def test_prune_cache_drops_expired_entries_only():
     removed = douban.prune_cache(cache, now)
     assert removed == 2
     assert list(cache) == ["fresh"]
+
+
+def test_cached_rating_survives_douban_circuit_break(monkeypatch):
+    """豆瓣熔断期间，**缓存已命中**的评分仍要正常返回。
+
+    触发条件：``douban._blocked_until`` 是模块级全局变量（生产上刻意共享，
+    熔断要跨请求生效）。熔断窗口内 ``/rating`` 不再发新请求，但**已经缓存
+    好的分不该被牵连** —— 否则一次网络抖动就会让 App 搜索页整屏评分变空，
+    明明这些片昨天才查过。
+
+    熔断只该影响「是否继续发新请求」，不该影响「已有结果能否用」。
+    """
+    now = time.time()
+    key = douban.cache_key("老片", "2020", "")
+    store = {"douban_rating": {
+        key: {"vote_average": "8.4", "rating_ts": now - 3600,
+              "rating_ver": douban.RATING_VER},
+    }}
+    plugin = GlobalRankPro()
+    plugin.get_data = lambda k, default=None: store.get(k, default)
+    plugin.save_data = lambda k, v: store.__setitem__(k, v)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("熔断期间不该再打豆瓣")
+
+    monkeypatch.setattr(douban, "lookup", boom)
+    # 模拟「刚刚触发了熔断」
+    douban._blocked_until = time.monotonic() + 120
+
+    response = plugin.douban_ratings(q='[{"t":"老片","y":"2020"}]')
+    assert response.success is True
+    assert response.data.queried == 0, "熔断期间不该发新请求"
+    assert response.data.cached == 1, "缓存命中数不对"
+    assert response.data.rates.get("老片") == "8.4", "熔断不该牵连已有评分"
