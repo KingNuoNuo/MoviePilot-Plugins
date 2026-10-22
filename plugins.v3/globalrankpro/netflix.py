@@ -126,6 +126,12 @@ def _safe_board_payload(board: dict, rows: List[Any]) -> Dict[str, Any]:
     for row in rows:
         if not isinstance(row, dict):
             continue
+        # 媒体类型（movie / tv）：App 拿 media_id 反查宿主详情时必须带对 type_name，
+        # 传错宿主不报错、静默返回空 data（简介 / 演员 / 季数全空）。Netflix 的
+        # kind 在榜单层（film / tv），条目自己不存，这里按榜单 kind 补。
+        kind = str(board.get("kind") or "")
+        media_type = str(row.get("media_type") or "") or (
+            "movie" if kind == "film" else ("tv" if kind else ""))
         items.append({
             "rank": _safe_int(row.get("rank")),
             "title": str(row.get("title") or ""),
@@ -137,6 +143,7 @@ def _safe_board_payload(board: dict, rows: List[Any]) -> Dict[str, Any]:
             "weeks_in_top10": _safe_int(row.get("weeks_in_top10")),
             "media_source": str(row.get("media_source") or ""),
             "media_id": str(row.get("media_id") or ""),
+            "media_type": media_type,
             "poster": str(row.get("poster") or ""),
             "overview": str(row.get("overview") or ""),
             "year": str(row.get("year") or ""),
@@ -596,9 +603,7 @@ class NetflixSource(RankSource):
 
     def __snapshot_boards(self) -> List[dict]:
         """从存储中读出快照榜单列表（容错旧数据）。"""
-        snapshot = self.get_data("snapshot") or {}
-        if not isinstance(snapshot, dict):
-            return []
+        snapshot = self.snapshot()
         boards = snapshot.get("boards")
         return [b for b in boards if isinstance(b, dict)] if isinstance(boards, list) else []
 

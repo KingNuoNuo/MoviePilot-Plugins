@@ -1,7 +1,7 @@
 """插件设置表单与详情页的节点构造。
 
-合并插件要在一个设置页里放下「猫眼」「Netflix」「红果短剧」三套配置、在一个详情页里
-同时展示三套数据的状态，因此把节点构造从插件主类里拆出来：这里只做纯 UI 拼装，
+合并插件要在一个设置页里放下「猫眼」「Netflix」「红果短剧」「音乐」四套配置、在一个详情页里
+同时展示四套数据的状态，因此把节点构造从插件主类里拆出来：这里只做纯 UI 拼装，
 抓取与存储一律通过传入的 ``host`` 与数据源对象完成。
 
 详情页只保留「订阅记录」这一类数据：三个数据源的榜单条目本身都通过 /rank、/rank-list
@@ -17,10 +17,12 @@ from app.schemas import MediaSource, MediaType
 from app.sdk.media import normalize_media_source
 
 from .app_promo import promo_card
-from .base import SOURCE_HONGGUO, SOURCE_MAOYAN, SOURCE_NETFLIX
+from .base import SOURCE_HONGGUO, SOURCE_MAOYAN, SOURCE_MUSIC, SOURCE_NETFLIX
 
 # 红果每榜抓取条数档位（官网每页 20 条）
 HONGGUO_LIMIT_CHOICES = (20, 40, 60, 100)
+# 音乐每榜抓取条数档位（App 一屏十几首，50 条够翻好几屏）
+MUSIC_LIMIT_CHOICES = (30, 50, 100)
 
 # 宿主的 @core 样式把 ``.v-switch.v-input`` 的 --v-input-control-height 改成了
 # auto，开关高度塌缩成文字行高，视觉高度溢出到下一行，与下方控件叠在一起
@@ -202,6 +204,11 @@ def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
         {'title': name, 'value': code}
         for code, name in getattr(hongguo, "_BOARD_NAMES", {}).items()
     ]
+    music = host.sources.get(SOURCE_MUSIC)
+    music_items = [
+        {'title': name, 'value': code}
+        for code, name in getattr(music, "_BOARD_NAMES", {}).items()
+    ]
 
     rows: List[dict] = [
         setting_card(
@@ -296,6 +303,29 @@ def build_form(host: Any) -> Tuple[List[dict], Dict[str, Any]]:
                 ], cls='align-start'),
             ],
         ),
+        setting_card(
+            '音乐榜单',
+            '网易云 / QQ音乐 / Apple Music 三平台榜单。前两家走站点接口、'
+            'Apple 走官方公开 Feed，三者都不需要账号或密钥。音乐条目不做媒体识别，'
+            '只在 App 榜单页展示，不进宿主推荐页；「每榜条数」三家共用，'
+            '网易云热歌榜与 QQ 热歌榜在源头有 200~300 条，这里按需要截断。',
+            [
+                form_row([switch_col('music_enabled', '启用音乐数据源', 6)]),
+                form_row([
+                    type_select('music_boards', '抓取榜单', music_items, 8),
+                    form_col_nodes([{
+                        'component': 'div',
+                        'props': {'class': 'd-flex align-center ga-2 pt-1'},
+                        'content': [
+                            {'component': 'span',
+                             'props': {'class': 'text-body-2'},
+                             'text': '每榜条数'},
+                            limit_select('music_limit', MUSIC_LIMIT_CHOICES),
+                        ],
+                    }], 4),
+                ], cls='align-start'),
+            ],
+        ),
     ]
 
     defaults = {
@@ -370,12 +400,13 @@ def _refresh_button(source_id: str, variant: str = "tonal") -> dict:
 
 
 def _overview_card(host: Any) -> dict:
-    """概览卡：三个数据源的榜数、条数、更新时间与独立刷新。"""
+    """概览卡：四个数据源的榜数、条数、更新时间与独立刷新。"""
     rows: List[dict] = []
     for source_id, label, icon in (
             (SOURCE_MAOYAN, '猫眼榜单', 'mdi-movie-open-outline'),
             (SOURCE_NETFLIX, 'Netflix 榜单', 'mdi-television-classic'),
-            (SOURCE_HONGGUO, '红果短剧榜单', 'mdi-filmstrip')):
+            (SOURCE_HONGGUO, '红果短剧榜单', 'mdi-filmstrip'),
+            (SOURCE_MUSIC, '音乐榜单', 'mdi-music-note')):
         source = host.sources.get(source_id)
         if source is None:
             continue
@@ -518,7 +549,7 @@ def _history_card(source: Any) -> dict:
 def build_page(host: Any) -> List[dict]:
     """拼装插件详情页：App 推荐 → 概览 → 订阅记录。
 
-    三个数据源的榜单条目都不在页面上平铺——抓取结果经 /rank、/rank-list 供给
+    四个数据源的榜单条目都不在页面上平铺——抓取结果经 /rank、/rank-list 供给
     推荐页与 App，页面只回答「抓到了多少、什么时候抓的」（概览卡）与「订阅了什么」
     （猫眼订阅记录），刷新入口也在概览卡里。红果短剧不在 TMDB / 豆瓣里、没有订阅
     入口，但它同样只走接口，页面不为此单开一块。

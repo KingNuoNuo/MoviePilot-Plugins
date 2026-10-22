@@ -1,4 +1,4 @@
-"""全球影视榜单插件的数据源基类与统一响应模型。
+"""全球影视音乐榜插件的数据源基类与统一响应模型。
 
 合并后的插件由主类 :class:`GlobalRankPro` 承担宿主生命周期（配置、调度、
 页面与接口注册），猫眼、Netflix 与红果短剧三套抓取解析逻辑各自封装成一个
@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List
 
 from pydantic import BaseModel, Field
@@ -20,9 +21,15 @@ from pydantic import BaseModel, Field
 SOURCE_MAOYAN = "maoyan"
 SOURCE_NETFLIX = "netflix"
 SOURCE_HONGGUO = "hongguo"
+SOURCE_MUSIC = "music"
 # 对外接口 source 参数支持的全部取值（all 表示合并返回）
 SOURCE_ALL = "all"
+# ⚠️ 音乐榜**不进** SOURCE_CHOICES：`all` 会遍历这份清单，九个音乐分榜
+# 每个 300~600KB，混进去会让一次 /rank?source=all 多抓十几秒。
+# 音乐榜必须显式 `source=music` 才会被取到（见 __resolve_sources 的特例）。
 SOURCE_CHOICES = (SOURCE_MAOYAN, SOURCE_NETFLIX, SOURCE_HONGGUO)
+# 可显式请求的数据源（含不参与 all 的音乐榜）
+SOURCE_ANY = SOURCE_CHOICES + (SOURCE_MUSIC,)
 
 
 class RankItem(BaseModel):
@@ -33,6 +40,12 @@ class RankItem(BaseModel):
     title_cn: str = Field("", description="中文片名（识别结果）")
     media_source: str = Field("", description="主媒体来源，未识别时为空")
     media_id: str = Field("", description="主媒体 ID，未识别时为空")
+    media_type: str = Field(
+        "",
+        description="媒体类型 movie / tv，未识别或该源不做识别时为空。"
+                    "客户端拿 media_id 反查宿主详情时必须带对 type_name（电影 / 电视剧），"
+                    "传错类型宿主不报错、静默返回空 data",
+    )
     poster: str = Field("", description="海报地址，未识别时为空")
     overview: str = Field("", description="剧情简介，未识别时为空")
     year: str = Field("", description="年份，未识别时为空")
@@ -69,17 +82,29 @@ class RankItem(BaseModel):
     status_tags: str = Field("", description="状态标签，逗号分隔，如「新剧,爆剧」")
     preview_url: str = Field("", description="前 3 集的公开 360p 直链，多集用逗号分隔")
 
+    # ---- 音乐榜单专有 ----
+    artist: str = Field("", description="歌手，多位用「 / 」分隔")
+    album: str = Field("", description="专辑名")
+    duration: int = Field(0, description="时长（秒），0 表示未知")
+    last_rank: int = Field(
+        0, description="上期名次，0 表示新入榜或该平台不提供（QQ/Apple 恒为 0）")
+    genre: str = Field("", description="曲风，仅 Apple 提供")
+    song_id: str = Field("", description="平台原生单曲 ID：网易云数字 id / QQ songmid / Apple trackId")
+    song_url: str = Field("", description="该单曲在对应平台的详情页地址，App 端用于跳转播放")
+
 
 class RankBoard(BaseModel):
     """统一榜单快照：三个数据源榜单元数据字段的并集。"""
 
-    source: str = Field("", description="数据源标识：maoyan / netflix / hongguo")
+    source: str = Field("", description="数据源标识：maoyan / netflix / hongguo / music")
     board: str = Field(..., description="榜单名称")
     board_type: str = Field("", description="统一榜单类型标识：猫眼取 type，Netflix 取地区代码")
     type: str = Field("", description="猫眼原生榜单类型标识")
     type_name: str = Field("", description="榜单类型中文名")
-    platform: str = Field("", description="猫眼平台名称")
+    platform: str = Field("", description="猫眼平台名称；音乐榜为此处取平台代码（netease/qq/apple）")
     platform_type: str = Field("", description="猫眼 platformType 参数值，全网榜为空")
+    platform_name: str = Field("", description="音乐榜平台展示名（网易云 / QQ音乐 / Apple Music）")
+    board_name: str = Field("", description="音乐榜分榜短名（热歌榜 / 新歌榜…，不含平台前缀）")
     show_date: str = Field("", description="猫眼榜单日期")
     region: str = Field("", description="Netflix 地区代码，全球榜为空")
     region_name: str = Field("", description="Netflix 地区中文名")
@@ -154,6 +179,11 @@ class RankSource:
     source_id: str = ""
     # 数据源展示名，用于配置项与详情页标题
     source_name: str = ""
+    # 快照进程内缓存时长（秒）。一次 /rank 会按榜单 / 地区反复调 boards()：
+    # Netflix 全地区一轮 8 次、猫眼多榜单类型一轮 N 次，每次都是「读整份快照
+    # JSON（100~250KB）+ 反序列化」。同一请求内复用一份即可，写快照时立刻失效，
+    # 所以不存在跨请求读到旧数据的窗口（2s 只兜住同一轮读取）。
+    _SNAPSHOT_TTL = 2.0
 
     def __init__(self, host: Any):
         # 用 object.__setattr__ 写入，避免触发子类可能定义的 __setattr__
@@ -164,6 +194,8 @@ class RankSource:
         object.__setattr__(self, "_config", {})
         # 数据源开关：关闭后不抓取、接口也不返回该源数据
         object.__setattr__(self, "enabled", True)
+        # 快照缓存：(monotonic 时间戳, 快照字典)
+        object.__setattr__(self, "_snapshot_memo", None)
 
     # ------------------------------------------------------------------
     # 宿主能力代理
@@ -192,12 +224,31 @@ class RankSource:
         if not key:
             return
         self._host.save_data(f"{self._data_prefix}{key}", value)
+        if key == "snapshot":
+            # 自己刚写的，缓存必须立刻失效，不能让后续 boards() 读到旧快照
+            object.__setattr__(self, "_snapshot_memo", None)
 
     def del_data(self, key: str = None) -> None:
         """删除本数据源的数据键（自动加源前缀）。"""
         if not key:
             return
         self._host.del_data(f"{self._data_prefix}{key}")
+        if key == "snapshot":
+            object.__setattr__(self, "_snapshot_memo", None)
+
+    # ------------------------------------------------------------------
+    # 快照读取（带进程内短缓存）
+    # ------------------------------------------------------------------
+    def snapshot(self) -> Dict[str, Any]:
+        """读本数据源的榜单快照（带 [_SNAPSHOT_TTL] 进程内缓存）。"""
+        memo = self._snapshot_memo
+        now = time.monotonic()
+        if memo is not None and now - memo[0] < self._SNAPSHOT_TTL:
+            return memo[1]
+        raw = self._host.get_data(f"{self._data_prefix}snapshot")
+        snapshot = raw if isinstance(raw, dict) else {}
+        object.__setattr__(self, "_snapshot_memo", (now, snapshot))
+        return snapshot
 
     # ------------------------------------------------------------------
     # 子类接口
@@ -214,16 +265,12 @@ class RankSource:
 
     def boards(self) -> List[dict]:
         """返回最近一次快照的榜单列表（原始 dict，供主类组装统一模型）。"""
-        snapshot = self.get_data("snapshot") or {}
-        if not isinstance(snapshot, dict):
-            return []
-        boards = snapshot.get("boards")
+        boards = self.snapshot().get("boards")
         return [b for b in boards if isinstance(b, dict)] if isinstance(boards, list) else []
 
     def snapshot_meta(self) -> Dict[str, Any]:
         """返回快照的元信息（updated_at / week 等）。"""
-        snapshot = self.get_data("snapshot") or {}
-        return snapshot if isinstance(snapshot, dict) else {}
+        return self.snapshot()
 
     def rank_list(self, **kwargs: Any) -> list:
         """返回宿主的 MediaInfo 列表（供推荐页/浏览页消费）。"""

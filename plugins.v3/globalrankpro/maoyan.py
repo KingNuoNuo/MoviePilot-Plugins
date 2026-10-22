@@ -35,6 +35,10 @@ from .base import (
 )
 from . import douban
 
+# 猫眼榜单类型里属于「电影」的那几个；其余（web-all 剧集综合 / zongyi 综艺热度）
+# 都归「电视剧」—— 宿主 GET /media/{id} 的 type_name 只认电影 / 电视剧两种。
+_MOVIE_BOARD_TYPES = {'movie', 'total', 'year', 'global', 'web-movie'}
+
 
 def _safe_float(value, default: float = 0.0) -> float:
     """把快照里的评分字段转成浮点，空串/非法值回退默认值。"""
@@ -61,6 +65,21 @@ def _safe_board_payload(board: dict, rows: List[Any]) -> Dict[str, Any]:
         value = board.get(key)
         return str(value) if value is not None else ""
 
+    # 媒体类型（movie / tv）：App 的详情页拿 media_id 去问宿主时必须带对
+    # ``type_name``，传错不会报错 —— 宿主返回 success 但 data 全是 null，
+    # 页面上就是「简介 / 演员 / 季数全空」。这里给条目补一个明确类型，
+    # 老快照按榜单类型现推（不需要重抓也能立刻生效）。
+    board_type = text("type")
+
+    def media_type_of(row: dict) -> str:
+        explicit = str(row.get("media_type") or "")
+        if explicit:
+            return explicit
+        bt = str(row.get("board_type") or board_type or "")
+        if bt in _MOVIE_BOARD_TYPES:
+            return "movie"
+        return "tv" if bt else ""
+
     items = []
     for row in rows:
         if not isinstance(row, dict):
@@ -80,6 +99,7 @@ def _safe_board_payload(board: dict, rows: List[Any]) -> Dict[str, Any]:
             "heat": str(row.get("heat") or ""),
             "media_source": str(row.get("media_source") or ""),
             "media_id": str(row.get("media_id") or ""),
+            "media_type": media_type_of(row),
             "poster": str(row.get("poster") or ""),
             "overview": str(row.get("overview") or ""),
             "year": str(row.get("year") or ""),
@@ -217,8 +237,8 @@ class MaoyanSource(RankSource):
     _POSTER_FALLBACK_LIMIT = 60
     # 同一条目连续补不到图的上限：豆瓣确实没有这条时不必每轮都再打一次
     _POSTER_FALLBACK_MAX_MISS = 3
-    # 豆瓣评分补全的单轮额度（条）。一条要打 2 个 HTTP（suggest + abstract，约 0.4s），
-    # 80 条约 56s；评分缓存在 identity_cache 里 30 天有效，首轮慢、之后只补新进榜的几条。
+    # 豆瓣评分补全的单轮额度（条）。一条至少 1 个 HTTP（全局 1.2s 间隔串行），
+    # 80 条约 100s；评分缓存在 identity_cache 里 30 天有效，首轮慢、之后只补新进榜的几条。
     _RATING_LIMIT = 80
     # 识别缓存 TTL：已识别到媒体且拿到海报的条目长期有效；
     # 只拿到兜底海报（或啥都没有）的条目过期后重试 —— 新节目可能随后上架 TMDB
@@ -417,8 +437,8 @@ class MaoyanSource(RankSource):
         点「更多」继续翻页就能依次看到各平台榜单。显式指定 platform 时只返回
         该平台的细分榜（供调用方精确取数，不做分页编组）。
         """
-        snapshot = self.get_data("snapshot") or {}
-        boards = snapshot.get("boards") if isinstance(snapshot, dict) else None
+        snapshot = self.snapshot()
+        boards = snapshot.get("boards")
         rows_by_platform: Dict[str, list] = {}
         if isinstance(boards, list):
             for item in boards:
@@ -766,8 +786,8 @@ class MaoyanSource(RankSource):
         if not boards:
             return boards
         try:
-            prev = self.get_data("snapshot") or {}
-            prev_boards = prev.get("boards") if isinstance(prev, dict) else None
+            prev = self.snapshot()
+            prev_boards = prev.get("boards")
         except Exception as err:
             logger.warning(f"读取上一份榜单快照失败，跳过单榜兜底：{err}")
             return boards
@@ -813,7 +833,7 @@ class MaoyanSource(RankSource):
         # 上一份快照按标题建索引，用于回填本轮未识别条目
         prev_map: dict = {}
         try:
-            prev = self.get_data("snapshot") or {}
+            prev = self.snapshot()
             if isinstance(prev, dict):
                 for pb in prev.get("boards") or []:
                     for pit in pb.get("items") or []:
@@ -866,6 +886,11 @@ class MaoyanSource(RankSource):
                     if release_date and not re.match(r"^\d{4}[-年/.]", rel_now):
                         item["releaseInfo"] = f"{release_date} 上映"
                     item["type_name"] = self._TYPE_NAMES.get(item.get("board_type", ""), item.get("board_type", ""))
+                    # 媒体类型落进快照：App 拿 media_id 反查宿主详情时，
+                    # type_name 传错类型宿主不报错、静默返回空 data。
+                    _bt = str(item.get("board_type") or "")
+                    item["media_type"] = ("movie" if _bt in _MOVIE_BOARD_TYPES
+                                          else ("tv" if _bt else ""))
         except Exception as e:
             logger.error(f"猫眼榜单快照整理失败，仍按原始条目保存：{e}")
 
@@ -1092,8 +1117,8 @@ class MaoyanSource(RankSource):
                 f"剩余 {left} 条下一轮优先处理（缺图/缺日期的排最前）")
 
         # C：豆瓣评分补全。猫眼榜单本身不带评分，App 的海报墙要显示评分只能另查豆瓣
-        # （猫眼官方没有公开评分接口）。一条 = 2 个请求（suggest 拿 id + abstract 拿
-        # rate），所以按轮限额 + 评分持久缓存分摊：榜单条目重复率极高（同一部剧在榜
+        # （猫眼官方没有公开评分接口）。一条 = 1 个检索请求（rexxar 直接带评分），
+        # 所以按轮限额 + 评分持久缓存分摊：榜单条目重复率极高（同一部剧在榜
         # 很多天），稳态下每轮只为「新进榜的那几条」付请求。
         try:
             used = douban.fill_ratings(
@@ -1120,7 +1145,7 @@ class MaoyanSource(RankSource):
     def __prev_snapshot_map(self) -> dict:
         """上一份榜单快照按标题建索引（幂等，读不到就返回空表）。"""
         try:
-            prev = self.get_data("snapshot") or {}
+            prev = self.snapshot()
         except Exception as e:
             logger.debug(f"读取上一份榜单快照失败，按全新条目处理：{e}")
             return {}
@@ -1228,6 +1253,9 @@ class MaoyanSource(RankSource):
         # 本次运行中已识别的媒体身份，供榜单快照补全海报与来源
         if not hasattr(self, "_resolved_identity"):
             self._resolved_identity = {}
+        # 已处理过的 unique 集合：原来每条都现建一次列表做 in 判断，
+        # 历史越长越慢（历史是不设上限累积的），这里一次性建集合，O(1) 查
+        done = {h.get("unique") for h in history if isinstance(h, dict)}
         for addr in addr_list:
             title = "未知标题"
             try:
@@ -1240,7 +1268,7 @@ class MaoyanSource(RankSource):
                 meta.year = year
                 unique_flag = f"maoyanpro: {mtype}_{title}_{year}"
                 # 检查是否已处理过
-                if unique_flag in [h.get("unique") for h in history]:
+                if unique_flag in done:
                     continue
                 # 匹配媒体信息（优先复用快照预识别的结果，避免重复请求识别链）
                 mediainfo: MediaInfo = getattr(self, "_resolved_mediainfo", {}).get(title)
@@ -1283,6 +1311,7 @@ class MaoyanSource(RankSource):
                     "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "unique": unique_flag
                 })
+                done.add(unique_flag)
                 # 记录本次识别结果，供榜单快照补全媒体身份
                 self._resolved_identity[title] = {
                     "media_source": mediainfo.media_source.value,

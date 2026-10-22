@@ -1,19 +1,23 @@
-"""全球影视榜单插件（GlobalRankPro）。
+"""全球影视音乐榜插件（GlobalRankPro）。
 
-把猫眼榜单、Netflix 榜单与红果短剧榜单合并成一个插件，对外只暴露一套接口：
+把猫眼榜单、Netflix 榜单、红果短剧榜单与音乐榜单合并成一个插件，对外只暴露一套接口：
 
-- ``GET /rank?source=maoyan|netflix|hongguo|all``：统一榜单快照（三源字段并集）；
+- ``GET /rank?source=maoyan|netflix|hongguo|music|all``：统一榜单快照（各源字段并集）；
 - ``GET /rank-list?source=...``：统一媒体信息列表（宿主 ``MediaInfo``）；
 - ``GET /refresh?source=...``：立即抓取指定数据源；
 - ``GET /poster?u=...``：红果海报转发（匿名可访问，手机端不直连字节 CDN）。
 
-三个数据源各自封装在 ``maoyan.py`` / ``netflix.py`` / ``hongguo.py`` 里（原
-MaoyanPro 与 NetflixPro 的抓取解析逻辑整体平移，红果为新增的 SSR 抓取），
-宿主生命周期、配置与接口注册集中在本类。数据键带 ``maoyan_`` / ``netflix_`` /
-``hongguo_`` 前缀，三源互不覆盖。
+各数据源封装在 ``maoyan.py`` / ``netflix.py`` / ``hongguo.py`` / ``music.py`` 里（原
+MaoyanPro 与 NetflixPro 的抓取解析逻辑整体平移，红果为 SSR 抓取，音乐为三平台
+JSON 接口抓取），宿主生命周期、配置与接口注册集中在本类。数据键带
+``maoyan_`` / ``netflix_`` / ``hongguo_`` / ``music_`` 前缀，各源互不覆盖。
+
+⚠️ 音乐榜**不参与** ``source=all``（九个分榜一次要 300~600KB×N，会把聚合接口拖慢
+十几秒），必须显式 ``source=music`` 请求。
 """
 import datetime
 import json
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -38,31 +42,54 @@ from .base import (
     RankSnapshot,
     RankSourceRefresh,
     SOURCE_ALL,
+    SOURCE_ANY,
     SOURCE_CHOICES,
     SOURCE_HONGGUO,
     SOURCE_MAOYAN,
+    SOURCE_MUSIC,
     SOURCE_NETFLIX,
 )
 from . import douban
 from .hongguo import HongguoSource
 from .maoyan import MaoyanSource
+from .music import MusicSource
 from .netflix import NetflixSource
 from . import page as page_ui
 
 
+# 每个数据源一把「正在抓取」锁：定时任务与手动刷新撞在一起时，只让一路真正抓，
+# 另一路立刻返回「正在刷新」。否则两轮抓取会同时打上游、并发写同一份快照，
+# 后写完的覆盖先写完的（表现为抓到一半的榜单被另一轮覆盖掉）。
+_REFRESH_LOCKS: Dict[str, threading.Lock] = {}
+_REFRESH_LOCKS_GUARD = threading.Lock()
+# douban_rating 共享缓存的读改写互斥：/rating 并发请求各自读整份 dict 再写回，
+# 不加锁时后写的那份会把别的请求刚查到的评分覆盖掉
+_RATING_CACHE_LOCK = threading.Lock()
+
+
+def _refresh_lock(source_id: str) -> threading.Lock:
+    """取数据源对应的抓取锁（首次访问时创建）。"""
+    with _REFRESH_LOCKS_GUARD:
+        lock = _REFRESH_LOCKS.get(source_id)
+        if lock is None:
+            lock = threading.Lock()
+            _REFRESH_LOCKS[source_id] = lock
+        return lock
+
+
 class GlobalRankPro(_PluginBase):
-    """全球影视榜单：猫眼 + Netflix + 红果短剧三数据源，统一接口对外提供。"""
+    """全球影视音乐榜：猫眼 + Netflix + 红果短剧 + 音乐四数据源，统一接口对外提供。"""
 
     # 插件名称
-    plugin_name = "全球影视榜单"
+    plugin_name = "全球影视音乐榜"
     # 插件描述
-    plugin_desc = ("整合猫眼、Netflix 与红果短剧榜单，提供统一的榜单接口与"
+    plugin_desc = ("整合猫眼、Netflix、红果短剧与音乐榜单，提供统一的榜单接口与"
                    "推荐页数据源。")
     # 插件图标
     plugin_icon = ("https://raw.githubusercontent.com/KingNuoNuo/"
                    "MoviePilot-Plugins/main/icons/globalrank.png")
     # 插件版本
-    plugin_version = "1.4.6"
+    plugin_version = "1.5.2"
     # 插件作者
     plugin_author = "KingNuoNuo"
     # 作者主页
@@ -84,6 +111,7 @@ class GlobalRankPro(_PluginBase):
             SOURCE_MAOYAN: MaoyanSource(self),
             SOURCE_NETFLIX: NetflixSource(self),
             SOURCE_HONGGUO: HongguoSource(self),
+            SOURCE_MUSIC: MusicSource(self),
         }
         # 下载/订阅链：猫眼自动订阅用，Netflix / 红果不用，但代理层统一暴露
         self.downloadchain = None
@@ -123,35 +151,40 @@ class GlobalRankPro(_PluginBase):
             self.del_data("douban_rating")
             self._clear = False
             self.__update_config()
-            logger.info("全球影视榜单数据清理完成")
+            logger.info("全球影视音乐榜数据清理完成")
 
         enabled_sources = [s for s in self.sources.values() if s.enabled]
         # 推荐页数据源同样依赖定时抓取（推荐页读的是榜单快照）
         if self._enabled or self._recommend_enabled or self._onlyonce:
             if not enabled_sources:
-                logger.warning("全球影视榜单未启用任何数据源，跳过定时任务")
+                logger.warning("全球影视音乐榜未启用任何数据源，跳过定时任务")
+                # 「立即运行一次」必须先消掉再退出：留着它，每次宿主重启都会
+                # 再走一遍这条分支，配置里也永远显示「立即运行一次」没生效
+                if self._onlyonce:
+                    self._onlyonce = False
+                    self.__update_config()
                 return
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
             job_names = "、".join(s.source_name for s in enabled_sources)
             if self._cron:
-                logger.info(f"全球影视榜单服务启动，周期：{self._cron}（{job_names}）")
+                logger.info(f"全球影视音乐榜服务启动，周期：{self._cron}（{job_names}）")
                 try:
                     self._scheduler.add_job(
                         func=self.__refresh_all,
                         trigger=CronTrigger.from_crontab(self._cron),
-                        name="全球影视榜单")
+                        name="全球影视音乐榜")
                 except Exception as e:
-                    logger.error(f"全球影视榜单服务启动失败，错误信息：{str(e)}")
-                    self.systemmessage.put(f"全球影视榜单服务启动失败，错误信息：{str(e)}")
+                    logger.error(f"全球影视音乐榜服务启动失败，错误信息：{str(e)}")
+                    self.systemmessage.put(f"全球影视音乐榜服务启动失败，错误信息：{str(e)}")
             else:
                 self._scheduler.add_job(
                     func=self.__refresh_all,
                     trigger=CronTrigger.from_crontab("0 9 * * *"),
-                    name="全球影视榜单")
-                logger.info("全球影视榜单服务启动，周期：每天 09:00")
+                    name="全球影视音乐榜")
+                logger.info("全球影视音乐榜服务启动，周期：每天 09:00")
 
             if self._onlyonce:
-                logger.info("全球影视榜单服务启动，立即运行一次")
+                logger.info("全球影视音乐榜服务启动，立即运行一次")
                 self._scheduler.add_job(
                     func=self.__refresh_all, trigger='date',
                     run_date=datetime.datetime.now(
@@ -241,6 +274,13 @@ class GlobalRankPro(_PluginBase):
                 'hongguo_boards': list(getattr(hongguo, '_boards', [])),
                 'hongguo_limit': int(getattr(hongguo, '_limit', 0) or 0),
             })
+        music = self.sources.get(SOURCE_MUSIC)
+        if music is not None:
+            config.update({
+                'music_enabled': music.enabled,
+                'music_boards': list(getattr(music, '_boards', [])),
+                'music_limit': int(getattr(music, '_limit', 0) or 0),
+            })
         return config
 
     def __update_config(self) -> None:
@@ -268,18 +308,28 @@ class GlobalRankPro(_PluginBase):
                 elapsed = time.time() - float(last)
             except (TypeError, ValueError):
                 elapsed = None
-            if elapsed is not None and 0 <= elapsed < _MIN_REFRESH_INTERVAL:
-                hours = _MIN_REFRESH_INTERVAL / 3600
+            if elapsed is not None and 0 <= elapsed < self._MIN_REFRESH_INTERVAL:
+                hours = self._MIN_REFRESH_INTERVAL / 3600
                 return RankSourceRefresh(
                     source=source_id,
                     refreshed=False,
                     message=f"距上次抓取不足 {hours:.0f} 小时，跳过（定时保护）")
+        # 同一数据源同时只允许一路抓取：并发重复抓不只是白打上游，两轮还会
+        # 各写一次快照，后完成的把先完成的覆盖掉
+        lock = _refresh_lock(source_id)
+        if not lock.acquire(blocking=False):
+            logger.info(f"{source.source_name}正在刷新中，本次跳过")
+            return RankSourceRefresh(
+                source=source_id, refreshed=False,
+                message="正在刷新中，本次跳过")
         try:
             result = source.fetch() or {}
         except Exception as e:
             logger.error(f"{source.source_name}刷新失败：{e}")
             return RankSourceRefresh(
                 source=source_id, message=f"刷新失败：{e}")
+        finally:
+            lock.release()
         board_count = int(result.get("board_count") or 0)
         item_count = int(result.get("item_count") or 0)
         if board_count:
@@ -301,9 +351,22 @@ class GlobalRankPro(_PluginBase):
         )
 
     def __refresh_all(self) -> RankRefreshResult:
-        """按顺序抓取全部已启用数据源（定时任务入口，带 4 小时最小间隔保护）。"""
-        results = [self.__refresh_source(sid, force=False)
-                   for sid, s in self.sources.items() if s.enabled]
+        """按顺序抓取全部已启用数据源（定时任务入口，带 4 小时最小间隔保护）。
+
+        定时任务里抛异常不会有人看见：APScheduler 只会记一条 warning，插件日志
+        里一片空白，看起来像「定时任务没跑」。所以这里兜住整轮异常，逐源记账 ——
+        单个数据源出问题不影响其余数据源继续抓取。
+        """
+        results: List[RankSourceRefresh] = []
+        for sid, src in self.sources.items():
+            if not src.enabled:
+                continue
+            try:
+                results.append(self.__refresh_source(sid, force=False))
+            except Exception as e:
+                logger.error(f"{src.source_name}定时刷新异常：{e}")
+                results.append(RankSourceRefresh(
+                    source=sid, message=f"刷新异常：{e}"))
         return self.__aggregate(results)
 
     def __backfill_ratings(self, rates: Dict[str, str]) -> None:
@@ -344,6 +407,11 @@ class GlobalRankPro(_PluginBase):
                 if not isinstance(snapshot, dict) \
                         or not isinstance(snapshot.get("boards"), list):
                     continue
+                # 乐观并发控制：读完到写回之间（双方都可能跑几秒）定时抓取
+                # 可能刚好写完一份新快照，直接覆盖会把整轮新数据退回旧版本。
+                # 快照自带 updated_at，写前发现它变了就放弃本次回写 ——
+                # 评分只差这一轮，下次 /rating 会再补，丢整份榜单不可接受。
+                stamp = str(snapshot.get("updated_at") or "")
                 snap_dirty = False
                 for board in snapshot["boards"]:
                     if not isinstance(board, dict):
@@ -360,7 +428,15 @@ class GlobalRankPro(_PluginBase):
                             item["vote_average"] = rates[tc]
                             snap_dirty = True
                 if snap_dirty:
-                    self.save_data(f"{source_id}_snapshot", snapshot)
+                    latest = self.get_data(f"{source_id}_snapshot")
+                    latest_stamp = (str(latest.get("updated_at") or "")
+                                    if isinstance(latest, dict) else "")
+                    if latest_stamp != stamp:
+                        logger.info(
+                            f"评分回写 {source_id} 快照跳过：期间已有新一轮抓取"
+                            f"（{stamp or '无'} → {latest_stamp or '无'}）")
+                    else:
+                        self.save_data(f"{source_id}_snapshot", snapshot)
             except Exception as exc:
                 logger.warning(f"评分回写 {source_id} 快照失败：{exc}")
 
@@ -400,7 +476,7 @@ class GlobalRankPro(_PluginBase):
                 "endpoint": self.get_rank_snapshot,
                 "methods": ["GET"],
                 "auth": "bear",
-                "summary": "全球影视榜单快照",
+                "summary": "全球影视音乐榜快照",
                 "description": "返回最近一次抓取的榜单快照：source 选数据源"
                                "（maoyan/netflix/hongguo/all），board_type 按源语义过滤"
                                "（猫眼为榜单类型，Netflix 为地区代码，红果为榜单代码）",
@@ -411,7 +487,7 @@ class GlobalRankPro(_PluginBase):
                 "endpoint": self.rank_list,
                 "methods": ["GET"],
                 "auth": "bear",
-                "summary": "全球影视榜单列表",
+                "summary": "全球影视音乐榜列表",
                 "description": "供宿主推荐页与浏览页消费的榜单列表，返回统一的媒体信息结构",
                 "response_model": schemas.Response[List[schemas.MediaInfo]],
             },
@@ -433,7 +509,7 @@ class GlobalRankPro(_PluginBase):
                 "summary": "按标题批量查豆瓣评分",
                 "description": "q 为 JSON 数组 [{\"t\":标题,\"y\":年份,\"k\":类型}]，"
                                "返回 rates（标题 → 豆瓣评分）。命中持久缓存的立即返回，"
-                               "未命中的按 budget 限量去豆瓣检索（每条 2 个请求，约 0.8s）。",
+                               "未命中的按 budget 限量去豆瓣检索（每条 1 个请求，全局 1.2s 间隔）。",
                 "response_model": schemas.Response[DoubanRatingResult],
             },
             {
@@ -451,9 +527,13 @@ class GlobalRankPro(_PluginBase):
 
     @staticmethod
     def __resolve_sources(source: str) -> List[str]:
-        """把 source 参数展开成数据源列表（非法值按全部处理）。"""
+        """把 source 参数展开成数据源列表（非法值按全部处理）。
+
+        ``music`` 可显式请求但不进 ``all``：它不在 [SOURCE_CHOICES] 里，
+        所以这里用 [SOURCE_ANY] 判断，``all`` 仍然只展开三个影视源。
+        """
         key = (source or SOURCE_ALL).strip().lower()
-        if key in SOURCE_CHOICES:
+        if key in SOURCE_ANY:
             return [key]
         return list(SOURCE_CHOICES)
 
@@ -472,11 +552,14 @@ class GlobalRankPro(_PluginBase):
         """
         返回统一榜单快照。
 
-        :param source: 数据源，``maoyan`` / ``netflix`` / ``hongguo`` / ``all``（默认 all）
+        :param source: 数据源，``maoyan`` / ``netflix`` / ``hongguo`` / ``music`` /
+                       ``all``（默认 all，不含 music）
         :param board_type: 榜单类型，逗号分隔多值；猫眼取 type（movie/web-all/total/
                            year/global/web-movie/zongyi），Netflix 取地区代码
                            （global/hk/tw/jp/kr/sg），红果取榜单代码
-                           （hot/real/comic/ai），all 下各源各自匹配
+                           （hot/real/comic/ai），音乐取平台代码
+                           （netease/qq/apple）或完整榜代码（netease_hot），
+                           all 下各源各自匹配
         :param kind: 内容类型，``film`` / ``tv``（仅 Netflix 生效）
         :param limit: 每个榜单最多返回的条目数
         :param board: 榜单名包含该关键字（仅猫眼生效）
@@ -524,9 +607,16 @@ class GlobalRankPro(_PluginBase):
                             b for b in src.rank_boards(board_type=other,
                                                        kind=kind, limit=limit)
                             if b.board not in seen)
-            else:
+            elif source_id == SOURCE_HONGGUO:
                 # 红果：board_type 是榜单代码（hot/real/comic/ai），多值逐个取；
                 # 不传时 rank_boards 直接返回快照里的全部榜单
+                batches = []
+                for one in (wanted_types or [None]):
+                    batches.extend(src.rank_boards(board_type=one, limit=limit))
+            else:
+                # 音乐：board_type 是平台代码（netease/qq/apple）或完整榜代码
+                # （netease_hot / qq_soaring / apple_most-played），多值逐个取；
+                # 不传时返回三家全部分榜
                 batches = []
                 for one in (wanted_types or [None]):
                     batches.extend(src.rank_boards(board_type=one, limit=limit))
@@ -560,21 +650,27 @@ class GlobalRankPro(_PluginBase):
         """
         推荐页/浏览页使用的榜单列表接口（内部转发到对应数据源）。
 
-        :param source: 数据源，``maoyan``（默认，保持旧接口语义）/ ``netflix`` / ``hongguo``
+        :param source: 数据源，``maoyan``（默认，保持旧接口语义）/ ``netflix`` /
+                       ``hongguo`` / ``music``（音乐榜恒返回空列表，见下）
         :param board_type: 猫眼为榜单类型（默认 web-all），Netflix 为地区（默认 global），
-                           红果为榜单代码（默认返回全部已抓取榜单）
+                           红果为榜单代码（默认返回全部已抓取榜单），
+                           音乐为平台代码（默认返回三家全部分榜）
         :param kind: 内容类型（仅 Netflix：film/tv）
         :param page: 页码（仅猫眼平台细分榜编组时有效）
         :param limit: 返回条目上限
         :param platform: 猫眼 platformType
         :param request: 宿主注入的请求对象，用于把海报地址拼成客户端真正能连上的地址
+
+        ⚠️ 音乐条目在宿主媒体库里没有对应对象（不做识别），塞进
+        ``RecommendMediaSource`` 只会得到对不上的空卡片，所以音乐榜**不进推荐页**，
+        ``source=music`` 在这里恒返回空列表 —— 它只服务 App 的榜单页。
         """
         source_id = (source or SOURCE_MAOYAN).strip().lower()
         src = self.sources.get(source_id)
         if src is None:
             return schemas.Response(
                 success=False,
-                message=f"未知数据源：{source}，可选 maoyan/netflix/hongguo",
+                message=f"未知数据源：{source}，可选 maoyan/netflix/hongguo/music",
                 data=[])
         if not src.enabled:
             return schemas.Response(
@@ -641,7 +737,7 @@ class GlobalRankPro(_PluginBase):
         - 命中插件持久缓存（``douban_rating``，30 天有效 / 未开分 3 天）立刻返回，
           不发任何外部请求；
         - 未命中的按 ``budget`` 限量去豆瓣检索。豆瓣检索**一条 = 1 个请求**、
-          全局 0.35s 节流，所以单次 12 条约 4s；超出的条目留在下次搜索时再补
+          全局 1.2s 间隔串行，所以单次 12 条约 15s；超出的条目留在下次搜索时再补
           —— 缓存是持久的，补过的不会再花钱。
 
         :param q: JSON 数组，每项 ``{"t": 标题, "y": 年份, "k": 类型}``（后两项可省）
@@ -671,9 +767,9 @@ class GlobalRankPro(_PluginBase):
             cache = {}
         now_ts = datetime.datetime.now().timestamp()
         rates: Dict[str, str] = {}
+        updates: Dict[str, Dict[str, Any]] = {}
         cached = 0
         used = 0
-        changed = False
         for row in wanted[:40]:
             if not isinstance(row, dict):
                 continue
@@ -708,15 +804,27 @@ class GlobalRankPro(_PluginBase):
             rate = str(info.get("rate") or "")
             douban.recent_put(key, rate)
             if rate or douban.miss_cacheable():
-                cache[key] = {"vote_average": rate,
-                              "rating_ts": now_ts,
-                              "rating_ver": douban.RATING_VER if rate else douban.MISS_RATING_VER}
-                changed = True
+                updates[key] = {
+                    "vote_average": rate,
+                    "rating_ts": now_ts,
+                    "rating_ver": (douban.RATING_VER if rate
+                                   else douban.MISS_RATING_VER),
+                }
             if rate:
                 rates[title] = rate
 
-        if changed:
-            self.save_data("douban_rating", cache)
+        if updates:
+            # 只把本轮新增的条目并进「当前最新」的缓存再整体写回：整份 dict
+            # 读-改-写会用本轮开始时读到的旧副本覆盖别的请求刚写进去的评分
+            #（App 同屏会并发打多个 /rating，实测一次浏览就是十几并发）
+            with _RATING_CACHE_LOCK:
+                latest = self.get_data("douban_rating")
+                if not isinstance(latest, dict):
+                    latest = {}
+                latest.update(updates)
+                # 过期条目顺手清掉，避免缓存无上限增长（每条都带 30 天 TTL）
+                douban.prune_cache(latest, now_ts)
+                self.save_data("douban_rating", latest)
         if rates:
             # 回写快照（v1.4.3 优化②）：App 进榜时对缺分条目查 /rating，查到的分
             # 只进 douban_rating 的话，快照里的 vote_average 还是空，App 每次进榜

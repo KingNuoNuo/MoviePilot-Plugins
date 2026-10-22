@@ -41,29 +41,34 @@ COUNTRIES_TSV = (
 
 
 def _recognize_factory():
-    """识别链打桩：按标题返回预置媒体信息。"""
+    """识别链打桩：按标题返回预置媒体信息。
+
+    宿主 ``MetaInfo`` 会对全大写英文标题做词形归一（``UNABOMBER`` →
+    ``Unabomber``），所以这里按大小写不敏感查表，避免与宿主版本绑死。
+    """
+    mapping = {
+        "UNABOMBER": SimpleNamespace(
+            media_source=SimpleNamespace(value="themoviedb"),
+            media_id="1586199", title="炸弹追缉令", year="2026",
+            overview="改编自真实案件", tmdb_info={
+                "release_date": "2026-09-25"},
+            get_poster_image=lambda: "https://image.tmdb.org/t/p/w500/u.jpg"),
+        "Wednesday": SimpleNamespace(
+            media_source=SimpleNamespace(value="themoviedb"),
+            media_id="119460", title="星期三", year="2025",
+            overview="亚当斯一家的女儿", tmdb_info={
+                "first_air_date": "2025-09-03"},
+            get_poster_image=lambda: "https://image.tmdb.org/t/p/w500/w.jpg"),
+        "KPop Demon Hunters": SimpleNamespace(
+            media_source=SimpleNamespace(value="themoviedb"),
+            media_id="1123030", title="K-POP 猎魔女团", year="2025",
+            overview="", tmdb_info={},
+            get_poster_image=lambda: ""),
+    }
+    lowered = {k.lower(): v for k, v in mapping.items()}
 
     def recognize(meta, mtype, cache=True):
-        mapping = {
-            "UNABOMBER": SimpleNamespace(
-                media_source=SimpleNamespace(value="themoviedb"),
-                media_id="1586199", title="炸弹追缉令", year="2026",
-                overview="改编自真实案件", tmdb_info={
-                    "release_date": "2026-09-25"},
-                get_poster_image=lambda: "https://image.tmdb.org/t/p/w500/u.jpg"),
-            "Wednesday": SimpleNamespace(
-                media_source=SimpleNamespace(value="themoviedb"),
-                media_id="119460", title="星期三", year="2025",
-                overview="亚当斯一家的女儿", tmdb_info={
-                    "first_air_date": "2025-09-03"},
-                get_poster_image=lambda: "https://image.tmdb.org/t/p/w500/w.jpg"),
-            "KPop Demon Hunters": SimpleNamespace(
-                media_source=SimpleNamespace(value="themoviedb"),
-                media_id="1123030", title="K-POP 猎魔女团", year="2025",
-                overview="", tmdb_info={},
-                get_poster_image=lambda: ""),
-        }
-        return mapping.get(meta.name)
+        return lowered.get(str(getattr(meta, "name", "") or "").lower())
 
     return SimpleNamespace(recognize_media=recognize)
 

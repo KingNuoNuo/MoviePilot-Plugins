@@ -14,6 +14,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -210,8 +211,9 @@ def test_get_api_declares_enveloped_typed_responses(plugin):
     apis = {api["path"]: api for api in plugin.get_api()}
 
     # /poster 回的是图片字节，不套信封，单独在下一个用例里校验
-    assert set(apis) == {"/rank", "/rank-list", "/refresh", "/poster"}
-    for path in ("/rank", "/rank-list", "/refresh"):
+    assert set(apis) == {"/rank", "/rank-list", "/refresh", "/rating",
+                         "/poster"}
+    for path in ("/rank", "/rank-list", "/refresh", "/rating"):
         api = apis[path]
         assert api["response_model"] is not None, f"{path} 未声明响应模型"
         assert api["auth"] == "bear", f"{path} 未声明 bear 认证"
@@ -436,8 +438,14 @@ def test_rank_list_proxies_hongguo_poster(monkeypatch):
 
     assert poster.startswith(
         "http://mp.example.com/api/v1/plugin/GlobalRankPro/poster?u=")
-    # 原图地址整体 urlencode 进 u 参数，客户端不再直接连字节 CDN
-    assert "ecombdimg.com" not in poster
+    # 原图地址整体 urlencode 进 u 参数：客户端只连插件，原图域名只作为参数存在。
+    # （不能直接断言「域名不出现在串里」—— urlencode 不转义字母和点，
+    #  ecombdimg.com 这几个字符必然原样留在 u 参数中。）
+    parsed = urlparse(poster)
+    assert parsed.netloc == "mp.example.com"
+    original = parse_qs(parsed.query)["u"][0]
+    assert original.startswith("http")
+    assert "ecombdimg.com" in original
     assert "~tplv-shrink%3A1080%3A0.image" in poster
 
 
@@ -672,10 +680,10 @@ def test_data_keys_are_isolated_between_sources(plugin):
     assert plugin.sources[SOURCE_MAOYAN].get_data("snapshot") == {"marker": "m"}
     assert plugin.sources[SOURCE_NETFLIX].get_data("snapshot") == {"marker": "n"}
     assert plugin.sources[SOURCE_HONGGUO].get_data("snapshot") == {"marker": "h"}
-    # 直接看宿主侧真实键名
-    assert plugin._data[f"{SOURCE_MAOYAN}_snapshot"] == {"marker": "m"}
-    assert plugin._data[f"{SOURCE_NETFLIX}_snapshot"] == {"marker": "n"}
-    assert plugin._data[f"{SOURCE_HONGGUO}_snapshot"] == {"marker": "h"}
+    # 直接看宿主侧真实键名（插件不再自持 _data 字典，全部落到宿主 plugindata）
+    assert plugin.get_data(f"{SOURCE_MAOYAN}_snapshot") == {"marker": "m"}
+    assert plugin.get_data(f"{SOURCE_NETFLIX}_snapshot") == {"marker": "n"}
+    assert plugin.get_data(f"{SOURCE_HONGGUO}_snapshot") == {"marker": "h"}
 
 
 def test_serialize_config_round_trips(plugin):

@@ -51,12 +51,17 @@ _MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
 _SEARCH_DEAD_COOLDOWN = 1800.0
 _REFERER = "https://m.douban.com/"
 
-# 请求间隔：连打会被拦（表现为返回空 / 抛异常），0.35s 实测稳定
+# 请求间隔：连打会被拦（表现为返回空 / 抛异常）；0.35s 会触发瞬时限流，1.2s 实测稳定
 _REQUEST_INTERVAL = 1.2
 # CookieCloud 取豆瓣 Cookie 的缓存时长（秒）；浏览器重新同步即生效，插件不用重启
 _COOKIE_TTL = 6 * 3600
+# 取 Cookie 失败的短期重试间隔：CookieCloud 服务/网络偶发抽风时不能一失败就
+# 6 小时不带 Cookie 跑（豆瓣匿名通道早被封，等于 6 小时查分全灭）
+_COOKIE_RETRY = 300.0
 _cookie_cache: Optional[str] = None
 _cookie_ts = 0.0
+# 并发线程同时发现 Cookie 过期时只让一个去下载（下载的是 800KB 的整包）
+_COOKIE_LOCK = threading.Lock()
 # 熔断冷却：一旦某次请求抛异常、或连续多次拿到空结果，这段时间内不再打豆瓣
 # v1.4.0：600→120 —— 榜单场景全是当年新片，「豆瓣真搜不到」的连空是常态不是限流，
 # 熔断 10 分钟会把能查到的片也一并断粮；120s 够穿过一次豆瓣的短暂拦截窗口
@@ -163,30 +168,51 @@ def _douban_cookie() -> str:
     豆瓣对匿名爬取的封锁越来越狠（403 / 400 / 「有异常请求请登录」页），带登录态
     的请求走的是另一套宽容得多的配额。Cookie 数据 6 小时刷新一次 —— 浏览器那边
     重新同步 CookieCloud 即可生效，插件不用重启。
+
+    ⚠️ 两处细节：
+    - 取 Cookie 是整包下载（实测 800KB 级），必须在豆瓣请求的限流锁**外面**做，
+      否则一次下载就把所有豆瓣查询堵在后面；
+    - 失败只冷却 [_COOKIE_RETRY]（5 分钟），成功才按 [_COOKIE_TTL] 缓存 —— 早先
+      失败也按 6 小时记，CookieCloud 抖一下就有 6 小时全部匿名请求。
     """
     global _cookie_cache, _cookie_ts
     now = time.time()
-    if now - _cookie_ts < _COOKIE_TTL and _cookie_cache is not None:
+    ttl = _COOKIE_TTL if _cookie_cache else _COOKIE_RETRY
+    if _cookie_cache is not None and now - _cookie_ts < ttl:
         return _cookie_cache
-    _cookie_ts = now
-    _cookie_cache = ""
+    if not _COOKIE_LOCK.acquire(blocking=False):
+        # 另一个线程正在取，本次先用上一次的结果（可能是空，下一轮自然补上）
+        return _cookie_cache or ""
     try:
-        from app.helper.cookiecloud import CookieCloudHelper
-        data, err = CookieCloudHelper().download()
-        # data = {域名: 已拼好的 Cookie 字符串}；key 可能带端口等后缀，模糊匹配
-        cookie = ""
-        for domain, value in (data or {}).items():
-            if "douban.com" in str(domain) and isinstance(value, str) and value.strip():
-                cookie = value.strip()
-                break
-        if err:
-            logger.info(f"CookieCloud 未取到豆瓣 Cookie：{err}")
-        if cookie:
-            _cookie_cache = cookie
-            logger.info("CookieCloud 命中豆瓣 Cookie，豆瓣请求改走登录态")
-    except Exception as exc:
-        logger.info(f"CookieCloud 取豆瓣 Cookie 异常：{exc}")
-    return _cookie_cache
+        # 拿到锁后再判一次：等锁期间别的线程可能已经取好了
+        now = time.time()
+        ttl = _COOKIE_TTL if _cookie_cache else _COOKIE_RETRY
+        if _cookie_cache is not None and now - _cookie_ts < ttl:
+            return _cookie_cache
+        _cookie_ts = now
+        _cookie_cache = ""
+        try:
+            from app.helper.cookiecloud import CookieCloudHelper
+            data, err = CookieCloudHelper().download()
+            # data = {域名: 已拼好的 Cookie 字符串}；key 可能带端口等后缀，模糊匹配
+            cookie = ""
+            for domain, value in (data or {}).items():
+                if "douban.com" in str(domain) and isinstance(value, str) \
+                        and value.strip():
+                    cookie = value.strip()
+                    break
+            if err:
+                logger.info(f"CookieCloud 未取到豆瓣 Cookie：{err}")
+            if cookie:
+                _cookie_cache = cookie
+                logger.info("CookieCloud 命中豆瓣 Cookie，豆瓣请求改走登录态")
+            else:
+                logger.info("CookieCloud 无豆瓣 Cookie，先按匿名请求（5 分钟后再试）")
+        except Exception as exc:
+            logger.info(f"CookieCloud 取豆瓣 Cookie 异常：{exc}")
+        return _cookie_cache
+    finally:
+        _COOKIE_LOCK.release()
 
 
 def _get_json(url: str, params: Dict[str, Any]) -> Any:
@@ -200,14 +226,19 @@ def _get_json(url: str, params: Dict[str, Any]) -> Any:
     global _last_request_at, last_raw, last_status
     if is_blocked():
         return None
+    # Cookie 在锁外取：CookieCloud 下载是整包（800KB 级），放进限流锁会把
+    # 排在后面的豆瓣查询一起堵住；取 Cookie 本身也有自己的短锁
+    cookie = _douban_cookie()
     with _RATE_LOCK:
         gap = time.monotonic() - _last_request_at
         if gap < _REQUEST_INTERVAL:
             time.sleep(_REQUEST_INTERVAL - gap)
         _last_request_at = time.monotonic()
+        # 上一次请求的状态码不能留给本次判断：异常分支不会更新 status_code，
+        # 上一次的 403 会让调用方误判「/search 又被封了」
+        last_status = 0
         try:
             headers = {"User-Agent": random.choice(_UAS), "Referer": _REFERER}
-            cookie = _douban_cookie()
             if cookie:
                 headers["Cookie"] = cookie
             client = RequestUtils(
@@ -351,6 +382,7 @@ def _msearch_pick(keyword: str, prefer_tv: Optional[bool]) -> dict:
     返回的 sid 不知类型，交由 [_subject_rate] 按 movie/tv 各试一次。
     """
     global _last_request_at, last_raw
+    cookie = _douban_cookie()  # 与 _get_json 同理，取 Cookie 放在限流锁外面
     with _RATE_LOCK:
         gap = time.monotonic() - _last_request_at
         if gap < _REQUEST_INTERVAL:
@@ -358,7 +390,6 @@ def _msearch_pick(keyword: str, prefer_tv: Optional[bool]) -> dict:
         _last_request_at = time.monotonic()
         try:
             headers = {"User-Agent": _MOBILE_UA, "Referer": _REFERER}
-            cookie = _douban_cookie()
             if cookie:
                 headers["Cookie"] = cookie
             client = RequestUtils(
@@ -590,6 +621,28 @@ def miss_cacheable() -> bool:
     空缺来自「有候选但标题没对上」（m 站兜底的宁缺勿错校验），这才可信。
     """
     return _empty_streak == 0
+
+
+def prune_cache(cache: Dict[str, Any], now_ts: float) -> int:
+    """清掉超过最长有效期（[RATING_TTL]）的缓存条目，返回删除条数。
+
+    ``douban_rating`` 是按「标题|年份|类型」长期累积的：搜索结果里的片子几乎
+    不重复，条目只增不减（实测 300+ 条 / 40KB，写一次是整份覆盖）。这里按时间
+    淘汰老条目，容量随真实活跃片量收敛，不会无限长。
+    """
+    if not isinstance(cache, dict):
+        return 0
+    removed = 0
+    for key in list(cache.keys()):
+        entry = cache.get(key)
+        try:
+            ts = float((entry or {}).get("rating_ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        if ts <= 0 or now_ts - ts > RATING_TTL:
+            cache.pop(key, None)
+            removed += 1
+    return removed
 
 
 # ---------------- 近期结果 memo（防并发重复查豆瓣） ----------------

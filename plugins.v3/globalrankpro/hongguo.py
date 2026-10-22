@@ -102,6 +102,11 @@ _ARGS_RE = re.compile(r'''data-fn-args=(?:'([^']*)'|"([^"]*)")''', re.S)
 _POSTER_ALLOWED = (
     (".byteimg.com", ("/novel-pic/",)),
     (".ecombdimg.com", ("/obj/",)),
+    # Apple Music 专辑封面（音乐榜 apple 源）。宿主的图片代理白名单
+    # （SECURITY_IMAGE_DOMAINS）默认没有 mzstatic.com，而手机又连不上境外的
+    # mzstatic —— 代理被拒 + 直连不通 = 封面全空。这里让插件代为转发：
+    # 容器能出网、并且图片会落到本地盘缓存，一张只回源一次。
+    (".mzstatic.com", ("/image/",)),
 )
 # 进程内缓存：一屏 20 张、推荐页更多，翻页/回退会反复请求同一批图
 _POSTER_CACHE: "OrderedDict[str, Tuple[bytes, str]]" = OrderedDict()
@@ -244,6 +249,8 @@ def _safe_board_payload(board: dict, rows: List[Any]) -> Dict[str, Any]:
             "preview_url": str(row.get("preview_url") or ""),
             "media_source": str(row.get("media_source") or ""),
             "media_id": str(row.get("media_id") or ""),
+            # 红果不做媒体识别，恒空；字段与另两源对齐，App 端统一取值
+            "media_type": str(row.get("media_type") or ""),
             "poster": str(row.get("poster") or ""),
             "overview": str(row.get("overview") or ""),
             "year": str(row.get("year") or ""),
