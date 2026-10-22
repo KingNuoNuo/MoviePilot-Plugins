@@ -1,6 +1,6 @@
 # TgtoDrive STRM 同步（TgtoDriveSync）
 
-> [← 返回插件一览](../../README.md#插件一览) · 版本 v1.8.0 · 目录 `plugins/tgtodrivesync`
+> [← 返回插件一览](../../README.md#插件一览) · 版本 v1.8.1 · 目录 `plugins/tgtodrivesync`
 
 MoviePilot 整理入库（`TransferComplete` 事件）后，自动调用 **TgtoDrive 官方 OpenAPI**
 触发生成网盘 STRM，等待生成完成后**刷新全部已配置的媒体服务器**，并发送通知。

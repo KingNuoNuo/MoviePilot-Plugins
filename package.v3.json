@@ -3,7 +3,7 @@
     "name": "全球影视音乐榜",
     "description": "整合猫眼、Netflix、红果短剧与音乐榜单，提供统一的榜单接口与推荐页数据源。",
     "labels": "榜单",
-    "version": "1.5.2",
+    "version": "1.5.3",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/globalrank.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -11,6 +11,7 @@
     "release": false,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.5.3": "修复并发与缓存三处问题：① **豆瓣评分缓存三个写入方统一加锁** —— `/rating` 接口、猫眼榜单补分、Netflix 榜单补分共用同一个 `douban_rating` 键，此前只有 `/rating` 加锁，另两条的读-改-写跨度可达数分钟（一轮识别几十次网络请求），会用几分钟前的旧副本覆盖 App 刚查到的评分，表现为「明明查到了分，下次进榜又变空」且反复出现。现在补分写回前重读最新值、只并入本轮改动，与 `/rating` 共用同一把锁；顺带补上单条检索异常不再中断整轮补分。② **红果海报落盘改原子写**（临时文件 + `os.replace`）并加图片魔数校验 —— 此前 `img` 与 `meta` 分两次写，写到一半中断（进程被杀 / 磁盘满）会留下「两个文件都存在但图是半张」的组合，被当成有效缓存返回，还带 7 天 `Cache-Control` 发给所有客户端。③ 海报内存 LRU 加锁（`/poster` 匿名可访问，App 一屏十几张并发），并在回源时校验响应确为图片。",
       "v1.5.2": "插件改名「全球影视音乐榜」：v1.5.0 起已经并入音乐榜（网易云 / QQ音乐 / Apple Music 三家共 9 个分榜），原名「全球影视榜单」名不副实。插件 ID（GlobalRankPro）与全部接口路径、字段都不变，老版本可直接覆盖升级，宿主里已装实例的配置不受影响。另外详情页概览卡此前漏掉了音乐源——只列猫眼 / Netflix / 红果三行，现在补上音乐的榜数、条数、更新时间与独立刷新按钮，四源在页面上一眼齐平。",
       "v1.5.1": "音乐榜单条目新增 song_id / song_url（平台原生单曲 id 与该歌详情页地址），App 端据此做「去平台听」跳转：网易云走 orpheus://song/<id> 直达，QQ 与 Apple 走各自详情页（命中 App Links 即进 App）。⚠️ music.py 的 __safe_board_payload 是显式字段白名单，抓取端新增字段必须同步加进去，否则响应里字段在、值恒空。",
       "v1.5.0": "新增音乐榜单：网易云 / QQ音乐 / Apple Music 三家共 9 个分榜。前两家走站点 JSON 接口、Apple 走官方公开 Feed，均免登录免密钥；服务端抓取后落快照，App 只读快照、不直连这三家。条目新增 artist / album / duration / last_rank（last_rank 仅网易云提供）。⚠️ 音乐榜不进 source=all —— 九个分榜一次 300~600KB，塞进聚合接口会拖慢十几秒，必须显式 source=music。音乐条目不做媒体识别，也不注册到宿主推荐页。",
@@ -32,7 +33,7 @@
     "name": "媒体流播放",
     "description": "把已整理入库与下载目录里的视频按原始文件流式传给客户端播放（支持拖动进度）；支持 STRM 网盘直链播放：有 STRM 就优先 302 跳转（流量不过 NAS），默认替客户端解析容器名、跟随跳转到最终公网 CDN，内外网都能播。自动跟随宿主「目录配置」里的媒体库与下载路径，STRM 目录可跟随 TgtoDrive 插件。",
     "labels": "媒体库,播放",
-    "version": "1.5.7",
+    "version": "1.5.8",
     "icon": "https://raw.githubusercontent.com/KingNuoNuo/MoviePilot-Plugins/main/icons/mediastream.png",
     "author": "KingNuoNuo",
     "author_url": "https://github.com/KingNuoNuo",
@@ -40,6 +41,7 @@
     "release": false,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.5.8": "性能与健壮性修复：① **`/strm-check` 快 2.5 倍** —— 放行根（媒体库 + 下载目录）由「每条路径各解析一次」改为「整个请求解析一次」。宿主 `systemconfig.get(\"Directories\")` 返回的是整份配置的深拷贝，100 条路径实测 169ms → 68ms，配置深拷贝 207 次 → 2 次。目录配置仍是实时读取，宿主改完路径即刻生效（未引入跨请求缓存）。② **修两处缓存失效漏洞** —— STRM 目录索引在挂载抖动重建出空表时沿用旧索引、却没刷新时间戳，导致 TTL 恒判定过期，**每个请求都要全树扫一遍**（现场 981 目录 / 33559 文件，单次 0.05~0.17s）；「跟随 TgtoDrive」读配置失败时同理，会让每个请求都读一次宿主配置库。现在两处都按失败/沿用分支刷新时间戳（失败侧用 10 秒短间隔）。③ **下载目录扫描支持符号链接文件** —— rclone / 部分 NAS 挂载会把文件暴露成 symlink，此前用 `is_file(follow_symlinks=False)` 过滤，这些文件一个都扫不到，客户端据此把刚下完的片子显示成「已删除」；目录侧仍不跟随（避免挂载环路）。④ 三个开关统一布尔解析 —— 配置被手工改库或从旧版迁移上来时，`\"false\"` 与 `0` 此前分别被 `bool()` / `is not False` 判成「开」，会让「跟随 TgtoDrive」意外打开、「替客户端解析直链」关不掉。⑤ **日志脱敏** —— `requests` 的异常 message 必然包含完整 URL，而网盘直链的 `sign` / `token` 就在 query 里，解析失败时不再把直链打进日志（只留 host 与路径、参数名保留值打码）。⑥ `/strm-check` 单次条数封顶 200（此前畸形请求几千条能把单 worker 挂到分钟级），起播测试缓存封顶 2 万条（此前只判 TTL 从不删除）。",
       "v1.1.0": "新增 `GET /season?path=<媒体库内某个视频的绝对路径>`：**返回同一季还有哪些集**，供客户端拼选集。为什么由服务端给：客户端只能从宿主整理记录里拼（`/history/transfer` 只保留最近几天），而逐集下载时每集是独立种子、没有共同的 `download_hash` —— 两头都会漏集。本接口直接扫这个文件**所在的那一个目录**（不递归、不跨目录，宿主整理规则默认「剧名/Season 2/」，同一季必定同目录），按「剧名主干 + 季号」认亲：文件名先抹掉 `S02E05` / `EP05` / `第5集` 及其后的规格（2160p / WEB-DL / 字幕组），只保留字母数字与汉字再比，所以 `某剧.S02E05.2160p.WEB-DL.mkv` 与 `某剧 第05集.mkv` 都能落到 `某剧`。同一集有多个版本时按集号去重（正在播的那份优先，否则留体积最大的）。认不出集号的（电影/花絮）只回它自己。路径校验与 `/stream` 同一套：realpath 归一 + 媒体库根前缀比较 + 扩展名白名单，符号链接逃出媒体库的也挡。另外，设置页与详情页顶部新增 App 推荐卡（官方 logo + 下载入口），与另外三个插件共用同一份实现。",
       "v1.0.2": "新增 HEAD 支持：`/stream` 之前只注册了 GET，宿主路由对外部播放器/下载器的 HEAD 探测回 405。现在 `methods` 里显式带上 HEAD，HEAD 请求只回响应头（`Content-Type`、`Content-Length`、`Accept-Ranges: bytes`），不打开文件读数据、也不回文件体；鉴权、路径白名单、扩展名白名单与 GET 完全一致（越权依旧 403、文件不存在依旧 404）。GET 行为不变，Range 拖动照旧。App 侧新增的「用系统播放器打开」就是靠本机中转转发这条流（token 只在 App 内存里，不进 URL）。",
       "v1.0.1": "修复：未实现基类的抽象方法 `stop_service`（本插件没有后台任务要停，但 `_PluginBase` 把它列成了抽象方法），宿主加载时直接抛 `Can't instantiate abstract class MediaStreamPro without an implementation for abstract method 'stop_service'` → 插件装不上。**发版前必须照  `_PluginBase` 的六个抽象方法逐个对一遍**：`init_plugin` / `get_state` / `get_api` / `get_form` / `get_page` / `stop_service`，缺任何一个都是「安装成功但加载失败」，宿主 Web 端只会报一句「加载失败」，真实原因在日志里。此版本内容与 v1.0.0 完全相同，仅补这个方法。",

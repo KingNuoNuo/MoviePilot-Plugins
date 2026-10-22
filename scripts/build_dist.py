@@ -69,6 +69,18 @@ def rebuild_dist() -> None:
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
             add_dir(zf, plugin_dir, plugin_dir.name)
 
+    # v2 插件（plugins/ 下）同样各打一个单插件 zip。
+    # ⚠️ 此前这里只遍历 plugins.v3，v2 的 tgtodrivesync.zip 从不重建 ——
+    # README 的「打包产物」表里列着它，但内容一直停在上次手工打包的版本，
+    # 升号后 dist 里还是旧代码。
+    for plugin_dir in sorted((REPO / "plugins").iterdir()):
+        if not plugin_dir.is_dir() or plugin_dir.name.startswith("_"):
+            continue
+        out = DIST_DIR / f"{plugin_dir.name}.zip"
+        out.unlink(missing_ok=True)
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+            add_dir(zf, plugin_dir, plugin_dir.name)
+
     out = DIST_DIR / TOTAL_ZIP_NAME
     out.unlink(missing_ok=True)
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
