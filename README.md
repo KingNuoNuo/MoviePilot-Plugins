@@ -143,11 +143,11 @@ Add `https://github.com/KingNuoNuo/MoviePilot-Plugins` as a custom market source
 
 | 指标 | 近 14 天 |
 | --- | ---: |
-| 页面浏览量 | 31 |
-| 独立访客 | 21 |
-| 克隆次数 | 183 |
-| 独立克隆者 | 93 |
+| 页面浏览量 | 36 |
+| 独立访客 | 23 |
+| 克隆次数 | 194 |
+| 独立克隆者 | 98 |
 
-<sub>数据窗口 2026-11-07 ~ 2026-11-20 · 由 GitHub Actions 每日更新于 2026-11-21 · 来源：GitHub Traffic API（仅统计最近 14 天）</sub>
+<sub>数据窗口 2026-11-08 ~ 2026-11-21 · 由 GitHub Actions 每日更新于 2026-11-22 · 来源：GitHub Traffic API（仅统计最近 14 天）</sub>
 
 <!-- traffic:end -->
